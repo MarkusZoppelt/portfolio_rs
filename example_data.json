@@ -31,8 +31,7 @@
   },
   {
     "Name": "Cash",
-    "Ticker": "-",
-    "AssetClass": "CASH",
+    "AssetClass": "Cash",
     "Amount": 200
   }
 ]
