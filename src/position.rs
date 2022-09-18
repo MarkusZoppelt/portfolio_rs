@@ -46,13 +46,20 @@ pub mod portfolio_position {
             let last_spot = quote.last_quote().unwrap().close;
             position.update_price(last_spot);
             println!(
-                "{}: {} ({})",
+                "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
                 position.name,
-                position.last_spot * position.amount,
-                position.asset_class
+                position.asset_class,
+                position.amount,
+                format!("{:.2}", last_spot * position.amount)
             );
         } else {
-            println!("{}: {} ", position.name, position.amount);
+            println!(
+                "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
+                position.name,
+                "Cash",
+                position.amount,
+                format!("{:.2}", position.amount)
+            );
         }
     }
 }

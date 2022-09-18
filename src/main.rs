@@ -26,6 +26,12 @@ async fn main() {
         let filename = matches.value_of("FILE").expect("Cannot read file");
         let positions = from_file(filename);
 
+        println!(
+            "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
+            "Name", "Asset Class", "Amount", "Balance"
+        );
+        println!("====================================================================");
+
         // move tasks into the async closure passed to tokio::spawn()
         let tasks: Vec<_> = positions
             .into_iter()
