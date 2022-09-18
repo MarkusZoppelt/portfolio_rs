@@ -28,15 +28,13 @@ pub mod portfolio_position {
         let mut data = String::new();
         file.read_to_string(&mut data)
             .expect("something went wrong reading the file");
-        let json = serde_json::from_str::<Vec<PortfolioPosition>>(&data)
-            .expect("JSON was not well-formatted");
-        json
+        serde_json::from_str::<Vec<PortfolioPosition>>(&data).expect("JSON was not well-formatted")
     }
 
     // Get the latest price for a ticker
     async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooError> {
         yahoo::YahooConnector::new()
-            .get_latest_quotes(&ticker, "1d")
+            .get_latest_quotes(ticker, "1d")
             .await
     }
 
@@ -50,7 +48,7 @@ pub mod portfolio_position {
                 position.name,
                 position.asset_class,
                 position.amount,
-                format!("{:.2}", last_spot * position.amount)
+                format_args!("{:.2}", last_spot * position.amount)
             );
         } else {
             println!(
@@ -58,7 +56,7 @@ pub mod portfolio_position {
                 position.name,
                 "Cash",
                 position.amount,
-                format!("{:.2}", position.amount)
+                format_args!("{:.2}", position.amount)
             );
         }
     }
