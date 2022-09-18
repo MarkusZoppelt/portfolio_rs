@@ -1,0 +1,38 @@
+[
+  {
+    "Name": "S&P 500",
+    "Ticker": "SPY",
+    "AssetClass": "Stocks",
+    "Amount": 2
+  },
+  {
+    "Name": "US Treasury 20+yr",
+    "Ticker": "TLT",
+    "AssetClass": "Bonds",
+    "Amount": 4
+  },
+  {
+    "Name": "Commodities",
+    "Ticker": "GSG",
+    "AssetClass": "Commodities",
+    "Amount": 3
+  },
+  {
+    "Name": "Gold",
+    "Ticker": "GLD",
+    "AssetClass": "Gold",
+    "Amount": 1
+  },
+  {
+    "Name": "Bitcoin",
+    "Ticker": "BTC-USD",
+    "AssetClass": "Crypto",
+    "Amount": 0.01
+  },
+  {
+    "Name": "Cash",
+    "Ticker": "-",
+    "AssetClass": "CASH",
+    "Amount": 200
+  }
+]
