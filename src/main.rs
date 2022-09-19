@@ -1,8 +1,9 @@
-use crate::position::portfolio_position::from_file;
-use crate::position::portfolio_position::handle_position;
-use crate::position::portfolio_position::PortfolioPosition;
+use crate::portfolio::Portfolio;
+use crate::position::from_file;
+use crate::position::handle_position;
 use clap::{arg, Command};
 
+mod portfolio;
 mod position;
 
 fn cli() -> Command<'static> {
@@ -25,6 +26,9 @@ async fn main() {
 
     if let Some(matches) = matches.subcommand_matches("balances") {
         let filename = matches.value_of("FILE").expect("Cannot read file");
+
+        let mut portfolio = Portfolio::new();
+
         let positions = from_file(filename);
 
         println!(
@@ -37,31 +41,16 @@ async fn main() {
         let tasks: Vec<_> = positions
             .into_iter()
             .map(move |mut position| {
-                tokio::spawn(async move {
-                    return handle_position(&mut position).await;
-                })
+                tokio::spawn(async move { handle_position(&mut position).await })
             })
             .collect();
 
-        // create an empty list to collect the results
-        let mut results: Vec<PortfolioPosition> = Vec::new();
-        let mut sum = 0.0;
-
         for task in tasks {
-            // wait for the task to complete and add the result to the list
             let p = task.await.unwrap();
-            results.push(p);
-        }
-
-        for p in results {
-            if let Some(_ticker) = p.get_ticker() {
-                sum += p.get_balance();
-            } else {
-                sum += p.get_amount();
-            }
+            portfolio.add_position(p);
         }
 
         println!("====================================================================");
-        println!("Your total balance is: {:.2}", sum);
+        println!("Your total balance is: {:.2}", portfolio.get_total_value());
     }
 }
