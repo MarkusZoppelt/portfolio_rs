@@ -21,6 +21,18 @@ pub mod portfolio_position {
         fn update_price(&mut self, last_spot: f64) {
             self.last_spot = last_spot;
         }
+
+        pub fn get_balance(&self) -> f64 {
+            self.last_spot * self.amount
+        }
+
+        pub fn get_amount(&self) -> f64 {
+            self.amount
+        }
+
+        pub fn get_ticker(&self) -> Option<String> {
+            self.ticker.as_ref().map(|s| s.to_string())
+        }
     }
 
     pub fn from_file(filename: &str) -> Vec<PortfolioPosition> {
@@ -38,26 +50,30 @@ pub mod portfolio_position {
             .await
     }
 
-    pub async fn handle_position(position: &mut PortfolioPosition) {
+    pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosition {
         if let Some(ticker) = &position.ticker {
             let quote = get_quote_price(ticker).await.unwrap();
             let last_spot = quote.last_quote().unwrap().close;
             position.update_price(last_spot);
+            let balance = position.last_spot * position.amount;
+            let balance = format!("{:.2}", balance);
             println!(
                 "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
-                position.name,
-                position.asset_class,
-                position.amount,
-                format_args!("{:.2}", last_spot * position.amount)
+                position.name, position.asset_class, position.amount, balance
             );
         } else {
             println!(
                 "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
-                position.name,
-                "Cash",
-                position.amount,
-                format_args!("{:.2}", position.amount)
+                position.name, "Cash", position.amount, position.amount
             );
+        }
+
+        PortfolioPosition {
+            name: position.name.clone(),
+            ticker: position.ticker.clone(),
+            asset_class: position.asset_class.clone(),
+            amount: position.amount,
+            last_spot: position.last_spot,
         }
     }
 }
