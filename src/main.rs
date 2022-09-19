@@ -1,5 +1,6 @@
 use crate::position::portfolio_position::from_file;
 use crate::position::portfolio_position::handle_position;
+use crate::position::portfolio_position::PortfolioPosition;
 use clap::{arg, Command};
 
 mod position;
@@ -37,13 +38,30 @@ async fn main() {
             .into_iter()
             .map(move |mut position| {
                 tokio::spawn(async move {
-                    handle_position(&mut position).await;
+                    return handle_position(&mut position).await;
                 })
             })
             .collect();
 
+        // create an empty list to collect the results
+        let mut results: Vec<PortfolioPosition> = Vec::new();
+        let mut sum = 0.0;
+
         for task in tasks {
-            task.await.unwrap();
+            // wait for the task to complete and add the result to the list
+            let p = task.await.unwrap();
+            results.push(p);
         }
+
+        for p in results {
+            if let Some(_ticker) = p.get_ticker() {
+                sum += p.get_balance();
+            } else {
+                sum += p.get_amount();
+            }
+        }
+
+        println!("====================================================================");
+        println!("Your total balance is: {:.2}", sum);
     }
 }
