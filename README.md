@@ -1,4 +1,6 @@
-# portfolio_rs
+<p align="center">
+    <img src="img/logo.png" alt="portfolio_rs logo">
+</p>
 
 A command line tool for managing financial investment portfolios written in Rust.
 
