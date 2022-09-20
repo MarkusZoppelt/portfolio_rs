@@ -1,5 +1,6 @@
 <p align="center">
     <img src="img/logo.png" alt="portfolio_rs logo">
+    <img src="https://github.com/markuszoppelt/portfolio_rs/actions/workflows/rust.yml/badge.svg" alt="build status badge">
 </p>
 
 A command line tool for managing financial investment portfolios written in Rust.
