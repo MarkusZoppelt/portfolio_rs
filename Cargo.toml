@@ -2,7 +2,7 @@
 name = "portfolio_rs"
 description = "A command line tool for managing financial investment portfolios written in Rust."
 readme = "README.md"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT" 
 
