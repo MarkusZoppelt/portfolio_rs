@@ -18,6 +18,29 @@ fn cli() -> Command<'static> {
                 .arg(arg!(<FILE> "JSON file with your positions"))
                 .arg_required_else_help(true),
         )
+        .subcommand(
+            Command::new("allocation")
+                .about("Show the current allocation of your portfolio")
+                .arg(arg!(<FILE> "JSON file with your positions"))
+                .arg_required_else_help(true),
+        )
+}
+
+// returns a porfolio with the latest quotes from a json file
+async fn create_live_portfolio(filename: &str) -> Portfolio {
+    let positions = from_file(filename);
+    let mut portfolio = Portfolio::new();
+    // move tasks into the async closure passed to tokio::spawn()
+    let tasks: Vec<_> = positions
+        .into_iter()
+        .map(move |mut position| tokio::spawn(async move { handle_position(&mut position).await }))
+        .collect();
+
+    for task in tasks {
+        let p = task.await.unwrap();
+        portfolio.add_position(p);
+    }
+    portfolio
 }
 
 #[tokio::main]
@@ -26,31 +49,13 @@ async fn main() {
 
     if let Some(matches) = matches.subcommand_matches("balances") {
         let filename = matches.value_of("FILE").expect("Cannot read file");
+        let portfolio = create_live_portfolio(filename).await;
+        portfolio.print(true);
+    }
 
-        let mut portfolio = Portfolio::new();
-
-        let positions = from_file(filename);
-
-        println!(
-            "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
-            "Name", "Asset Class", "Amount", "Balance"
-        );
-        println!("====================================================================");
-
-        // move tasks into the async closure passed to tokio::spawn()
-        let tasks: Vec<_> = positions
-            .into_iter()
-            .map(move |mut position| {
-                tokio::spawn(async move { handle_position(&mut position).await })
-            })
-            .collect();
-
-        for task in tasks {
-            let p = task.await.unwrap();
-            portfolio.add_position(p);
-        }
-
-        println!("====================================================================");
-        println!("Your total balance is: {:.2}", portfolio.get_total_value());
+    if let Some(matches) = matches.subcommand_matches("allocation") {
+        let filename = matches.value_of("FILE").expect("Cannot read file");
+        let portfolio = create_live_portfolio(filename).await;
+        portfolio.print_allocation();
     }
 }

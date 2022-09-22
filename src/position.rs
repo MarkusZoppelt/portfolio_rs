@@ -20,16 +20,24 @@ impl PortfolioPosition {
         self.last_spot = last_spot;
     }
 
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn get_asset_class(&self) -> &str {
+        &self.asset_class
+    }
+
     pub fn get_balance(&self) -> f64 {
-        self.last_spot * self.amount
+        if let Some(_ticker) = &self.ticker {
+            self.last_spot * self.amount
+        } else {
+            self.amount
+        }
     }
 
     pub fn get_amount(&self) -> f64 {
         self.amount
-    }
-
-    pub fn get_ticker(&self) -> Option<String> {
-        self.ticker.as_ref().map(|s| s.to_string())
     }
 }
 
@@ -48,22 +56,13 @@ async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooE
         .await
 }
 
+// Get the latest price for a ticker and update the positionthen
+// then return the updated position as a new object
 pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosition {
     if let Some(ticker) = &position.ticker {
         let quote = get_quote_price(ticker).await.unwrap();
         let last_spot = quote.last_quote().unwrap().close;
         position.update_price(last_spot);
-        let balance = position.last_spot * position.amount;
-        let balance = format!("{:.2}", balance);
-        println!(
-            "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
-            position.name, position.asset_class, position.amount, balance
-        );
-    } else {
-        println!(
-            "{0: >26} | {1: >12} | {2: >10} | {3: >10}",
-            position.name, "Cash", position.amount, position.amount
-        );
     }
 
     PortfolioPosition {
