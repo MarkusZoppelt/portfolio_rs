@@ -56,6 +56,7 @@ async fn main() {
     if let Some(matches) = matches.subcommand_matches("allocation") {
         let filename = matches.value_of("FILE").expect("Cannot read file");
         let portfolio = create_live_portfolio(filename).await;
+        portfolio.draw_pie_chart();
         portfolio.print_allocation();
     }
 }

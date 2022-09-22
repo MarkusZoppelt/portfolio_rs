@@ -1,4 +1,5 @@
 use crate::position::PortfolioPosition;
+use piechart::{Chart, Color};
 use std::collections::HashMap;
 
 pub struct Portfolio {
@@ -75,10 +76,42 @@ impl Portfolio {
         let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
         allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
-        println!("{0: >12} | {1: >10}", "Asset Class", "Percentage");
         println!("====================================");
         for (asset_class, percentage) in allocation_vec {
             println!("{0: >12} | {1: >10.2}", asset_class, percentage);
         }
+    }
+
+    pub fn draw_pie_chart(&self) {
+        let mut data = vec![];
+
+        let colors = vec![
+            Color::Red,
+            Color::Green,
+            Color::Blue,
+            Color::Yellow,
+            Color::Cyan,
+            Color::White,
+            Color::Purple,
+            Color::Black,
+        ];
+
+        for (i, position) in self.positions.iter().enumerate() {
+            let name = position.get_name();
+            let balance = position.get_balance() as f32;
+
+            data.push(piechart::Data {
+                label: name.to_string(),
+                value: balance,
+                color: Some(colors[i % colors.len()].into()),
+                fill: '•',
+            });
+        }
+
+        Chart::new()
+            .legend(true)
+            .radius(9)
+            .aspect_ratio(3)
+            .draw(&data);
     }
 }
