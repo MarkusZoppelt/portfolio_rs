@@ -6,7 +6,7 @@ use yahoo_finance_api as yahoo;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortfolioPosition {
-    name: String,
+    name: Option<String>,
     ticker: Option<String>,
     asset_class: String,
     amount: f64,
@@ -21,7 +21,7 @@ impl PortfolioPosition {
     }
 
     pub fn get_name(&self) -> &str {
-        &self.name
+        self.name.as_ref().unwrap()
     }
 
     pub fn get_asset_class(&self) -> &str {
@@ -56,6 +56,18 @@ async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooE
         .await
 }
 
+// Try to get the short name for a ticker from Yahoo Finance
+async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
+    let connector = yahoo::YahooConnector::new();
+    let resp = connector.search_ticker(ticker).await.unwrap();
+
+    // use the first result
+    let item = resp.quotes.first();
+    let name = &item.unwrap().short_name;
+
+    Ok(name.to_string())
+}
+
 // Get the latest price for a ticker and update the positionthen
 // then return the updated position as a new object
 pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosition {
@@ -63,10 +75,19 @@ pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosit
         let quote = get_quote_price(ticker).await.unwrap();
         let last_spot = quote.last_quote().unwrap().close;
         position.update_price(last_spot);
+
+        // if no name was provided in the JSON, try to get it from Yahoo Finance
+        if position.name.is_none() {
+            let ticker = position.ticker.as_ref().unwrap();
+            let name = get_quote_name(ticker)
+                .await
+                .unwrap();
+            position.name = Some(name);
+        }
     }
 
     PortfolioPosition {
-        name: position.name.to_string(),
+        name: position.name.clone(),
         ticker: position.ticker.to_owned(),
         asset_class: position.asset_class.to_string(),
         amount: position.amount,

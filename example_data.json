@@ -1,24 +1,22 @@
 [
   {
-    "Name": "S&P 500",
     "Ticker": "SPY",
     "AssetClass": "Stocks",
     "Amount": 2
   },
   {
-    "Name": "US Treasury 20+yr",
+    "Name": "20+yr US Bonds",
     "Ticker": "TLT",
     "AssetClass": "Bonds",
     "Amount": 4
   },
   {
-    "Name": "Commodities",
+    "Name": "Diversified Commodities",
     "Ticker": "GSG",
     "AssetClass": "Commodities",
     "Amount": 3
   },
   {
-    "Name": "Gold",
     "Ticker": "GLD",
     "AssetClass": "Gold",
     "Amount": 1
