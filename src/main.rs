@@ -1,7 +1,9 @@
 use crate::portfolio::Portfolio;
 use crate::position::from_file;
 use crate::position::handle_position;
+use chrono::prelude::*;
 use clap::{arg, Command};
+use colored::*;
 
 mod portfolio;
 mod position;
@@ -81,11 +83,36 @@ async fn main() {
 
     if let Some(_matches) = matches.subcommand_matches("performance") {
         let db = sled::open("database").unwrap();
+        let portfolio = create_live_portfolio("example_data.json").await;
 
+        // for Yahoo, first of the year is Jan 3rd
+        let value_at_beginning_of_year = portfolio.get_historic_total_value().await;
+        let curr_year = Local::now().year();
+        let first_of_the_year = Utc
+            .ymd(curr_year, 1, 3)
+            .and_hms_milli(0, 0, 0, 0)
+            .to_string()
+            .replace(" UTC", "");
+        println!("{}: {:.2}", first_of_the_year, value_at_beginning_of_year);
+
+        // show all values from the database
         for elem in db.iter() {
             let (key, value) = elem.expect("DB error");
             let total_balance: f64 = String::from_utf8_lossy(&value).parse().unwrap();
             println!("{}: {:.2}", String::from_utf8_lossy(&key), total_balance);
+        }
+
+        // calculate performance
+        let last: f64 = String::from_utf8_lossy(&db.iter().last().unwrap().unwrap().1)
+            .parse()
+            .unwrap();
+        let performance = (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0;
+        if performance > 0.0 {
+            let s = format!("{:.2}%", performance).green();
+            println!("YTD performance: {}", s);
+        } else {
+            let s = format!("{:.2}%", performance).red();
+            println!("YTD performance: {}", s);
         }
     }
 }

@@ -1,3 +1,4 @@
+use chrono::prelude::*;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
@@ -22,6 +23,10 @@ impl PortfolioPosition {
 
     pub fn get_name(&self) -> &str {
         self.name.as_ref().unwrap()
+    }
+
+    pub fn get_ticker(&self) -> Option<String> {
+        self.ticker.clone()
     }
 
     pub fn get_asset_class(&self) -> &str {
@@ -53,6 +58,15 @@ pub fn from_file(filename: &str) -> Vec<PortfolioPosition> {
 async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooError> {
     yahoo::YahooConnector::new()
         .get_latest_quotes(ticker, "1d")
+        .await
+}
+
+pub async fn get_historic_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooError> {
+    let current_year = chrono::Utc::now().year();
+    let start = Utc.ymd(current_year, 1, 3).and_hms_milli(0, 0, 0, 0);
+    let end = Utc.ymd(current_year, 1, 3).and_hms_milli(23, 59, 59, 999);
+    yahoo::YahooConnector::new()
+        .get_quote_history(ticker, start, end)
         .await
 }
 

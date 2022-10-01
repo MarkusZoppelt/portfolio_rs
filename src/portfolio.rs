@@ -1,3 +1,4 @@
+use crate::position::get_historic_price;
 use crate::position::PortfolioPosition;
 use piechart::{Chart, Color};
 use std::collections::HashMap;
@@ -22,6 +23,27 @@ impl Portfolio {
 
         for position in &self.positions {
             sum += position.get_balance();
+        }
+        sum
+    }
+
+    pub async fn get_historic_total_value(&self) -> f64 {
+        let mut sum = 0.0;
+
+        for position in &self.positions {
+            if let Some(ticker) = position.get_ticker() {
+                let price = get_historic_price(&ticker)
+                    .await
+                    .unwrap()
+                    .quotes()
+                    .unwrap()
+                    .first()
+                    .unwrap()
+                    .close;
+                sum += price * position.get_amount();
+            } else {
+                sum += position.get_amount();
+            }
         }
         sum
     }
