@@ -29,7 +29,8 @@ fn cli() -> Command<'static> {
         .subcommand(
             Command::new("performance")
                 .about("Show the performance of your portfolio")
-                .arg_required_else_help(false),
+                .arg(arg!(<FILE> "JSON file with your positions"))
+                .arg_required_else_help(true),
         )
 }
 
@@ -81,9 +82,10 @@ async fn main() {
         portfolio.print_allocation();
     }
 
-    if let Some(_matches) = matches.subcommand_matches("performance") {
+    if let Some(matches) = matches.subcommand_matches("performance") {
+        let filename = matches.value_of("FILE").expect("Cannot read file");
+        let portfolio = create_live_portfolio(filename).await;
         let db = sled::open("database").unwrap();
-        let portfolio = create_live_portfolio("example_data.json").await;
 
         // for Yahoo, first of the year is Jan 3rd
         let value_at_beginning_of_year = portfolio.get_historic_total_value().await;
