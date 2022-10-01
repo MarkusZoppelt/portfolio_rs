@@ -79,9 +79,7 @@ pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosit
         // if no name was provided in the JSON, try to get it from Yahoo Finance
         if position.name.is_none() {
             let ticker = position.ticker.as_ref().unwrap();
-            let name = get_quote_name(ticker)
-                .await
-                .unwrap();
+            let name = get_quote_name(ticker).await.unwrap();
             position.name = Some(name);
         }
     }
