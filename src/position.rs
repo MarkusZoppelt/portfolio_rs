@@ -61,10 +61,14 @@ async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooE
         .await
 }
 
-pub async fn get_historic_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooError> {
-    let current_year = chrono::Utc::now().year();
-    let start = Utc.ymd(current_year, 1, 3).and_hms_milli(0, 0, 0, 0);
-    let end = Utc.ymd(current_year, 1, 3).and_hms_milli(23, 59, 59, 999);
+
+// get the price at a given date
+pub async fn get_historic_price(
+    ticker: &str,
+    date: Date<Utc>,
+) -> Result<yahoo::YResponse, yahoo::YahooError> {
+    let start = date.and_hms_milli(0, 0, 0, 0);
+    let end = date.and_hms_milli(23, 59, 59, 999);
     yahoo::YahooConnector::new()
         .get_quote_history(ticker, start, end)
         .await
