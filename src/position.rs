@@ -61,7 +61,6 @@ async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooE
         .await
 }
 
-
 // get the price at a given date
 pub async fn get_historic_price(
     ticker: &str,

@@ -1,7 +1,7 @@
-use chrono::prelude::*;
 use crate::portfolio::Portfolio;
 use crate::position::from_file;
 use crate::position::handle_position;
+use chrono::prelude::*;
 use clap::{arg, Command};
 use colored::*;
 
@@ -88,10 +88,12 @@ async fn main() {
         let db = sled::open("database").unwrap();
 
         // Yahoo first of the year is YYYY-01-03
-        let first_of_the_year : Date<Utc> = Utc.ymd(Utc::now().year(), 1, 3);
-        let first_of_the_month : Date<Utc> = Utc.ymd(Utc::now().year(), Utc::now().month(), 3);
-        let value_at_beginning_of_year = portfolio.get_historic_total_value(first_of_the_year).await;
-        let value_at_beginning_of_month = portfolio.get_historic_total_value(first_of_the_month).await;
+        let first_of_the_year: Date<Utc> = Utc.ymd(Utc::now().year(), 1, 3);
+        let first_of_the_month: Date<Utc> = Utc.ymd(Utc::now().year(), Utc::now().month(), 3);
+        let value_at_beginning_of_year =
+            portfolio.get_historic_total_value(first_of_the_year).await;
+        let value_at_beginning_of_month =
+            portfolio.get_historic_total_value(first_of_the_month).await;
         let last: f64 = String::from_utf8_lossy(&db.iter().last().unwrap().unwrap().1)
             .parse()
             .unwrap();
