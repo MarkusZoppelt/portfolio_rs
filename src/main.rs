@@ -129,3 +129,23 @@ async fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::string::ParseError;
+
+    #[test]
+    fn test_cli() {
+        let matches =
+            cli().get_matches_from_safe(vec!["portfolio_rs", "balances", "example_data.json"]);
+        assert!(matches.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_live_portfolio() {
+        let portfolio = create_live_portfolio("example_data.json").await;
+        let x: Result<Portfolio, ParseError> = Ok(portfolio);
+        assert!(x.is_ok());
+    }
+}
