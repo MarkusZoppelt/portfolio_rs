@@ -138,3 +138,16 @@ impl Portfolio {
             .draw(&data);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_historic_total_value() {
+        let portfolio = Portfolio::new();
+        let date = Utc.ymd(2023, 1, 3).and_hms(0, 0, 0);
+        let value = portfolio.get_historic_total_value(date.date()).await;
+        assert_eq!(value, 0.0);
+    }
+}

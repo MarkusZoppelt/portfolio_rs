@@ -109,3 +109,57 @@ pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosit
         last_spot: position.last_spot,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_quote_name() {
+        let name = get_quote_name("AAPL").await.unwrap();
+        assert_eq!(name, "Apple Inc.");
+
+        let name = get_quote_name("BTC-EUR").await.unwrap();
+        assert_eq!(name, "Bitcoin EUR");
+    }
+
+    #[tokio::test]
+    async fn test_get_quote_price() {
+        let quote = get_quote_price("AAPL").await.unwrap();
+        assert!(quote.last_quote().unwrap().close > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_historic_price() {
+        let date = Utc.ymd(2020, 1, 3);
+        let quote = get_historic_price("AAPL", date).await.unwrap();
+        assert_eq!(
+            quote.quotes().unwrap().last().unwrap().close,
+            74.35749816894531
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_position() {
+        let mut position = PortfolioPosition {
+            name: None,
+            ticker: Some("AAPL".to_string()),
+            asset_class: "Stock".to_string(),
+            amount: 1.0,
+            last_spot: 0.0,
+        };
+
+        let updated_position = handle_position(&mut position).await;
+        assert_eq!(updated_position.get_name(), "Apple Inc.");
+        assert_eq!(
+            updated_position.get_balance(),
+            updated_position.get_amount() * updated_position.last_spot
+        );
+    }
+
+    #[tokio::test]
+    async fn test_from_file() {
+        let positions = from_file("example_data.json");
+        assert_eq!(positions.len(), 6);
+    }
+}
