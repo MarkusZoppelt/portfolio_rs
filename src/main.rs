@@ -8,7 +8,7 @@ use colored::*;
 mod portfolio;
 mod position;
 
-fn cli() -> Command<'static> {
+fn cli() -> Command {
     Command::new("portfolio_rs")
         .about("A simple portfolio tool")
         .author("Markus Zoppelt")
@@ -69,21 +69,21 @@ async fn main() {
     let matches = cli().get_matches();
 
     if let Some(matches) = matches.subcommand_matches("balances") {
-        let filename = matches.value_of("FILE").expect("Cannot read file");
+        let filename = matches.get_one::<String>("FILE").expect("Cannot get filename");
         let portfolio = create_live_portfolio(filename).await;
         portfolio.print(true);
         store_balance_in_db(&portfolio);
     }
 
     if let Some(matches) = matches.subcommand_matches("allocation") {
-        let filename = matches.value_of("FILE").expect("Cannot read file");
+        let filename = matches.get_one::<String>("FILE").expect("Cannot get filename");
         let portfolio = create_live_portfolio(filename).await;
         portfolio.draw_pie_chart();
         portfolio.print_allocation();
     }
 
     if let Some(matches) = matches.subcommand_matches("performance") {
-        let filename = matches.value_of("FILE").expect("Cannot read file");
+        let filename = matches.get_one::<String>("FILE").expect("Cannot get filename");
         let portfolio = create_live_portfolio(filename).await;
         let db = sled::open("database").unwrap();
 
@@ -138,8 +138,8 @@ mod tests {
     #[test]
     fn test_cli() {
         let matches =
-            cli().get_matches_from_safe(vec!["portfolio_rs", "balances", "example_data.json"]);
-        assert!(matches.is_ok());
+            cli().get_matches_from(vec!["portfolio_rs", "balances", "example_data.json"]);
+        assert_eq!(matches.subcommand_name(), Some("balances"));
     }
 
     #[tokio::test]
