@@ -69,27 +69,37 @@ async fn main() {
     let matches = cli().get_matches();
 
     if let Some(matches) = matches.subcommand_matches("balances") {
-        let filename = matches.get_one::<String>("FILE").expect("Cannot get filename");
+        let filename = matches
+            .get_one::<String>("FILE")
+            .expect("Cannot get filename");
         let portfolio = create_live_portfolio(filename).await;
         portfolio.print(true);
         store_balance_in_db(&portfolio);
     }
 
     if let Some(matches) = matches.subcommand_matches("allocation") {
-        let filename = matches.get_one::<String>("FILE").expect("Cannot get filename");
+        let filename = matches
+            .get_one::<String>("FILE")
+            .expect("Cannot get filename");
         let portfolio = create_live_portfolio(filename).await;
         portfolio.draw_pie_chart();
         portfolio.print_allocation();
     }
 
     if let Some(matches) = matches.subcommand_matches("performance") {
-        let filename = matches.get_one::<String>("FILE").expect("Cannot get filename");
+        let filename = matches
+            .get_one::<String>("FILE")
+            .expect("Cannot get filename");
         let portfolio = create_live_portfolio(filename).await;
         let db = sled::open("database").unwrap();
 
         // Yahoo first of the year is YYYY-01-03
-        let first_of_the_year: Date<Utc> = Utc.ymd(Utc::now().year(), 1, 3);
-        let first_of_the_month: Date<Utc> = Utc.ymd(Utc::now().year(), Utc::now().month(), 3);
+        let first_of_the_year = Utc
+            .with_ymd_and_hms(Utc::now().year(), 1, 3, 0, 0, 0)
+            .unwrap();
+        let first_of_the_month = Utc
+            .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
+            .unwrap();
         let value_at_beginning_of_year =
             portfolio.get_historic_total_value(first_of_the_year).await;
         let value_at_beginning_of_month =
@@ -137,8 +147,7 @@ mod tests {
 
     #[test]
     fn test_cli() {
-        let matches =
-            cli().get_matches_from(vec!["portfolio_rs", "balances", "example_data.json"]);
+        let matches = cli().get_matches_from(vec!["portfolio_rs", "balances", "example_data.json"]);
         assert_eq!(matches.subcommand_name(), Some("balances"));
     }
 

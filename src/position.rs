@@ -64,10 +64,10 @@ async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooE
 // get the price at a given date
 pub async fn get_historic_price(
     ticker: &str,
-    date: Date<Utc>,
+    date: DateTime<Utc>,
 ) -> Result<yahoo::YResponse, yahoo::YahooError> {
-    let start = date.and_hms_milli(0, 0, 0, 0);
-    let end = date.and_hms_milli(23, 59, 59, 999);
+    let start = date;
+    let end = date;
     yahoo::YahooConnector::new()
         .get_quote_history(ticker, start, end)
         .await
@@ -131,7 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_historic_price() {
-        let date = Utc.ymd(2020, 1, 3);
+        let date = Utc.with_ymd_and_hms(2020, 1, 3, 0, 0, 0).unwrap();
         let quote = get_historic_price("AAPL", date).await.unwrap();
         assert_eq!(
             quote.quotes().unwrap().last().unwrap().close,
