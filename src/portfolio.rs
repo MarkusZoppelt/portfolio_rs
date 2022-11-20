@@ -28,7 +28,7 @@ impl Portfolio {
         sum
     }
 
-    pub async fn get_historic_total_value(&self, date: Date<Utc>) -> f64 {
+    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> f64 {
         let mut sum = 0.0;
 
         for position in &self.positions {
@@ -146,8 +146,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_historic_total_value() {
         let portfolio = Portfolio::new();
-        let date = Utc.ymd(2023, 1, 3).and_hms(0, 0, 0);
-        let value = portfolio.get_historic_total_value(date.date()).await;
+        let date = Utc.with_ymd_and_hms(2023, 1, 3, 0, 0, 0).unwrap();
+        let value = portfolio.get_historic_total_value(date).await;
         assert_eq!(value, 0.0);
     }
 }
