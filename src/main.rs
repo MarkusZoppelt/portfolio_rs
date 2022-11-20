@@ -95,7 +95,7 @@ async fn main() {
 
         // Yahoo first of the year is YYYY-01-03
         let first_of_the_year = Utc
-            .with_ymd_and_hms(Utc::now().year(), 1, 3, 0, 0, 0)
+            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
             .unwrap();
         let first_of_the_month = Utc
             .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
