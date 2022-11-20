@@ -67,7 +67,8 @@ pub async fn get_historic_price(
     date: DateTime<Utc>,
 ) -> Result<yahoo::YResponse, yahoo::YahooError> {
     let start = date;
-    let end = date;
+    // get a range of 3 days in case the market is closed on the given date
+    let end = start + chrono::Duration::days(3);
     yahoo::YahooConnector::new()
         .get_quote_history(ticker, start, end)
         .await
@@ -131,7 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_historic_price() {
-        let date = Utc.with_ymd_and_hms(2020, 1, 3, 0, 0, 0).unwrap();
+        let date = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         let quote = get_historic_price("AAPL", date).await.unwrap();
         assert_eq!(
             quote.quotes().unwrap().last().unwrap().close,

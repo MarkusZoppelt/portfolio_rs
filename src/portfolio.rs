@@ -146,7 +146,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_historic_total_value() {
         let portfolio = Portfolio::new();
-        let date = Utc.with_ymd_and_hms(2023, 1, 3, 0, 0, 0).unwrap();
+        let date = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let value = portfolio.get_historic_total_value(date).await;
         assert_eq!(value, 0.0);
     }
