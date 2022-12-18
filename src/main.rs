@@ -1,5 +1,7 @@
+use std::fs::read_to_string;
+
 use crate::portfolio::Portfolio;
-use crate::position::from_file;
+use crate::position::from_string;
 use crate::position::handle_position;
 use chrono::prelude::*;
 use clap::{arg, Command};
@@ -34,9 +36,9 @@ fn cli() -> Command {
         )
 }
 
-// returns a porfolio with the latest quotes from a json file
-async fn create_live_portfolio(filename: &str) -> Portfolio {
-    let positions = from_file(filename);
+// returns a porfolio with the latest quotes from json data
+async fn create_live_portfolio(positions_str: String) -> Portfolio {
+    let positions = from_string(&positions_str);
     let mut portfolio = Portfolio::new();
     // move tasks into the async closure passed to tokio::spawn()
     let tasks: Vec<_> = positions
@@ -64,6 +66,19 @@ fn store_balance_in_db(portfolio: &Portfolio) {
     db.flush().unwrap();
 }
 
+fn open_encrpted_file(filename: String) -> String {
+    if filename.ends_with(".gpg") {
+        let output = std::process::Command::new("gpg")
+            .arg("-d")
+            .arg(filename)
+            .output()
+            .expect("failed to execute process");
+        String::from_utf8(output.stdout).unwrap()
+    } else {
+        read_to_string(filename).unwrap()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let matches = cli().get_matches();
@@ -72,7 +87,12 @@ async fn main() {
         let filename = matches
             .get_one::<String>("FILE")
             .expect("Cannot get filename");
-        let portfolio = create_live_portfolio(filename).await;
+        let positions_str: String = if filename.ends_with(".gpg") {
+            open_encrpted_file(filename.to_string())
+        } else {
+            std::fs::read_to_string(filename).unwrap()
+        };
+        let portfolio = create_live_portfolio(positions_str).await;
         portfolio.print(true);
         store_balance_in_db(&portfolio);
     }
@@ -81,7 +101,12 @@ async fn main() {
         let filename = matches
             .get_one::<String>("FILE")
             .expect("Cannot get filename");
-        let portfolio = create_live_portfolio(filename).await;
+        let positions_str: String = if filename.ends_with(".gpg") {
+            open_encrpted_file(filename.to_string())
+        } else {
+            std::fs::read_to_string(filename).unwrap()
+        };
+        let portfolio = create_live_portfolio(positions_str).await;
         portfolio.draw_pie_chart();
         portfolio.print_allocation();
     }
@@ -90,7 +115,12 @@ async fn main() {
         let filename = matches
             .get_one::<String>("FILE")
             .expect("Cannot get filename");
-        let portfolio = create_live_portfolio(filename).await;
+        let positions_str: String = if filename.ends_with(".gpg") {
+            open_encrpted_file(filename.to_string())
+        } else {
+            std::fs::read_to_string(filename).unwrap()
+        };
+        let portfolio = create_live_portfolio(positions_str).await;
         let db = sled::open("database").unwrap();
 
         // Yahoo first of the year is YYYY-01-03
@@ -153,7 +183,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_live_portfolio() {
-        let portfolio = create_live_portfolio("example_data.json").await;
+        let positions_str = std::fs::read_to_string("example_data.json").unwrap();
+        let portfolio = create_live_portfolio(positions_str).await;
         let x: Result<Portfolio, ParseError> = Ok(portfolio);
         assert!(x.is_ok());
     }
