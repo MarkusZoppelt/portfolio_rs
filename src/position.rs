@@ -1,7 +1,5 @@
 use chrono::prelude::*;
 use serde::Deserialize;
-use std::fs::File;
-use std::io::Read;
 use yahoo_finance_api as yahoo;
 
 #[derive(Debug, Deserialize)]
@@ -46,12 +44,8 @@ impl PortfolioPosition {
     }
 }
 
-pub fn from_file(filename: &str) -> Vec<PortfolioPosition> {
-    let mut file = File::open(filename).expect("file not found");
-    let mut data = String::new();
-    file.read_to_string(&mut data)
-        .expect("something went wrong reading the file");
-    serde_json::from_str::<Vec<PortfolioPosition>>(&data).expect("JSON was not well-formatted")
+pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
+    serde_json::from_str::<Vec<PortfolioPosition>>(data).expect("JSON was not well-formatted")
 }
 
 // Get the latest price for a ticker
@@ -113,6 +107,8 @@ pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosit
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[tokio::test]
@@ -160,7 +156,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_from_file() {
-        let positions = from_file("example_data.json");
+        let positions_str = fs::read_to_string("example_data.json").unwrap();
+        let positions = from_string(&positions_str);
         assert_eq!(positions.len(), 6);
     }
 }

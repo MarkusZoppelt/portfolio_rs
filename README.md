@@ -39,3 +39,13 @@ If you need help, try `portfolio_rs help [SUBCOMMAND]` for usage information.
 
 ## Demo
 ![demo](https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/demo.gif)
+
+
+## Bonus: GPG Encryption
+This tool supports (gpg) encrypted json files.
+Decrypted values are never written to disk.
+
+    # you will need a valid gpg key in ~/.gnupg/
+    portfolio_rs [COMMAND] data.json.gpg
+
+Pro Tip: Use a plugin like [vim-gnupg](https://github.com/jamessan/vim-gnupg) for editing your data file.

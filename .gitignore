@@ -1,3 +1,4 @@
 /target
 database/
 positions.json
+*.gpg
