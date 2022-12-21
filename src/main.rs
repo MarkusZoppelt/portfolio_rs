@@ -3,9 +3,8 @@ use std::fs::read_to_string;
 use crate::portfolio::Portfolio;
 use crate::position::from_string;
 use crate::position::handle_position;
-use chrono::prelude::*;
+
 use clap::{arg, Command};
-use colored::*;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -20,7 +19,7 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-       Self {
+        Self {
             portfolio_file: "/home/Joe/portfolio.json".to_string(),
             currency: "EUR".to_string(),
         }
@@ -85,7 +84,7 @@ fn store_balance_in_db(portfolio: &Portfolio) {
     let curr_value = portfolio.get_total_value();
     let curr_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    db.insert(curr_time, curr_value.to_string().as_str().as_bytes())
+    db.insert(curr_time, curr_value.to_string().as_bytes())
         .unwrap();
 
     // block until all operations are stable on disk
@@ -111,121 +110,44 @@ async fn main() {
 
     let matches = cli().get_matches();
 
-    if let Some(matches) = matches.subcommand_matches("balances") {
-        let mut filename: String;
-        if let Ok(f) = matches.try_get_one::<String>("FILE") {
-            filename = f.unwrap().to_string();
-            if filename == "" {
+    for subcommand in ["balances", "allocation", "performance"].iter() {
+        if let Some(matches) = matches.subcommand_matches(subcommand) {
+            let mut filename = String::new();
+
+            // try to get filename as argument
+            if let Ok(f) = matches.try_get_one::<String>("FILE") {
+                filename = f.unwrap().to_string();
+            }
+            // if no argument is given, try to get filename from config
+            if filename.is_empty() {
                 filename = cfg.portfolio_file.clone();
             }
-            if filename == "" {
+            // if no argument and no config is given, print help
+            if filename.is_empty() {
                 cli().print_help().unwrap();
                 return;
             }
-        } else {
-            cli().print_help().unwrap();
-            return;
-        }
-        let positions_str: String = if filename.ends_with(".gpg") {
-            open_encrpted_file(filename.to_string())
-        } else {
-            std::fs::read_to_string(filename).unwrap()
-        };
-        let portfolio = create_live_portfolio(positions_str).await;
-        portfolio.print(true);
-        store_balance_in_db(&portfolio);
-    }
-
-    if let Some(matches) = matches.subcommand_matches("allocation") {
-        let mut filename: String;
-        if let Ok(f) = matches.try_get_one::<String>("FILE") {
-            filename = f.unwrap().to_string();
-            if filename == "" {
-                filename = cfg.portfolio_file.clone();
-            }
-            if filename == "" {
-                cli().print_help().unwrap();
-                return;
-            }
-        } else {
-            cli().print_help().unwrap();
-            return;
-        }
-        let positions_str: String = if filename.ends_with(".gpg") {
-            open_encrpted_file(filename.to_string())
-        } else {
-            std::fs::read_to_string(filename).unwrap()
-        };
-        let portfolio = create_live_portfolio(positions_str).await;
-        portfolio.draw_pie_chart();
-        portfolio.print_allocation();
-    }
-
-    if let Some(matches) = matches.subcommand_matches("performance") {
-        let mut filename: String;
-        if let Ok(f) = matches.try_get_one::<String>("FILE") {
-            filename = f.unwrap().to_string();
-            if filename == "" {
-                filename = cfg.portfolio_file.clone();
-            }
-            if filename == "" {
-                cli().print_help().unwrap();
-                return;
-            }
-        } else {
-            cli().print_help().unwrap();
-            return;
-        }
-        let positions_str: String = if filename.ends_with(".gpg") {
-            open_encrpted_file(filename.to_string())
-        } else {
-            std::fs::read_to_string(filename).unwrap()
-        };
-        let portfolio = create_live_portfolio(positions_str).await;
-        let db = sled::open("database").unwrap();
-
-        // Yahoo first of the year is YYYY-01-03
-        let first_of_the_year = Utc
-            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
-            .unwrap();
-        let first_of_the_month = Utc
-            .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
-            .unwrap();
-        let value_at_beginning_of_year =
-            portfolio.get_historic_total_value(first_of_the_year).await;
-        let value_at_beginning_of_month =
-            portfolio.get_historic_total_value(first_of_the_month).await;
-        let last: f64 = String::from_utf8_lossy(&db.iter().last().unwrap().unwrap().1)
-            .parse()
-            .unwrap();
-
-        // TODO: add more performance metrics
-        let values = vec![
-            value_at_beginning_of_year,
-            value_at_beginning_of_month,
-            portfolio.get_total_value(),
-        ];
-
-        for (i, value) in values.iter().enumerate() {
-            let performance = (last - value) / value * 100.0;
-            if performance >= 0.0 {
-                let s = format!("{:.2}%", performance).green();
-                if i == 0 {
-                    println!("YTD: {}", s);
-                } else if i == 1 {
-                    println!("Since beginning of month: {}", s);
-                } else {
-                    println!("Since last balance check: {}", s);
-                }
+            let positions_str = if filename.ends_with(".gpg") {
+                open_encrpted_file(filename.to_string())
             } else {
-                let s = format!("{:.2}%", performance).red();
-                if i == 0 {
-                    println!("YTD: {}", s);
-                } else if i == 1 {
-                    println!("Since beginning of month: {}", s);
-                } else {
-                    println!("Since last balance check: {}", s);
+                std::fs::read_to_string(filename).unwrap()
+            };
+
+            let portfolio = create_live_portfolio(positions_str).await;
+
+            match subcommand as &str {
+                "balances" => {
+                    portfolio.print(true);
+                    store_balance_in_db(&portfolio);
                 }
+                "allocation" => {
+                    portfolio.draw_pie_chart();
+                    portfolio.print_allocation();
+                }
+                "performance" => {
+                    portfolio.print_performance().await;
+                }
+                _ => (),
             }
         }
     }
