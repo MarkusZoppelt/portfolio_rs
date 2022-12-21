@@ -1,6 +1,7 @@
 use crate::position::get_historic_price;
 use crate::position::PortfolioPosition;
 use chrono::prelude::*;
+use colored::Colorize;
 use piechart::{Chart, Color};
 use std::collections::HashMap;
 
@@ -136,6 +137,46 @@ impl Portfolio {
             .radius(9)
             .aspect_ratio(3)
             .draw(&data);
+    }
+
+    pub async fn print_performance(&self) {
+        let db = sled::open("database").unwrap();
+
+        // Yahoo first of the year is YYYY-01-03
+        let first_of_the_year = Utc
+            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
+            .unwrap();
+        let first_of_the_month = Utc
+            .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
+            .unwrap();
+        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await;
+        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await;
+        let last: f64 = String::from_utf8_lossy(&db.iter().last().unwrap().unwrap().1)
+            .parse()
+            .unwrap();
+
+        let values = vec![
+            value_at_beginning_of_year,
+            value_at_beginning_of_month,
+            self.get_total_value(),
+        ];
+
+        for (i, value) in values.iter().enumerate() {
+            let performance = (last - value) / value * 100.0;
+            let s = format!("{:.2}%", performance);
+            let s = if performance >= 0.0 {
+                s.green()
+            } else {
+                s.red()
+            };
+
+            match i {
+                0 => println!("YTD: {}", s),
+                1 => println!("Since beginning of month: {}", s),
+                2 => println!("Since last balance check: {}", s),
+                _ => (),
+            }
+        }
     }
 }
 
