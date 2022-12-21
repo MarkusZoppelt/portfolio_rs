@@ -6,9 +6,26 @@ use crate::position::handle_position;
 use chrono::prelude::*;
 use clap::{arg, Command};
 use colored::*;
+use serde::Deserialize;
+use serde::Serialize;
 
 mod portfolio;
 mod position;
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    portfolio_file: String,
+    currency: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+       Self {
+            portfolio_file: "/home/Joe/portfolio.json".to_string(),
+            currency: "EUR".to_string(),
+        }
+    }
+}
 
 fn cli() -> Command {
     Command::new("portfolio_rs")
@@ -19,20 +36,29 @@ fn cli() -> Command {
         .subcommand(
             Command::new("balances")
                 .about("Show the current balances of your portfolio")
-                .arg(arg!(<FILE> "JSON file with your positions"))
-                .arg_required_else_help(true),
+                .arg(
+                    arg!(<FILE> "JSON file with your positions")
+                        .required(false)
+                        .default_value(""),
+                ),
         )
         .subcommand(
             Command::new("allocation")
                 .about("Show the current allocation of your portfolio")
-                .arg(arg!(<FILE> "JSON file with your positions"))
-                .arg_required_else_help(true),
+                .arg(
+                    arg!(<FILE> "JSON file with your positions")
+                        .required(false)
+                        .default_value(""),
+                ),
         )
         .subcommand(
             Command::new("performance")
                 .about("Show the performance of your portfolio")
-                .arg(arg!(<FILE> "JSON file with your positions"))
-                .arg_required_else_help(true),
+                .arg(
+                    arg!(<FILE> "JSON file with your positions")
+                        .required(false)
+                        .default_value(""),
+                ),
         )
 }
 
@@ -81,12 +107,25 @@ fn open_encrpted_file(filename: String) -> String {
 
 #[tokio::main]
 async fn main() {
+    let cfg: Config = confy::load("portfolio", "config").unwrap();
+
     let matches = cli().get_matches();
 
     if let Some(matches) = matches.subcommand_matches("balances") {
-        let filename = matches
-            .get_one::<String>("FILE")
-            .expect("Cannot get filename");
+        let mut filename: String;
+        if let Ok(f) = matches.try_get_one::<String>("FILE") {
+            filename = f.unwrap().to_string();
+            if filename == "" {
+                filename = cfg.portfolio_file.clone();
+            }
+            if filename == "" {
+                cli().print_help().unwrap();
+                return;
+            }
+        } else {
+            cli().print_help().unwrap();
+            return;
+        }
         let positions_str: String = if filename.ends_with(".gpg") {
             open_encrpted_file(filename.to_string())
         } else {
@@ -98,9 +137,20 @@ async fn main() {
     }
 
     if let Some(matches) = matches.subcommand_matches("allocation") {
-        let filename = matches
-            .get_one::<String>("FILE")
-            .expect("Cannot get filename");
+        let mut filename: String;
+        if let Ok(f) = matches.try_get_one::<String>("FILE") {
+            filename = f.unwrap().to_string();
+            if filename == "" {
+                filename = cfg.portfolio_file.clone();
+            }
+            if filename == "" {
+                cli().print_help().unwrap();
+                return;
+            }
+        } else {
+            cli().print_help().unwrap();
+            return;
+        }
         let positions_str: String = if filename.ends_with(".gpg") {
             open_encrpted_file(filename.to_string())
         } else {
@@ -112,9 +162,20 @@ async fn main() {
     }
 
     if let Some(matches) = matches.subcommand_matches("performance") {
-        let filename = matches
-            .get_one::<String>("FILE")
-            .expect("Cannot get filename");
+        let mut filename: String;
+        if let Ok(f) = matches.try_get_one::<String>("FILE") {
+            filename = f.unwrap().to_string();
+            if filename == "" {
+                filename = cfg.portfolio_file.clone();
+            }
+            if filename == "" {
+                cli().print_help().unwrap();
+                return;
+            }
+        } else {
+            cli().print_help().unwrap();
+            return;
+        }
         let positions_str: String = if filename.ends_with(".gpg") {
             open_encrpted_file(filename.to_string())
         } else {
