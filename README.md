@@ -40,6 +40,14 @@ If you need help, try `portfolio_rs help [SUBCOMMAND]` for usage information.
 ## Demo
 ![demo](https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/demo.gif)
 
+## Configuration
+Upon first run, `portfolio_rs` will create a default `config.yml` file.
+The location of the config file depends on the operating system.
+Use `portfolio_rs config` to print the config directory.
+
+Probably the most useful entry in the config is `portfolio_file` where you can
+set the **absolute** path to a data file that will be used when no data file is
+passed as an argument.
 
 ## Bonus: GPG Encryption
 This tool supports (gpg) encrypted json files.
@@ -48,4 +56,5 @@ Decrypted values are never written to disk.
     # you will need a valid gpg key in ~/.gnupg/
     portfolio_rs [COMMAND] data.json.gpg
 
-Pro Tip: Use a plugin like [vim-gnupg](https://github.com/jamessan/vim-gnupg) for editing your data file.
+Pro Tip: Use a plugin like [vim-gnupg](https://github.com/jamessan/vim-gnupg)
+for editing your data file.
