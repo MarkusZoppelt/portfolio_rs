@@ -32,6 +32,7 @@ fn cli() -> Command {
         .author("Markus Zoppelt")
         .arg_required_else_help(true)
         .allow_external_subcommands(true)
+        .subcommand(Command::new("config").about("Print the path to the config file"))
         .subcommand(
             Command::new("balances")
                 .about("Show the current balances of your portfolio")
@@ -109,6 +110,16 @@ async fn main() {
     let cfg: Config = confy::load("portfolio", "config").unwrap();
 
     let matches = cli().get_matches();
+
+    if let Some(_matches) = matches.subcommand_matches("config") {
+        println!(
+            "Your config file is located here: \n{}",
+            confy::get_configuration_file_path("portfolio", "config")
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+    }
 
     for subcommand in ["balances", "allocation", "performance"].iter() {
         if let Some(matches) = matches.subcommand_matches(subcommand) {
