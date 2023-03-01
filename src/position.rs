@@ -1,5 +1,6 @@
 use chrono::prelude::*;
 use serde::Deserialize;
+use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
 #[derive(Debug, Deserialize)]
@@ -60,9 +61,11 @@ pub async fn get_historic_price(
     ticker: &str,
     date: DateTime<Utc>,
 ) -> Result<yahoo::YResponse, yahoo::YahooError> {
-    let start = date;
+    let start = OffsetDateTime::from_unix_timestamp(date.timestamp()).unwrap();
+
     // get a range of 3 days in case the market is closed on the given date
-    let end = start + chrono::Duration::days(3);
+    let end = start + time::Duration::days(3);
+
     yahoo::YahooConnector::new()
         .get_quote_history(ticker, start, end)
         .await

@@ -953,6 +953,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sled",
+ "time 0.3.20",
  "tokio",
  "yahoo_finance_api",
 ]
