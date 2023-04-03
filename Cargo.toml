@@ -11,7 +11,7 @@ license = "MIT"
 [dependencies]
 serde = { version = "1.0.158", features = ["derive"] }
 serde_json = "1.0.95"
-clap = "4.1.13"
+clap = "4.2.1"
 futures = "0.3.27"
 tokio = { version = "1.26.0", features = ["full"] }
 yahoo_finance_api = "1.4.0"
