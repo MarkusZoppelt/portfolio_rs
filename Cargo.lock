@@ -1981,9 +1981,9 @@ dependencies = [
 
 [[package]]
 name = "yahoo_finance_api"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3919b605dc4b19cded1b9aab9ea2069b82ba1ed6f9bd37159896611f417f2ee8"
+checksum = "c5f4f8c6856baec90e88ca9beefe585aef4e5d460ea8cd92084786c6ddbd8c4a"
 dependencies = [
  "reqwest",
  "select",
