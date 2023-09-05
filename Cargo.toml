@@ -17,7 +17,7 @@ tokio = { version = "1.32.0", features = ["full"] }
 yahoo_finance_api = "2.0.1"
 piechart = "1.0.0"
 time = "0.3.28"
-chrono = "0.4.26"
+chrono = "0.4.28"
 sled = "0.34.7"
 colored = "2.0.4"
 confy = { version = "0.5.1", features = ["yaml_conf"], default-features = false }
