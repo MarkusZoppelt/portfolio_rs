@@ -9,7 +9,12 @@ A command line tool for managing financial investment portfolios written in Rust
 > *This project is the modern successor of [finance](https://github.com/MarkusZoppelt/finance).*
 
 ## Installation
-You can install portfolio\_rs directly from cargo (via crates.io:
+
+Install/run via [pkgx](https://pkgx.sh):
+
+    pkgx portfolio_rs
+
+You can install portfolio\_rs directly from cargo (via crates.io):
 
     cargo install portfolio_rs
 
