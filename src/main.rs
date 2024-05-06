@@ -73,8 +73,14 @@ async fn create_live_portfolio(positions_str: String) -> Portfolio {
         .collect();
 
     for task in tasks {
-        let p = task.await.unwrap();
-        portfolio.add_position(p);
+        let p = task.await;
+        match p {
+            Ok(p) => match p {
+                Ok(p) => portfolio.add_position(p),
+                Err(e) => eprintln!("Error handling position: {:?}", e),
+            },
+            Err(e) => eprintln!("Error handling position: {:?}", e),
+        }
     }
     portfolio
 }
@@ -98,7 +104,7 @@ fn open_encrpted_file(filename: String) -> String {
             .arg("-d")
             .arg(filename)
             .output()
-            .expect("failed to execute process");
+            .expect("failed to execute gpg process");
         String::from_utf8(output.stdout).unwrap()
     } else {
         read_to_string(filename).unwrap()
@@ -126,12 +132,12 @@ async fn main() {
             let mut filename = String::new();
 
             // try to get filename as argument
-            if let Ok(f) = matches.try_get_one::<String>("FILE") {
-                filename = f.unwrap().to_string();
+            if let Ok(Some(f)) = matches.try_get_one::<String>("FILE") {
+                filename = f.to_string();
             }
             // if no argument is given, try to get filename from config
             if filename.is_empty() {
-                filename = cfg.portfolio_file.clone();
+                filename.clone_from(&cfg.portfolio_file);
             }
             // if no argument and no config is given, print help
             if filename.is_empty() {
@@ -140,8 +146,11 @@ async fn main() {
             }
             let positions_str = if filename.ends_with(".gpg") {
                 open_encrpted_file(filename.to_string())
+            } else if let Ok(s) = read_to_string(&filename) {
+                s
             } else {
-                std::fs::read_to_string(filename).unwrap()
+                eprintln!("Error reading file: {}", filename);
+                return;
             };
 
             let portfolio = create_live_portfolio(positions_str).await;

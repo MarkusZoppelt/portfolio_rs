@@ -21,7 +21,13 @@ impl PortfolioPosition {
     }
 
     pub fn get_name(&self) -> &str {
-        self.name.as_ref().unwrap()
+        if let Some(name) = &self.name {
+            name
+        } else if let Some(ticker) = &self.ticker {
+            ticker
+        } else {
+            "Unknown"
+        }
     }
 
     pub fn get_asset_class(&self) -> &str {
@@ -70,45 +76,55 @@ pub async fn get_historic_price(
 // Try to get the short name for a ticker from Yahoo Finance
 async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
     let connector = yahoo::YahooConnector::new();
-    let resp = connector.search_ticker(ticker).await.unwrap();
+    let resp = connector.search_ticker(ticker).await?;
 
-    // use the first result
-    let item = resp.quotes.first();
-    let name = &item.unwrap().short_name;
-
-    Ok(name.to_string())
+    if let Some(item) = resp.quotes.first() {
+        Ok(item.short_name.clone())
+    } else {
+        Err(yahoo::YahooError::EmptyDataSet)
+    }
 }
 
 // Get the latest price for a ticker and update the positionthen
 // then return the updated position as a new object
-pub async fn handle_position(position: &mut PortfolioPosition) -> PortfolioPosition {
+pub async fn handle_position(
+    position: &mut PortfolioPosition,
+) -> Result<PortfolioPosition, yahoo::YahooError> {
     if let Some(ticker) = &position.ticker {
-        let quote = get_quote_price(ticker).await.unwrap();
-        let last_spot = quote.last_quote().unwrap().close;
-        position.update_price(last_spot);
+        let quote = get_quote_price(ticker).await?;
+        if let Ok(last_spot) = quote.last_quote() {
+            position.update_price(last_spot.close)
+        } else {
+            // if the market is closed, try to get the last available price
+            if let Ok(last_spot) = quote.quotes() {
+                if let Some(last_spot) = last_spot.last() {
+                    position.update_price(last_spot.close);
+                }
+            }
+        }
 
         // if no name was provided in the JSON, try to get it from Yahoo Finance
         if position.name.is_none() {
-            let ticker = position.ticker.as_ref().unwrap();
-            let name = get_quote_name(ticker).await.unwrap();
-            position.name = Some(name);
+            if let Some(ticker) = &position.ticker {
+                let name = get_quote_name(ticker).await?;
+                position.name = Some(name);
+            }
         }
     }
 
-    PortfolioPosition {
+    Ok(PortfolioPosition {
         name: position.name.clone(),
         ticker: position.ticker.to_owned(),
         asset_class: position.asset_class.to_string(),
         amount: position.amount,
         last_spot: position.last_spot,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
+    use std::fs;
 
     #[tokio::test]
     async fn test_get_quote_name() {
@@ -145,7 +161,9 @@ mod tests {
             last_spot: 0.0,
         };
 
-        let updated_position = handle_position(&mut position).await;
+        let updated_position = handle_position(&mut position)
+            .await
+            .expect("Error handling position");
         assert_eq!(updated_position.get_name(), "Apple Inc.");
         assert_eq!(
             updated_position.get_balance(),
