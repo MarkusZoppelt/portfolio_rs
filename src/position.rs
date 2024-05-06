@@ -24,10 +24,6 @@ impl PortfolioPosition {
         self.name.as_ref().unwrap()
     }
 
-    pub fn get_ticker(&self) -> Option<String> {
-        self.ticker.clone()
-    }
-
     pub fn get_asset_class(&self) -> &str {
         &self.asset_class
     }
