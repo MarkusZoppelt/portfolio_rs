@@ -29,25 +29,44 @@ impl Portfolio {
         sum
     }
 
-    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> f64 {
+    // Get the total value of the portfolio at a specific date
+    // TODO: this function is not working as intended and the y_response is often an error
+    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> Result<f64, String> {
         let mut sum = 0.0;
 
         for position in &self.positions {
-            if let Some(ticker) = position.get_ticker() {
-                let price = get_historic_price(&ticker, date)
-                    .await
-                    .unwrap()
-                    .quotes()
-                    .unwrap()
-                    .first()
-                    .unwrap()
-                    .close;
-                sum += price * position.get_amount();
-            } else {
-                sum += position.get_amount();
+            let y_response = get_historic_price(
+                {
+                    let this = &position;
+                    this.get_name()
+                },
+                date,
+            )
+            .await;
+
+            match y_response {
+                Ok(response) => match response.last_quote() {
+                    Ok(quote) => {
+                        sum += quote.close * position.get_amount();
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Error getting last quote for {}: {}",
+                            position.get_name(),
+                            e
+                        ));
+                    }
+                },
+                Err(e) => {
+                    return Err(format!(
+                        "Error getting historic price data for {}: {}",
+                        position.get_name(),
+                        e
+                    ));
+                }
             }
         }
-        sum
+        Ok(sum)
     }
 
     pub fn get_allocation(&self) -> HashMap<String, f64> {
@@ -109,7 +128,7 @@ impl Portfolio {
     pub fn draw_pie_chart(&self) {
         let mut data = vec![];
 
-        let colors = vec![
+        let colors = [
             Color::Red,
             Color::Green,
             Color::Blue,
@@ -121,7 +140,10 @@ impl Portfolio {
         ];
 
         for (i, position) in self.positions.iter().enumerate() {
-            let name = position.get_name();
+            let name = {
+                let this = &position;
+                this.get_name()
+            };
             let balance = position.get_balance() as f32;
 
             data.push(piechart::Data {
@@ -149,19 +171,42 @@ impl Portfolio {
         let first_of_the_month = Utc
             .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
             .unwrap();
-        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await;
-        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await;
-        let last: f64 = String::from_utf8_lossy(&db.iter().last().unwrap().unwrap().1)
-            .parse()
-            .unwrap();
 
-        let values = vec![
+        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await;
+        if let Err(e) = value_at_beginning_of_year {
+            println!("Error getting value for beginning of year: {}", e);
+            return;
+        }
+
+        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await;
+        if let Err(e) = value_at_beginning_of_month {
+            println!("Error getting value for beginning of month: {}", e);
+            return;
+        }
+
+        let last: f64 = match &db.iter().last() {
+            Some(Ok(last)) => {
+                let last = String::from_utf8_lossy(&last.1).parse();
+                if let Ok(last) = last {
+                    last
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        };
+
+        let values = [
             value_at_beginning_of_year,
             value_at_beginning_of_month,
-            self.get_total_value(),
+            Ok(self.get_total_value()),
         ];
 
         for (i, value) in values.iter().enumerate() {
+            let value = match value {
+                Ok(value) => *value,
+                Err(_) => continue,
+            };
             let performance = (last - value) / value * 100.0;
             let s = format!("{:.2}%", performance);
             let s = if performance >= 0.0 {
@@ -189,6 +234,6 @@ mod tests {
         let portfolio = Portfolio::new();
         let date = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let value = portfolio.get_historic_total_value(date).await;
-        assert_eq!(value, 0.0);
+        assert_eq!(value, Ok(0.0));
     }
 }
