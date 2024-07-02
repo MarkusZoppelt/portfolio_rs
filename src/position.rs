@@ -53,7 +53,7 @@ pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
 
 // Get the latest price for a ticker
 async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooError> {
-    yahoo::YahooConnector::new()
+    yahoo::YahooConnector::new()?
         .get_latest_quotes(ticker, "1d")
         .await
 }
@@ -68,7 +68,7 @@ pub async fn get_historic_price(
     // get a range of 3 days in case the market is closed on the given date
     let end = start + time::Duration::days(3);
 
-    yahoo::YahooConnector::new()
+    yahoo::YahooConnector::new()?
         .get_quote_history(ticker, start, end)
         .await
 }
@@ -76,7 +76,7 @@ pub async fn get_historic_price(
 // Try to get the short name for a ticker from Yahoo Finance
 async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
     let connector = yahoo::YahooConnector::new();
-    let resp = connector.search_ticker(ticker).await?;
+    let resp = connector?.search_ticker(ticker).await?;
 
     if let Some(item) = resp.quotes.first() {
         Ok(item.short_name.clone())
