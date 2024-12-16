@@ -16,7 +16,7 @@ futures = "0.3.31"
 tokio = { version = "1.42.0", features = ["full"] }
 yahoo_finance_api = "2.4.0"
 piechart = "1.0.0"
-time = "0.3.36"
+time = "0.3.37"
 chrono = "0.4.38"
 sled = "0.34.7"
 colored = "2.1.0"
