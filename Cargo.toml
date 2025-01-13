@@ -19,5 +19,5 @@ piechart = "1.0.0"
 time = "0.3.37"
 chrono = "0.4.39"
 sled = "0.34.7"
-colored = "2.2.0"
+colored = "3.0.0"
 confy = { version = "0.6.1", features = ["yaml_conf"], default-features = false }
