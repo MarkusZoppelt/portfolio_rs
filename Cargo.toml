@@ -13,7 +13,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 clap = "4.5.38"
 futures = "0.3.31"
-tokio = { version = "1.45.0", features = ["full"] }
+tokio = { version = "1.45.1", features = ["full"] }
 yahoo_finance_api = "3.0.0"
 piechart = "1.0.0"
 time = "0.3.41"
