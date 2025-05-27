@@ -20,4 +20,4 @@ time = "0.3.41"
 chrono = "0.4.41"
 sled = "0.34.7"
 colored = "3.0.0"
-confy = { version = "0.6.1", features = ["yaml_conf"], default-features = false }
+confy = { version = "1.0.0", features = ["yaml_conf"], default-features = false }
