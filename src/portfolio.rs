@@ -185,14 +185,7 @@ impl Portfolio {
         }
 
         let last: f64 = match &db.iter().last() {
-            Some(Ok(last)) => {
-                let last = String::from_utf8_lossy(&last.1).parse();
-                if let Ok(last) = last {
-                    last
-                } else {
-                    0.0
-                }
-            }
+            Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
             _ => 0.0,
         };
 
