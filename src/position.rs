@@ -81,7 +81,7 @@ async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
     if let Some(item) = resp.quotes.first() {
         Ok(item.short_name.clone())
     } else {
-        Err(yahoo::YahooError::EmptyDataSet)
+        Err(yahoo::YahooError::NoResult)
     }
 }
 
