@@ -45,6 +45,10 @@ impl PortfolioPosition {
     pub fn get_amount(&self) -> f64 {
         self.amount
     }
+
+    pub fn get_ticker(&self) -> Option<&str> {
+        self.ticker.as_deref()
+    }
 }
 
 pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
