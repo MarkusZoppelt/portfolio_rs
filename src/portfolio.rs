@@ -35,49 +35,52 @@ impl Portfolio {
         let mut sum = 0.0;
         let mut errors = Vec::new();
 
+        use futures::future::join_all;
+        let mut cash_sum = 0.0;
+        let mut tasks = Vec::new();
+        let mut positions_with_ticker = Vec::new();
+
         for position in &self.positions {
-            // Skip positions without tickers (like cash)
-            let ticker = match position.get_ticker() {
-                Some(ticker) => ticker,
-                None => {
-                    // For cash positions, use current amount as historic value
-                    sum += position.get_amount();
-                    continue;
-                }
-            };
+            if let Some(ticker) = position.get_ticker() {
+                positions_with_ticker.push((ticker, position.get_amount(), position.get_ticker().unwrap_or(position.get_name()).to_string()));
+                tasks.push(get_historic_price(ticker, date));
+            } else {
+                cash_sum += position.get_amount();
+            }
+        }
 
-            let y_response = get_historic_price(ticker, date).await;
-
+        let results = join_all(tasks).await;
+        for ((_, amount, label), y_response) in positions_with_ticker.into_iter().zip(results) {
             match y_response {
                 Ok(response) => match response.last_quote() {
                     Ok(quote) => {
-                        sum += quote.close * position.get_amount();
+                        sum += quote.close * amount;
                     }
                     Err(e) => {
                         errors.push(format!(
                             "Error getting last quote for {}: {}",
-                            position.get_ticker().unwrap_or(position.get_name()),
+                            label,
                             e
                         ));
                         continue;
                     }
                 },
                 Err(e) => {
-                    // If Yahoo returns Bad Request, skip with warning, not error
                     let err_str = format!("{}", e);
                     if err_str.contains("Bad Request") {
-                        eprintln!("Warning: Skipping {} due to Yahoo Bad Request: {}", position.get_ticker().unwrap_or(position.get_name()), err_str);
+                        eprintln!("Warning: Skipping {} due to Yahoo Bad Request: {}", label, err_str);
                         continue;
                     }
                     errors.push(format!(
                         "Error getting historic price data for {}: {}",
-                        position.get_ticker().unwrap_or(position.get_name()),
+                        label,
                         err_str
                     ));
                     continue;
                 }
             }
         }
+        sum += cash_sum;
 
         if !errors.is_empty() {
             return Err(errors.join("; "));
