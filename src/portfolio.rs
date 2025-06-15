@@ -80,10 +80,7 @@ impl Portfolio {
         }
 
         if !errors.is_empty() {
-            eprintln!("Warning: Some positions could not be processed:");
-            for error in &errors {
-                eprintln!("  - {}", error);
-            }
+            return Err(errors.join("; "));
         }
 
         Ok(sum)
