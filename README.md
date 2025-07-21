@@ -50,16 +50,15 @@ If you need help, try `portfolio_rs help [SUBCOMMAND]` for usage information.
 
 The interactive Terminal User Interface (`portfolio_rs tui`) provides:
 
-- **Overview Tab**: Large display of total portfolio value with top asset classes
+- **Overview & Allocation Tab**: Large display of total portfolio value, visual bar chart, and detailed allocation breakdown
 - **Balances Tab**: Detailed table of all positions with amounts and current values  
-- **Allocation Tab**: Visual bar chart and detailed breakdown of asset allocation
 - **Performance Tab**: Performance metrics (YTD, monthly, recent changes)
 
 ### TUI Navigation
 - `h` / `l` : Switch tabs left/right (vim-style)
 - `j` / `k` : Navigate up/down
 - `Tab` / `←` `→` : Switch between tabs
-- `1-4` : Jump directly to specific tabs
+- `1-3` : Jump directly to specific tabs
 - `q` / `Esc` : Quit the application
 
 

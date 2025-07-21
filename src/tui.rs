@@ -22,22 +22,20 @@ use tui_big_text::{BigText, PixelSize};
 pub enum Tab {
     Overview,
     Balances,
-    Allocation,
     Performance,
 }
 
 impl Tab {
     fn title(self) -> &'static str {
         match self {
-            Tab::Overview => "Overview",
+            Tab::Overview => "Overview & Allocation",
             Tab::Balances => "Balances",
-            Tab::Allocation => "Allocation",
             Tab::Performance => "Performance",
         }
     }
 
     fn all() -> &'static [Tab] {
-        &[Tab::Overview, Tab::Balances, Tab::Allocation, Tab::Performance]
+        &[Tab::Overview, Tab::Balances, Tab::Performance]
     }
 }
 
@@ -48,6 +46,7 @@ pub struct App {
     pub loading: bool,
     pub error_message: Option<String>,
     pub performance_data: Option<PerformanceData>,
+    pub currency: String,
 }
 
 #[derive(Debug, Clone)]
@@ -154,8 +153,7 @@ async fn run_app<B: Backend>(
                     }
                     KeyCode::Char('1') => app.current_tab = Tab::Overview,
                     KeyCode::Char('2') => app.current_tab = Tab::Balances,
-                    KeyCode::Char('3') => app.current_tab = Tab::Allocation,
-                    KeyCode::Char('4') => app.current_tab = Tab::Performance,
+                    KeyCode::Char('3') => app.current_tab = Tab::Performance,
                     _ => {}
                 }
             }
@@ -197,7 +195,6 @@ fn ui(f: &mut Frame, app: &App) {
     match app.current_tab {
         Tab::Overview => render_overview(f, chunks[1], app),
         Tab::Balances => render_balances(f, chunks[1], app),
-        Tab::Allocation => render_allocation(f, chunks[1], app),
         Tab::Performance => render_performance(f, chunks[1], app),
     }
 
@@ -208,15 +205,17 @@ fn ui(f: &mut Frame, app: &App) {
 
 fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
-        let chunks = Layout::default()
+        // Main layout: top section for total value, bottom for allocation details
+        let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7),
-                Constraint::Min(10),
-                Constraint::Length(3),
+                Constraint::Length(7),  // Total value display
+                Constraint::Min(0),     // Allocation section
+                Constraint::Length(3),  // Help
             ])
             .split(area);
 
+        // Total Portfolio Value (big text display)
         let total_value = portfolio.get_total_value();
         let big_text = BigText::builder()
             .pixel_size(PixelSize::Quadrant)
@@ -229,18 +228,42 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             .title("Total Portfolio Value")
             .title_alignment(Alignment::Center);
 
-        f.render_widget(big_text_widget, chunks[0]);
-        
-        let inner = chunks[0].inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        f.render_widget(big_text_widget, main_chunks[0]);
+        let inner = main_chunks[0].inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
         f.render_widget(big_text, inner);
+
+        // Allocation section: bar chart on left, detailed list on right
+        let allocation_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(main_chunks[1]);
 
         let allocation = portfolio.get_allocation();
         let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
         allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
-        let allocation_items: Vec<ListItem> = allocation_vec
+        // Bar chart for visual allocation
+        let data: Vec<(&str, u64)> = allocation_vec
             .iter()
-            .take(5)
+            .map(|(name, percentage)| (name.as_str(), **percentage as u64))
+            .collect();
+
+        let barchart = BarChart::default()
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Asset Allocation"),
+            )
+            .data(&data)
+            .bar_width(9)
+            .bar_style(Style::default().fg(Color::Yellow))
+            .value_style(Style::default().fg(Color::Black).bg(Color::Yellow));
+
+        f.render_widget(barchart, allocation_chunks[0]);
+
+        // Detailed allocation list
+        let detailed_list: Vec<ListItem> = allocation_vec
+            .iter()
             .map(|(asset_class, percentage)| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -255,22 +278,23 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             })
             .collect();
 
-        let allocation_list = List::new(allocation_items)
+        let list = List::new(detailed_list)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Top Asset Classes"),
+                    .title("Detailed Allocation"),
             )
             .style(Style::default().fg(Color::White));
 
-        f.render_widget(allocation_list, chunks[1]);
+        f.render_widget(list, allocation_chunks[1]);
 
-        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (up/down) | 1-4 (direct) | q (quit)")
+        // Help text
+        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (up/down) | 1-3 (direct) | q (quit)")
             .block(Block::default().borders(Borders::ALL).title("Help"))
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
 
-        f.render_widget(help_text, chunks[2]);
+        f.render_widget(help_text, main_chunks[2]);
     } else {
         render_loading(f, area);
     }
@@ -321,66 +345,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_allocation(f: &mut Frame, area: Rect, app: &App) {
-    if let Some(portfolio) = &app.portfolio {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(area);
 
-        let allocation = portfolio.get_allocation();
-        let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
-        allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
-
-        let data: Vec<(&str, u64)> = allocation_vec
-            .iter()
-            .map(|(name, percentage)| (name.as_str(), **percentage as u64))
-            .collect();
-
-        let barchart = BarChart::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Asset Allocation"),
-            )
-            .data(&data)
-            .bar_width(9)
-            .bar_style(Style::default().fg(Color::Yellow))
-            .value_style(Style::default().fg(Color::Black).bg(Color::Yellow));
-
-        f.render_widget(barchart, chunks[0]);
-
-
-
-        let detailed_list: Vec<ListItem> = allocation_vec
-            .iter()
-            .map(|(asset_class, percentage)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{:<15}", asset_class),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::styled(
-                        format!("{:>8.2}%", percentage),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                ]))
-            })
-            .collect();
-
-        let list = List::new(detailed_list)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Detailed Allocation"),
-            )
-            .style(Style::default().fg(Color::White));
-
-        f.render_widget(list, chunks[1]);
-    } else {
-        render_loading(f, area);
-    }
-}
 
 fn render_performance(f: &mut Frame, area: Rect, app: &App) {
     if let Some(_portfolio) = &app.portfolio {
