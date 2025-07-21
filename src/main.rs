@@ -77,9 +77,9 @@ pub async fn create_live_portfolio(positions_str: String) -> Portfolio {
         match p {
             Ok(p) => match p {
                 Ok(p) => portfolio.add_position(p),
-                Err(e) => eprintln!("Error handling position: {:?}", e),
+                Err(e) => eprintln!("Error handling position: {e:?}"),
             },
-            Err(e) => eprintln!("Error handling position: {:?}", e),
+            Err(e) => eprintln!("Error handling position: {e:?}"),
         }
     }
     portfolio
@@ -159,7 +159,7 @@ async fn main() {
         } else if let Ok(s) = read_to_string(&filename) {
             s
         } else {
-            return Err(format!("Error reading file: {}", filename));
+            return Err(format!("Error reading file: {filename}"));
         };
         
         Ok(positions_str)
@@ -175,7 +175,7 @@ async fn main() {
                     portfolio.print(true);
                     store_balance_in_db(&portfolio);
                 }
-                Err(e) => eprintln!("{}", e),
+                Err(e) => eprintln!("{e}"),
             }
         }
         Some(("allocation", sub_matches)) => {
@@ -186,7 +186,7 @@ async fn main() {
                     portfolio.draw_pie_chart();
                     portfolio.print_allocation();
                 }
-                Err(e) => eprintln!("{}", e),
+                Err(e) => eprintln!("{e}"),
             }
         }
         Some(("performance", sub_matches)) => {
@@ -196,7 +196,7 @@ async fn main() {
                     let portfolio = create_live_portfolio(positions_str).await;
                     portfolio.print_performance().await;
                 }
-                Err(e) => eprintln!("{}", e),
+                Err(e) => eprintln!("{e}"),
             }
         }
         _ => {
@@ -206,11 +206,11 @@ async fn main() {
                 Ok(positions_str) => {
                     let portfolio = create_live_portfolio(positions_str.clone()).await;
                     if let Err(e) = tui::run_tui(portfolio, cfg.currency.clone(), positions_str).await {
-                        eprintln!("Error running TUI: {}", e);
+                        eprintln!("Error running TUI: {e}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("{}", e);
+                    eprintln!("{e}");
                     cli().print_help().unwrap();
                 }
             }

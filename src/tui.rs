@@ -25,18 +25,18 @@ fn format_currency(value: f64, currency: &str) -> String {
         format_with_commas(value)
     } else {
         match currency {
-            "JPY" => format!("{:.0}", value),
-            _ => format!("{:.2}", value),
+            "JPY" => format!("{value:.0}"),
+            _ => format!("{value:.2}"),
         }
     };
     
     match currency {
-        "USD" | "CAD" | "AUD" | "HKD" | "SGD" => format!("${}", formatted_number),
-        "EUR" => format!("{} €", formatted_number),
-        "GBP" => format!("£{}", formatted_number),
+        "USD" | "CAD" | "AUD" | "HKD" | "SGD" => format!("${formatted_number}"),
+        "EUR" => format!("{formatted_number} €"),
+        "GBP" => format!("£{formatted_number}"),
         "JPY" => {
             let integer_value = value as i64;
-            let formatted = format!("{}", integer_value);
+            let formatted = format!("{integer_value}");
             let formatted_with_commas = formatted
                 .chars()
                 .rev()
@@ -50,16 +50,16 @@ fn format_currency(value: f64, currency: &str) -> String {
                 .chars()
                 .rev()
                 .collect::<String>();
-            format!("¥{}", formatted_with_commas)
+            format!("¥{formatted_with_commas}")
         },
-        "CHF" => format!("{} CHF", formatted_number),
-        "SEK" | "NOK" | "DKK" => format!("{} {}", formatted_number, currency),
-        _ => format!("{} {}", formatted_number, currency),
+        "CHF" => format!("{formatted_number} CHF"),
+        "SEK" | "NOK" | "DKK" => format!("{formatted_number} {currency}"),
+        _ => format!("{formatted_number} {currency}"),
     }
 }
 
 fn format_with_commas(value: f64) -> String {
-    let formatted = format!("{:.2}", value);
+    let formatted = format!("{value:.2}");
     let parts: Vec<&str> = formatted.split('.').collect();
     let integer_part = parts[0];
     let decimal_part = parts.get(1).unwrap_or(&"00");
@@ -78,7 +78,7 @@ fn format_with_commas(value: f64) -> String {
         .rev()
         .collect::<String>();
     
-    format!("{}.{}", formatted_integer, decimal_part)
+    format!("{formatted_integer}.{decimal_part}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,15 +152,6 @@ impl App {
     pub fn set_portfolio(&mut self, portfolio: Portfolio) {
         self.portfolio = Some(portfolio);
         self.loading = false;
-    }
-
-    pub fn set_error(&mut self, error: String) {
-        self.error_message = Some(error);
-        self.loading = false;
-    }
-
-    pub fn set_performance_data(&mut self, data: PerformanceData) {
-        self.performance_data = Some(data);
     }
 
     pub fn next_tab(&mut self) {
@@ -360,7 +351,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             "GBP" => format!("£{}", format_with_commas(total_value)),
             "JPY" => {
                 let integer_value = total_value as i64;
-                let formatted = format!("{}", integer_value);
+                let formatted = format!("{integer_value}");
                 let formatted_with_commas = formatted
                     .chars()
                     .rev()
@@ -374,7 +365,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                     .chars()
                     .rev()
                     .collect::<String>();
-                format!("{} JPY", formatted_with_commas)
+                format!("{formatted_with_commas} JPY")
             },
             "CHF" => format!("{} CHF", format_with_commas(total_value)),
             _ => format!("{} {}", format_with_commas(total_value), app.currency),
@@ -456,11 +447,11 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("{:<15}", asset_class),
+                        format!("{asset_class:<15}"),
                         Style::default().fg(trend_color),
                     ),
                     Span::styled(
-                        format!("{:>8.2}%", percentage),
+                        format!("{percentage:>8.2}%"),
                         Style::default().fg(trend_color),
                     ),
                 ]))
@@ -560,7 +551,7 @@ fn render_performance(f: &mut Frame, area: Rect, app: &App) {
                 let color = if ytd >= 0.0 { Color::Green } else { Color::Red };
                 lines.push(Line::from(vec![
                     Span::styled("YTD Performance: ", Style::default().fg(Color::White)),
-                    Span::styled(format!("{:.2}%", ytd), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{ytd:.2}%"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 ]));
             }
             
@@ -568,7 +559,7 @@ fn render_performance(f: &mut Frame, area: Rect, app: &App) {
                 let color = if monthly >= 0.0 { Color::Green } else { Color::Red };
                 lines.push(Line::from(vec![
                     Span::styled("Monthly Performance: ", Style::default().fg(Color::White)),
-                    Span::styled(format!("{:.2}%", monthly), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{monthly:.2}%"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 ]));
             }
             
@@ -576,7 +567,7 @@ fn render_performance(f: &mut Frame, area: Rect, app: &App) {
                 let color = if recent >= 0.0 { Color::Green } else { Color::Red };
                 lines.push(Line::from(vec![
                     Span::styled("Recent Performance: ", Style::default().fg(Color::White)),
-                    Span::styled(format!("{:.2}%", recent), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{recent:.2}%"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 ]));
             }
             

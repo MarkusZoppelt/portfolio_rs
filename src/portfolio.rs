@@ -9,6 +9,12 @@ pub struct Portfolio {
     pub positions: Vec<PortfolioPosition>,
 }
 
+impl Default for Portfolio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Portfolio {
     pub fn new() -> Portfolio {
         Portfolio {
@@ -58,23 +64,19 @@ impl Portfolio {
                     }
                     Err(e) => {
                         errors.push(format!(
-                            "Error getting last quote for {}: {}",
-                            label,
-                            e
+                            "Error getting last quote for {label}: {e}"
                         ));
                         continue;
                     }
                 },
                 Err(e) => {
-                    let err_str = format!("{}", e);
+                    let err_str = format!("{e}");
                     if err_str.contains("Bad Request") {
-                        eprintln!("Warning: Skipping {} due to Yahoo Bad Request: {}", label, err_str);
+                        eprintln!("Warning: Skipping {label} due to Yahoo Bad Request: {err_str}");
                         continue;
                     }
                     errors.push(format!(
-                        "Error getting historic price data for {}: {}",
-                        label,
-                        err_str
+                        "Error getting historic price data for {label}: {err_str}"
                     ));
                     continue;
                 }
@@ -141,7 +143,7 @@ impl Portfolio {
 
         println!("====================================");
         for (asset_class, percentage) in allocation_vec {
-            println!("{0: >12} | {1: >10.2}", asset_class, percentage);
+            println!("{asset_class: >12} | {percentage: >10.2}");
         }
     }
 
@@ -194,13 +196,13 @@ impl Portfolio {
 
         let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await;
         if let Err(e) = value_at_beginning_of_year {
-            println!("Error getting value for beginning of year: {}", e);
+            println!("Error getting value for beginning of year: {e}");
             return;
         }
 
         let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await;
         if let Err(e) = value_at_beginning_of_month {
-            println!("Error getting value for beginning of month: {}", e);
+            println!("Error getting value for beginning of month: {e}");
             return;
         }
 
@@ -221,7 +223,7 @@ impl Portfolio {
                 Err(_) => continue,
             };
             let performance = (last - value) / value * 100.0;
-            let s = format!("{:.2}%", performance);
+            let s = format!("{performance:.2}%");
             let s = if performance >= 0.0 {
                 s.green()
             } else {
@@ -229,9 +231,9 @@ impl Portfolio {
             };
 
             match i {
-                0 => println!("YTD: {}", s),
-                1 => println!("Since beginning of month: {}", s),
-                2 => println!("Since last balance check: {}", s),
+                0 => println!("YTD: {s}"),
+                1 => println!("Since beginning of month: {s}"),
+                2 => println!("Since last balance check: {s}"),
                 _ => (),
             }
         }
