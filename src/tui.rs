@@ -136,10 +136,20 @@ async fn run_app<B: Backend>(
                     KeyCode::Char('q') | KeyCode::Esc => {
                         app.should_quit = true;
                     }
-                    KeyCode::Right | KeyCode::Tab => {
+                    // Vim navigation - hjkl
+                    KeyCode::Char('h') | KeyCode::Left => {
+                        app.previous_tab();
+                    }
+                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
                         app.next_tab();
                     }
-                    KeyCode::Left | KeyCode::BackTab => {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        // Could add scrolling here if needed
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        // Could add scrolling here if needed
+                    }
+                    KeyCode::BackTab => {
                         app.previous_tab();
                     }
                     KeyCode::Char('1') => app.current_tab = Tab::Overview,
@@ -255,7 +265,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
         f.render_widget(allocation_list, chunks[1]);
 
-        let help_text = Paragraph::new("Navigation: Tab/← → to switch tabs | 1-4 for direct tab access | q/Esc to quit")
+        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (up/down) | 1-4 (direct) | q (quit)")
             .block(Block::default().borders(Borders::ALL).title("Help"))
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);

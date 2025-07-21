@@ -56,6 +56,8 @@ The interactive Terminal User Interface (`portfolio_rs tui`) provides:
 - **Performance Tab**: Performance metrics (YTD, monthly, recent changes)
 
 ### TUI Navigation
+- `h` / `l` : Switch tabs left/right (vim-style)
+- `j` / `k` : Navigate up/down
 - `Tab` / `←` `→` : Switch between tabs
 - `1-4` : Jump directly to specific tabs
 - `q` / `Esc` : Quit the application
