@@ -25,26 +25,23 @@ Create a JSON file with your portfolio positions.
 
 Look at the [example data](example_data.json) for the format and data scheme.
 
-### 2. Use the subcommands to gain insight on your portfolio:
+### 2. Launch the portfolio tool:
 
-Launch the interactive TUI (Terminal User Interface):
+**Default: Interactive TUI** (recommended):
 
-    portfolio_rs tui <JSON_FILE>
+    portfolio_rs [JSON_FILE]
 
-Show the current balances of your portfolio: 
+**CLI Commands** (optional):
 
-    portfolio_rs balances <JSON_FILE>
+    portfolio_rs balances [JSON_FILE]     # Show balances table
+    portfolio_rs allocation [JSON_FILE]   # Show allocation chart  
+    portfolio_rs performance [JSON_FILE]  # Show performance metrics
 
-Show the current allocation of your portfolio: 
+**Configuration:**
 
-    portfolio_rs allocation <JSON_FILE>
+    portfolio_rs config                   # Show config file location
 
-Show the performance of your portfolio:
-    
-    portfolio_rs performance <JSON_FILE>
-
-
-If you need help, try `portfolio_rs help [SUBCOMMAND]` for usage information.
+If no file is specified, the tool uses the file from your config. If you need help, try `portfolio_rs --help` for usage information.
 
 ## TUI Features
 

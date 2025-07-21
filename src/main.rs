@@ -29,45 +29,35 @@ impl Default for Config {
 
 fn cli() -> Command {
     Command::new("portfolio_rs")
-        .about("A simple portfolio tool")
+        .about("A portfolio management tool with interactive TUI (default) and CLI commands")
         .author("Markus Zoppelt")
-        .arg_required_else_help(true)
-        .allow_external_subcommands(true)
+        .arg(
+            arg!([FILE] "JSON file with your positions")
+                .help("Portfolio data file (uses config file if not specified)")
+        )
         .subcommand(Command::new("config").about("Print the path to the config file"))
         .subcommand(
             Command::new("balances")
-                .about("Show the current balances of your portfolio")
+                .about("Show the current balances of your portfolio (CLI mode)")
                 .arg(
-                    arg!(<FILE> "JSON file with your positions")
-                        .required(false)
-                        .default_value(""),
+                    arg!([FILE] "JSON file with your positions")
+                        .help("Portfolio data file (uses config file if not specified)")
                 ),
         )
         .subcommand(
             Command::new("allocation")
-                .about("Show the current allocation of your portfolio")
+                .about("Show the current allocation of your portfolio (CLI mode)")
                 .arg(
-                    arg!(<FILE> "JSON file with your positions")
-                        .required(false)
-                        .default_value(""),
+                    arg!([FILE] "JSON file with your positions")
+                        .help("Portfolio data file (uses config file if not specified)")
                 ),
         )
         .subcommand(
             Command::new("performance")
-                .about("Show the performance of your portfolio")
+                .about("Show the performance of your portfolio (CLI mode)")
                 .arg(
-                    arg!(<FILE> "JSON file with your positions")
-                        .required(false)
-                        .default_value(""),
-                ),
-        )
-        .subcommand(
-            Command::new("tui")
-                .about("Launch the interactive TUI interface")
-                .arg(
-                    arg!(<FILE> "JSON file with your positions")
-                        .required(false)
-                        .default_value(""),
+                    arg!([FILE] "JSON file with your positions")
+                        .help("Portfolio data file (uses config file if not specified)")
                 ),
         )
 }
@@ -127,6 +117,7 @@ async fn main() {
 
     let matches = cli().get_matches();
 
+    // Handle config subcommand
     if let Some(_matches) = matches.subcommand_matches("config") {
         println!(
             "Your config file is located here: \n{}",
@@ -135,54 +126,93 @@ async fn main() {
                 .to_str()
                 .unwrap()
         );
+        return;
     }
 
-    for subcommand in ["balances", "allocation", "performance", "tui"].iter() {
-        if let Some(matches) = matches.subcommand_matches(subcommand) {
-            let mut filename = String::new();
-
-            // try to get filename as argument
-            if let Ok(Some(f)) = matches.try_get_one::<String>("FILE") {
+    // Get filename from arguments or config
+    let get_filename = |matches: Option<&clap::ArgMatches>| -> String {
+        let mut filename = String::new();
+        
+        // Try to get filename from subcommand or main args
+        if let Some(matches) = matches {
+            if let Some(f) = matches.get_one::<String>("FILE") {
                 filename = f.to_string();
             }
-            // if no argument is given, try to get filename from config
-            if filename.is_empty() {
-                filename.clone_from(&cfg.portfolio_file);
-            }
-            // if no argument and no config is given, print help
-            if filename.is_empty() {
-                cli().print_help().unwrap();
-                return;
-            }
-            let positions_str = if filename.ends_with(".gpg") {
-                open_encrpted_file(filename.to_string())
-            } else if let Ok(s) = read_to_string(&filename) {
-                s
-            } else {
-                eprintln!("Error reading file: {}", filename);
-                return;
-            };
+        }
+        
+        // Fall back to config file
+        if filename.is_empty() {
+            filename.clone_from(&cfg.portfolio_file);
+        }
+        
+        filename
+    };
 
-            let portfolio = create_live_portfolio(positions_str.clone()).await;
+    // Load portfolio data
+    let load_portfolio = |filename: String| -> Result<String, String> {
+        if filename.is_empty() {
+            return Err("No portfolio file specified. Use --help for usage information.".to_string());
+        }
+        
+        let positions_str = if filename.ends_with(".gpg") {
+            open_encrpted_file(filename.to_string())
+        } else if let Ok(s) = read_to_string(&filename) {
+            s
+        } else {
+            return Err(format!("Error reading file: {}", filename));
+        };
+        
+        Ok(positions_str)
+    };
 
-            match subcommand as &str {
-                "balances" => {
+    // Handle subcommands or default to TUI
+    match matches.subcommand() {
+        Some(("balances", sub_matches)) => {
+            let filename = get_filename(Some(sub_matches));
+            match load_portfolio(filename) {
+                Ok(positions_str) => {
+                    let portfolio = create_live_portfolio(positions_str).await;
                     portfolio.print(true);
                     store_balance_in_db(&portfolio);
                 }
-                "allocation" => {
+                Err(e) => eprintln!("{}", e),
+            }
+        }
+        Some(("allocation", sub_matches)) => {
+            let filename = get_filename(Some(sub_matches));
+            match load_portfolio(filename) {
+                Ok(positions_str) => {
+                    let portfolio = create_live_portfolio(positions_str).await;
                     portfolio.draw_pie_chart();
                     portfolio.print_allocation();
                 }
-                "performance" => {
+                Err(e) => eprintln!("{}", e),
+            }
+        }
+        Some(("performance", sub_matches)) => {
+            let filename = get_filename(Some(sub_matches));
+            match load_portfolio(filename) {
+                Ok(positions_str) => {
+                    let portfolio = create_live_portfolio(positions_str).await;
                     portfolio.print_performance().await;
                 }
-                "tui" => {
+                Err(e) => eprintln!("{}", e),
+            }
+        }
+        _ => {
+            // Default to TUI when no subcommand is given
+            let filename = get_filename(None);
+            match load_portfolio(filename) {
+                Ok(positions_str) => {
+                    let portfolio = create_live_portfolio(positions_str.clone()).await;
                     if let Err(e) = tui::run_tui(portfolio, cfg.currency.clone(), positions_str).await {
                         eprintln!("Error running TUI: {}", e);
                     }
                 }
-                _ => (),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    cli().print_help().unwrap();
+                }
             }
         }
     }
