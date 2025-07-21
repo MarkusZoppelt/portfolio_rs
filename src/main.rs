@@ -10,6 +10,7 @@ use serde::Serialize;
 
 mod portfolio;
 mod position;
+mod tui;
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -54,6 +55,15 @@ fn cli() -> Command {
         .subcommand(
             Command::new("performance")
                 .about("Show the performance of your portfolio")
+                .arg(
+                    arg!(<FILE> "JSON file with your positions")
+                        .required(false)
+                        .default_value(""),
+                ),
+        )
+        .subcommand(
+            Command::new("tui")
+                .about("Launch the interactive TUI interface")
                 .arg(
                     arg!(<FILE> "JSON file with your positions")
                         .required(false)
@@ -127,7 +137,7 @@ async fn main() {
         );
     }
 
-    for subcommand in ["balances", "allocation", "performance"].iter() {
+    for subcommand in ["balances", "allocation", "performance", "tui"].iter() {
         if let Some(matches) = matches.subcommand_matches(subcommand) {
             let mut filename = String::new();
 
@@ -166,6 +176,11 @@ async fn main() {
                 }
                 "performance" => {
                     portfolio.print_performance().await;
+                }
+                "tui" => {
+                    if let Err(e) = tui::run_tui(portfolio).await {
+                        eprintln!("Error running TUI: {}", e);
+                    }
                 }
                 _ => (),
             }

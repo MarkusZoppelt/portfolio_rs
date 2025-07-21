@@ -4,7 +4,7 @@
 	<img src="https://github.com/MarkusZoppelt/portfolio_rs/actions/workflows/rust-clippy.yml/badge.svg" alt="clippy analyze status badge">
 </p>
 
-A command line tool for managing financial investment portfolios written in Rust.
+A command line tool with interactive TUI for managing financial investment portfolios written in Rust.
 
 > *This project is the modern successor of [finance](https://github.com/MarkusZoppelt/finance).*
 
@@ -26,6 +26,11 @@ Create a JSON file with your portfolio positions.
 Look at the [example data](example_data.json) for the format and data scheme.
 
 ### 2. Use the subcommands to gain insight on your portfolio:
+
+Launch the interactive TUI (Terminal User Interface):
+
+    portfolio_rs tui <JSON_FILE>
+
 Show the current balances of your portfolio: 
 
     portfolio_rs balances <JSON_FILE>
@@ -40,6 +45,20 @@ Show the performance of your portfolio:
 
 
 If you need help, try `portfolio_rs help [SUBCOMMAND]` for usage information.
+
+## TUI Features
+
+The interactive Terminal User Interface (`portfolio_rs tui`) provides:
+
+- **Overview Tab**: Large display of total portfolio value with top asset classes
+- **Balances Tab**: Detailed table of all positions with amounts and current values  
+- **Allocation Tab**: Visual bar chart and detailed breakdown of asset allocation
+- **Performance Tab**: Performance metrics (YTD, monthly, recent changes)
+
+### TUI Navigation
+- `Tab` / `←` `→` : Switch between tabs
+- `1-4` : Jump directly to specific tabs
+- `q` / `Esc` : Quit the application
 
 
 ## Demo

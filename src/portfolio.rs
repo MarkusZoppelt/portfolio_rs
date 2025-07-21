@@ -6,7 +6,7 @@ use piechart::{Chart, Color};
 use std::collections::HashMap;
 
 pub struct Portfolio {
-    positions: Vec<PortfolioPosition>,
+    pub positions: Vec<PortfolioPosition>,
 }
 
 impl Portfolio {
