@@ -279,10 +279,37 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
         // Total Portfolio Value (big text display)
         let total_value = portfolio.get_total_value();
+        // Create formatted currency for big text with full accuracy
+        let big_text_value = match app.currency.as_str() {
+            "USD" | "CAD" | "AUD" | "HKD" | "SGD" => format!("${}", format_with_commas(total_value)),
+            "EUR" => format!("{} EUR", format_with_commas(total_value)),
+            "GBP" => format!("£{}", format_with_commas(total_value)),
+            "JPY" => {
+                let integer_value = total_value as i64;
+                let formatted = format!("{}", integer_value);
+                let formatted_with_commas = formatted
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .chunks(3)
+                    .map(|chunk| chunk.iter().collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    .chars()
+                    .rev()
+                    .collect::<String>();
+                format!("{} JPY", formatted_with_commas)
+            },
+            "CHF" => format!("{} CHF", format_with_commas(total_value)),
+            _ => format!("{} {}", format_with_commas(total_value), app.currency),
+        };
+        
         let big_text = BigText::builder()
             .pixel_size(PixelSize::Quadrant)
             .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-            .lines(vec![format_currency(total_value, &app.currency).into()])
+            .lines(vec![big_text_value.clone().into()])
             .build();
 
         let big_text_widget = Block::default()
@@ -291,8 +318,27 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             .title_alignment(Alignment::Center);
 
         f.render_widget(big_text_widget, main_chunks[0]);
+        
+        // Center the big text within the widget
         let inner = main_chunks[0].inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
-        f.render_widget(big_text, inner);
+        let big_text_width = big_text_value.len() as u16 * 4; // Approximate width per character in big text
+        let available_width = inner.width;
+        
+        let centered_area = if big_text_width < available_width {
+            let margin = (available_width - big_text_width) / 2;
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(margin),
+                    Constraint::Min(0),
+                    Constraint::Length(margin),
+                ])
+                .split(inner)[1]
+        } else {
+            inner
+        };
+        
+        f.render_widget(big_text, centered_area);
 
         // Allocation section: bar chart on left, detailed list on right
         let allocation_chunks = Layout::default()
