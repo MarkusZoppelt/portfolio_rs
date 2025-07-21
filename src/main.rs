@@ -178,7 +178,7 @@ async fn main() {
                     portfolio.print_performance().await;
                 }
                 "tui" => {
-                    if let Err(e) = tui::run_tui(portfolio).await {
+                    if let Err(e) = tui::run_tui(portfolio, cfg.currency.clone()).await {
                         eprintln!("Error running TUI: {}", e);
                     }
                 }

@@ -18,6 +18,67 @@ use ratatui::{
 use std::io;
 use tui_big_text::{BigText, PixelSize};
 
+fn format_currency(value: f64, currency: &str) -> String {
+    let formatted_number = if value >= 1000.0 {
+        format_with_commas(value)
+    } else {
+        match currency {
+            "JPY" => format!("{:.0}", value),
+            _ => format!("{:.2}", value),
+        }
+    };
+    
+    match currency {
+        "USD" | "CAD" | "AUD" | "HKD" | "SGD" => format!("${}", formatted_number),
+        "EUR" => format!("{} €", formatted_number),
+        "GBP" => format!("£{}", formatted_number),
+        "JPY" => {
+            let integer_value = value as i64;
+            let formatted = format!("{}", integer_value);
+            let formatted_with_commas = formatted
+                .chars()
+                .rev()
+                .collect::<String>()
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(3)
+                .map(|chunk| chunk.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join(",")
+                .chars()
+                .rev()
+                .collect::<String>();
+            format!("¥{}", formatted_with_commas)
+        },
+        "CHF" => format!("{} CHF", formatted_number),
+        "SEK" | "NOK" | "DKK" => format!("{} {}", formatted_number, currency),
+        _ => format!("{} {}", formatted_number, currency),
+    }
+}
+
+fn format_with_commas(value: f64) -> String {
+    let formatted = format!("{:.2}", value);
+    let parts: Vec<&str> = formatted.split('.').collect();
+    let integer_part = parts[0];
+    let decimal_part = parts.get(1).unwrap_or(&"00");
+    
+    let formatted_integer = integer_part
+        .chars()
+        .rev()
+        .collect::<String>()
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(3)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join(",")
+        .chars()
+        .rev()
+        .collect::<String>();
+    
+    format!("{}.{}", formatted_integer, decimal_part)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tab {
     Overview,
@@ -57,7 +118,7 @@ pub struct PerformanceData {
 }
 
 impl App {
-    pub fn new() -> App {
+    pub fn new(currency: String) -> App {
         App {
             current_tab: Tab::Overview,
             portfolio: None,
@@ -65,6 +126,7 @@ impl App {
             loading: false,
             error_message: None,
             performance_data: None,
+            currency,
         }
     }
 
@@ -95,14 +157,14 @@ impl App {
     }
 }
 
-pub async fn run_tui(portfolio: Portfolio) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_tui(portfolio: Portfolio, currency: String) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(currency);
     app.set_portfolio(portfolio);
 
     let res = run_app(&mut terminal, &mut app).await;
@@ -220,12 +282,12 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let big_text = BigText::builder()
             .pixel_size(PixelSize::Quadrant)
             .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-            .lines(vec![format!("${:.2}", total_value).into()])
+            .lines(vec![format_currency(total_value, &app.currency).into()])
             .build();
 
         let big_text_widget = Block::default()
             .borders(Borders::ALL)
-            .title("Total Portfolio Value")
+            .title(format!("Total Portfolio Value ({})", app.currency))
             .title_alignment(Alignment::Center);
 
         f.render_widget(big_text_widget, main_chunks[0]);
@@ -312,7 +374,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(position.get_name()),
                 Cell::from(position.get_asset_class()),
                 Cell::from(format!("{:.2}", position.get_amount())),
-                Cell::from(format!("${:.2}", position.get_balance())),
+                Cell::from(format_currency(position.get_balance(), &app.currency)),
             ];
             Row::new(cells).height(1)
         });
@@ -322,7 +384,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             Cell::from("TOTAL").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
             Cell::from(""),
             Cell::from(""),
-            Cell::from(format!("${:.2}", total_value)).style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Cell::from(format_currency(total_value, &app.currency)).style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         ]).height(1);
 
         let table = Table::new(rows.chain(std::iter::once(total_row)), [
