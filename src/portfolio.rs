@@ -183,6 +183,34 @@ impl Portfolio {
             .draw(&data);
     }
 
+    pub async fn get_performance_data(&self) -> Result<(f64, f64, f64), String> {
+        let db = sled::open("database").map_err(|e| format!("Database error: {e}"))?;
+
+        // Yahoo first of the year is YYYY-01-03
+        let first_of_the_year = Utc
+            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
+            .unwrap();
+        let first_of_the_month = Utc
+            .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
+            .unwrap();
+
+        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await?;
+        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await?;
+
+        let last: f64 = match &db.iter().last() {
+            Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
+            _ => 0.0,
+        };
+
+        let current_value = self.get_total_value();
+        
+        let ytd_performance = (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0;
+        let monthly_performance = (last - value_at_beginning_of_month) / value_at_beginning_of_month * 100.0;
+        let recent_performance = (last - current_value) / current_value * 100.0;
+
+        Ok((ytd_performance, monthly_performance, recent_performance))
+    }
+
     pub async fn print_performance(&self) {
         let db = sled::open("database").unwrap();
 

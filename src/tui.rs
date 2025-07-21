@@ -10,7 +10,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         BarChart, Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table,
         Tabs, Wrap,
@@ -85,7 +85,6 @@ fn format_with_commas(value: f64) -> String {
 pub enum Tab {
     Overview,
     Balances,
-    Performance,
 }
 
 impl Tab {
@@ -93,12 +92,11 @@ impl Tab {
         match self {
             Tab::Overview => "Overview & Allocation",
             Tab::Balances => "Balances",
-            Tab::Performance => "Performance",
         }
     }
 
     fn all() -> &'static [Tab] {
-        &[Tab::Overview, Tab::Balances, Tab::Performance]
+        &[Tab::Overview, Tab::Balances]
     }
 }
 
@@ -108,7 +106,6 @@ pub struct App {
     pub should_quit: bool,
     pub loading: bool,
     pub error_message: Option<String>,
-    pub performance_data: Option<PerformanceData>,
     pub currency: String,
     pub previous_values: HashMap<String, f64>,
     pub trends: HashMap<String, Trend>,
@@ -124,12 +121,7 @@ pub enum Trend {
     Neutral,
 }
 
-#[derive(Debug, Clone)]
-pub struct PerformanceData {
-    pub ytd: Option<f64>,
-    pub monthly: Option<f64>,
-    pub recent: Option<f64>,
-}
+
 
 impl App {
     pub fn new(currency: String, positions_str: String) -> App {
@@ -139,7 +131,6 @@ impl App {
             should_quit: false,
             loading: false,
             error_message: None,
-            performance_data: None,
             currency,
             previous_values: HashMap::new(),
             trends: HashMap::new(),
@@ -208,6 +199,8 @@ impl App {
             _ => base_color,
         }
     }
+
+
 }
 
 pub async fn run_tui(portfolio: Portfolio, currency: String, positions_str: String) -> Result<(), Box<dyn std::error::Error>> {
@@ -274,17 +267,19 @@ async fn run_app<B: Backend>(
                         KeyCode::Char('k') | KeyCode::Up => {
                             // Could add scrolling here if needed
                         }
+
                         KeyCode::BackTab => {
                             app.previous_tab();
                         }
                         KeyCode::Char('1') => app.current_tab = Tab::Overview,
                         KeyCode::Char('2') => app.current_tab = Tab::Balances,
-                        KeyCode::Char('3') => app.current_tab = Tab::Performance,
                         _ => {}
                     }
                 }
             }
         }
+
+
 
         if app.should_quit {
             break;
@@ -322,7 +317,6 @@ fn ui(f: &mut Frame, app: &App) {
     match app.current_tab {
         Tab::Overview => render_overview(f, chunks[1], app),
         Tab::Balances => render_balances(f, chunks[1], app),
-        Tab::Performance => render_performance(f, chunks[1], app),
     }
 
     if let Some(error) = &app.error_message {
@@ -469,7 +463,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(list, allocation_chunks[1]);
 
         // Help text
-        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (up/down) | 1-3 (direct) | q (quit)")
+        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (up/down) | 1-2 (direct) | q (quit)")
             .block(Block::default().borders(Borders::ALL).title("Help"))
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
@@ -537,70 +531,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
 
 
 
-fn render_performance(f: &mut Frame, area: Rect, app: &App) {
-    if let Some(_portfolio) = &app.portfolio {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
 
-        let performance_text = if let Some(perf_data) = &app.performance_data {
-            let mut lines = vec![];
-            
-            if let Some(ytd) = perf_data.ytd {
-                let color = if ytd >= 0.0 { Color::Green } else { Color::Red };
-                lines.push(Line::from(vec![
-                    Span::styled("YTD Performance: ", Style::default().fg(Color::White)),
-                    Span::styled(format!("{ytd:.2}%"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                ]));
-            }
-            
-            if let Some(monthly) = perf_data.monthly {
-                let color = if monthly >= 0.0 { Color::Green } else { Color::Red };
-                lines.push(Line::from(vec![
-                    Span::styled("Monthly Performance: ", Style::default().fg(Color::White)),
-                    Span::styled(format!("{monthly:.2}%"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                ]));
-            }
-            
-            if let Some(recent) = perf_data.recent {
-                let color = if recent >= 0.0 { Color::Green } else { Color::Red };
-                lines.push(Line::from(vec![
-                    Span::styled("Recent Performance: ", Style::default().fg(Color::White)),
-                    Span::styled(format!("{recent:.2}%"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                ]));
-            }
-            
-            Text::from(lines)
-        } else {
-            Text::from("Loading performance data...")
-        };
-
-        let performance_paragraph = Paragraph::new(performance_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Performance Metrics"),
-            )
-            .style(Style::default().fg(Color::White))
-            .alignment(Alignment::Left);
-
-        f.render_widget(performance_paragraph, chunks[0]);
-
-        let db_info = Paragraph::new("Historical data is stored locally and used for performance calculations.\nData is fetched from Yahoo Finance API.")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Data Information"),
-            )
-            .style(Style::default().fg(Color::Gray))
-            .wrap(Wrap { trim: true });
-
-        f.render_widget(db_info, chunks[1]);
-    } else {
-        render_loading(f, area);
-    }
-}
 
 fn render_loading(f: &mut Frame, area: Rect) {
     let loading_text = Paragraph::new("Loading portfolio data...")
