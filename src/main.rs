@@ -73,7 +73,7 @@ fn cli() -> Command {
 }
 
 // returns a porfolio with the latest quotes from json data
-async fn create_live_portfolio(positions_str: String) -> Portfolio {
+pub async fn create_live_portfolio(positions_str: String) -> Portfolio {
     let positions = from_string(&positions_str);
     let mut portfolio = Portfolio::new();
     // move tasks into the async closure passed to tokio::spawn()
@@ -163,7 +163,7 @@ async fn main() {
                 return;
             };
 
-            let portfolio = create_live_portfolio(positions_str).await;
+            let portfolio = create_live_portfolio(positions_str.clone()).await;
 
             match subcommand as &str {
                 "balances" => {
@@ -178,7 +178,7 @@ async fn main() {
                     portfolio.print_performance().await;
                 }
                 "tui" => {
-                    if let Err(e) = tui::run_tui(portfolio, cfg.currency.clone()).await {
+                    if let Err(e) = tui::run_tui(portfolio, cfg.currency.clone(), positions_str).await {
                         eprintln!("Error running TUI: {}", e);
                     }
                 }

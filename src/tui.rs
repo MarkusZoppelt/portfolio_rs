@@ -4,6 +4,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -108,6 +110,18 @@ pub struct App {
     pub error_message: Option<String>,
     pub performance_data: Option<PerformanceData>,
     pub currency: String,
+    pub previous_values: HashMap<String, f64>,
+    pub trends: HashMap<String, Trend>,
+    pub last_update: Instant,
+    pub flash_state: bool,
+    pub positions_str: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trend {
+    Up,
+    Down,
+    Neutral,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +132,7 @@ pub struct PerformanceData {
 }
 
 impl App {
-    pub fn new(currency: String) -> App {
+    pub fn new(currency: String, positions_str: String) -> App {
         App {
             current_tab: Tab::Overview,
             portfolio: None,
@@ -127,6 +141,11 @@ impl App {
             error_message: None,
             performance_data: None,
             currency,
+            previous_values: HashMap::new(),
+            trends: HashMap::new(),
+            last_update: Instant::now(),
+            flash_state: false,
+            positions_str,
         }
     }
 
@@ -155,16 +174,59 @@ impl App {
         let current_index = tabs.iter().position(|&t| t == self.current_tab).unwrap_or(0);
         self.current_tab = tabs[(current_index + tabs.len() - 1) % tabs.len()];
     }
+
+    pub fn update_trends(&mut self, portfolio: &Portfolio) {
+        for position in &portfolio.positions {
+            let name = position.get_name().to_string();
+            let current_value = position.get_balance();
+            
+            if let Some(&previous_value) = self.previous_values.get(&name) {
+                // Use a small threshold to avoid noise from tiny changes
+                let threshold = 0.01; // 1 cent threshold
+                let trend = if current_value > previous_value + threshold {
+                    Trend::Up
+                } else if current_value < previous_value - threshold {
+                    Trend::Down
+                } else {
+                    // Keep the previous trend if change is too small, or set neutral if no previous trend
+                    self.trends.get(&name).copied().unwrap_or(Trend::Neutral)
+                };
+                self.trends.insert(name.clone(), trend);
+            } else {
+                // First time seeing this position
+                self.trends.insert(name.clone(), Trend::Neutral);
+            }
+            
+            self.previous_values.insert(name, current_value);
+        }
+    }
+
+    pub fn should_refresh(&self) -> bool {
+        self.last_update.elapsed() >= Duration::from_secs(1)
+    }
+
+    pub fn mark_refreshed(&mut self) {
+        self.last_update = Instant::now();
+        self.flash_state = !self.flash_state; // Toggle flash state for animation
+    }
+
+    pub fn get_trend_color(&self, name: &str, base_color: Color) -> Color {
+        match self.trends.get(name) {
+            Some(Trend::Up) => if self.flash_state { Color::LightGreen } else { Color::Green },
+            Some(Trend::Down) => if self.flash_state { Color::LightRed } else { Color::Red },
+            _ => base_color,
+        }
+    }
 }
 
-pub async fn run_tui(portfolio: Portfolio, currency: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_tui(portfolio: Portfolio, currency: String, positions_str: String) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(currency);
+    let mut app = App::new(currency, positions_str);
     app.set_portfolio(portfolio);
 
     let res = run_app(&mut terminal, &mut app).await;
@@ -191,32 +253,44 @@ async fn run_app<B: Backend>(
     loop {
         terminal.draw(|f| ui(f, app))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        app.should_quit = true;
+        // Check if we should refresh data
+        if app.should_refresh() {
+            let positions_str = app.positions_str.clone();
+            let portfolio = crate::create_live_portfolio(positions_str).await;
+            app.update_trends(&portfolio);
+            app.set_portfolio(portfolio);
+            app.mark_refreshed();
+        }
+
+        // Use poll to check for events with timeout
+        if crossterm::event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            app.should_quit = true;
+                        }
+                        // Vim navigation - hjkl
+                        KeyCode::Char('h') | KeyCode::Left => {
+                            app.previous_tab();
+                        }
+                        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+                            app.next_tab();
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            // Could add scrolling here if needed
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            // Could add scrolling here if needed
+                        }
+                        KeyCode::BackTab => {
+                            app.previous_tab();
+                        }
+                        KeyCode::Char('1') => app.current_tab = Tab::Overview,
+                        KeyCode::Char('2') => app.current_tab = Tab::Balances,
+                        KeyCode::Char('3') => app.current_tab = Tab::Performance,
+                        _ => {}
                     }
-                    // Vim navigation - hjkl
-                    KeyCode::Char('h') | KeyCode::Left => {
-                        app.previous_tab();
-                    }
-                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
-                        app.next_tab();
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        // Could add scrolling here if needed
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        // Could add scrolling here if needed
-                    }
-                    KeyCode::BackTab => {
-                        app.previous_tab();
-                    }
-                    KeyCode::Char('1') => app.current_tab = Tab::Overview,
-                    KeyCode::Char('2') => app.current_tab = Tab::Balances,
-                    KeyCode::Char('3') => app.current_tab = Tab::Performance,
-                    _ => {}
                 }
             }
         }
@@ -312,9 +386,10 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             .lines(vec![big_text_value.clone().into()])
             .build();
 
+        let refresh_indicator = if app.flash_state { "●" } else { "○" };
         let big_text_widget = Block::default()
             .borders(Borders::ALL)
-            .title(format!("Total Portfolio Value ({})", app.currency))
+            .title(format!("Total Portfolio Value ({}) {}", app.currency, refresh_indicator))
             .title_alignment(Alignment::Center);
 
         f.render_widget(big_text_widget, main_chunks[0]);
@@ -373,14 +448,20 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let detailed_list: Vec<ListItem> = allocation_vec
             .iter()
             .map(|(asset_class, percentage)| {
+                // Find a position with this asset class to get trend color
+                let trend_color = portfolio.positions.iter()
+                    .find(|p| p.get_asset_class() == *asset_class)
+                    .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
+                    .unwrap_or(Color::Cyan);
+                
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{:<15}", asset_class),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(trend_color),
                     ),
                     Span::styled(
                         format!("{:>8.2}%", percentage),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(trend_color),
                     ),
                 ]))
             })
@@ -416,11 +497,21 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
         let header = Row::new(header_cells).height(1).bottom_margin(1);
 
         let rows = portfolio.positions.iter().map(|position| {
+            let name = position.get_name();
+            let balance_color = app.get_trend_color(name, Color::White);
+            
+            // Add indicator for positions with tickers (live data) vs static positions
+            let name_with_indicator = if position.get_ticker().is_some() {
+                format!("● {}", position.get_name()) // Live data indicator
+            } else {
+                format!("○ {}", position.get_name()) // Static data indicator
+            };
+            
             let cells = vec![
-                Cell::from(position.get_name()),
-                Cell::from(position.get_asset_class()),
-                Cell::from(format!("{:.2}", position.get_amount())),
-                Cell::from(format_currency(position.get_balance(), &app.currency)),
+                Cell::from(name_with_indicator).style(Style::default().fg(balance_color)),
+                Cell::from(position.get_asset_class()).style(Style::default().fg(balance_color)),
+                Cell::from(format!("{:.2}", position.get_amount())).style(Style::default().fg(balance_color)),
+                Cell::from(format_currency(position.get_balance(), &app.currency)).style(Style::default().fg(balance_color)),
             ];
             Row::new(cells).height(1)
         });
