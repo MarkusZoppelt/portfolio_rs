@@ -33,7 +33,7 @@ fn cli() -> Command {
         .author("Markus Zoppelt")
         .arg(
             arg!([FILE] "JSON file with your positions")
-                .help("Portfolio data file (uses config file if not specified)")
+                .help("Portfolio data file (uses config file if not specified)"),
         )
         .subcommand(Command::new("config").about("Print the path to the config file"))
         .subcommand(
@@ -41,7 +41,7 @@ fn cli() -> Command {
                 .about("Show the current balances of your portfolio (CLI mode)")
                 .arg(
                     arg!([FILE] "JSON file with your positions")
-                        .help("Portfolio data file (uses config file if not specified)")
+                        .help("Portfolio data file (uses config file if not specified)"),
                 ),
         )
         .subcommand(
@@ -49,7 +49,7 @@ fn cli() -> Command {
                 .about("Show the current allocation of your portfolio (CLI mode)")
                 .arg(
                     arg!([FILE] "JSON file with your positions")
-                        .help("Portfolio data file (uses config file if not specified)")
+                        .help("Portfolio data file (uses config file if not specified)"),
                 ),
         )
         .subcommand(
@@ -57,7 +57,7 @@ fn cli() -> Command {
                 .about("Show the performance of your portfolio (CLI mode)")
                 .arg(
                     arg!([FILE] "JSON file with your positions")
-                        .help("Portfolio data file (uses config file if not specified)")
+                        .help("Portfolio data file (uses config file if not specified)"),
                 ),
         )
 }
@@ -132,28 +132,30 @@ async fn main() {
     // Get filename from arguments or config
     let get_filename = |matches: Option<&clap::ArgMatches>| -> String {
         let mut filename = String::new();
-        
+
         // Try to get filename from subcommand or main args
         if let Some(matches) = matches {
             if let Some(f) = matches.get_one::<String>("FILE") {
                 filename = f.to_string();
             }
         }
-        
+
         // Fall back to config file
         if filename.is_empty() {
             filename.clone_from(&cfg.portfolio_file);
         }
-        
+
         filename
     };
 
     // Load portfolio data
     let load_portfolio = |filename: String| -> Result<String, String> {
         if filename.is_empty() {
-            return Err("No portfolio file specified. Use --help for usage information.".to_string());
+            return Err(
+                "No portfolio file specified. Use --help for usage information.".to_string(),
+            );
         }
-        
+
         let positions_str = if filename.ends_with(".gpg") {
             open_encrpted_file(filename.to_string())
         } else if let Ok(s) = read_to_string(&filename) {
@@ -161,7 +163,7 @@ async fn main() {
         } else {
             return Err(format!("Error reading file: {filename}"));
         };
-        
+
         Ok(positions_str)
     };
 
@@ -202,10 +204,12 @@ async fn main() {
         _ => {
             // Default to TUI when no subcommand is given
             let filename = get_filename(None);
-            match load_portfolio(filename) {
+            match load_portfolio(filename.clone()) {
                 Ok(positions_str) => {
                     let portfolio = create_live_portfolio(positions_str.clone()).await;
-                    if let Err(e) = tui::run_tui(portfolio, cfg.currency.clone(), positions_str).await {
+                    if let Err(e) =
+                        tui::run_tui(portfolio, cfg.currency.clone(), positions_str, filename).await
+                    {
                         eprintln!("Error running TUI: {e}");
                     }
                 }

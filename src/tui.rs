@@ -4,20 +4,19 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        BarChart, Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table,
-        Tabs, Wrap,
+        BarChart, Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap,
     },
     Frame, Terminal,
 };
+use std::collections::HashMap;
 use std::io;
+use std::time::{Duration, Instant};
 use tui_big_text::{BigText, PixelSize};
 
 fn format_currency(value: f64, currency: &str) -> String {
@@ -29,7 +28,7 @@ fn format_currency(value: f64, currency: &str) -> String {
             _ => format!("{value:.2}"),
         }
     };
-    
+
     match currency {
         "USD" | "CAD" | "AUD" | "HKD" | "SGD" => format!("${formatted_number}"),
         "EUR" => format!("{formatted_number} €"),
@@ -51,7 +50,7 @@ fn format_currency(value: f64, currency: &str) -> String {
                 .rev()
                 .collect::<String>();
             format!("¥{formatted_with_commas}")
-        },
+        }
         "CHF" => format!("{formatted_number} CHF"),
         "SEK" | "NOK" | "DKK" => format!("{formatted_number} {currency}"),
         _ => format!("{formatted_number} {currency}"),
@@ -63,7 +62,7 @@ fn format_with_commas(value: f64) -> String {
     let parts: Vec<&str> = formatted.split('.').collect();
     let integer_part = parts[0];
     let decimal_part = parts.get(1).unwrap_or(&"00");
-    
+
     let formatted_integer = integer_part
         .chars()
         .rev()
@@ -77,14 +76,32 @@ fn format_with_commas(value: f64) -> String {
         .chars()
         .rev()
         .collect::<String>();
-    
+
     format!("{formatted_integer}.{decimal_part}")
+}
+
+fn format_amount(amount: f64) -> String {
+    if amount.fract() == 0.0 {
+        format!("{amount:.0}")
+    } else if amount >= 1.0 {
+        format!("{amount:.2}")
+    } else if amount >= 0.01 {
+        format!("{amount:.4}")
+    } else {
+        format!("{amount:.8}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tab {
     Overview,
     Balances,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppMode {
+    Normal,
+    Edit,
 }
 
 impl Tab {
@@ -112,6 +129,10 @@ pub struct App {
     pub last_update: Instant,
     pub flash_state: bool,
     pub positions_str: String,
+    pub mode: AppMode,
+    pub selected_position: usize,
+    pub edit_input: String,
+    pub data_file_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,10 +142,8 @@ pub enum Trend {
     Neutral,
 }
 
-
-
 impl App {
-    pub fn new(currency: String, positions_str: String) -> App {
+    pub fn new(currency: String, positions_str: String, data_file_path: String) -> App {
         App {
             current_tab: Tab::Overview,
             portfolio: None,
@@ -137,6 +156,10 @@ impl App {
             last_update: Instant::now(),
             flash_state: false,
             positions_str,
+            mode: AppMode::Normal,
+            selected_position: 0,
+            edit_input: String::new(),
+            data_file_path,
         }
     }
 
@@ -147,13 +170,19 @@ impl App {
 
     pub fn next_tab(&mut self) {
         let tabs = Tab::all();
-        let current_index = tabs.iter().position(|&t| t == self.current_tab).unwrap_or(0);
+        let current_index = tabs
+            .iter()
+            .position(|&t| t == self.current_tab)
+            .unwrap_or(0);
         self.current_tab = tabs[(current_index + 1) % tabs.len()];
     }
 
     pub fn previous_tab(&mut self) {
         let tabs = Tab::all();
-        let current_index = tabs.iter().position(|&t| t == self.current_tab).unwrap_or(0);
+        let current_index = tabs
+            .iter()
+            .position(|&t| t == self.current_tab)
+            .unwrap_or(0);
         self.current_tab = tabs[(current_index + tabs.len() - 1) % tabs.len()];
     }
 
@@ -161,7 +190,7 @@ impl App {
         for position in &portfolio.positions {
             let name = position.get_name().to_string();
             let current_value = position.get_balance();
-            
+
             if let Some(&previous_value) = self.previous_values.get(&name) {
                 // Use a small threshold to avoid noise from tiny changes
                 let threshold = 0.01; // 1 cent threshold
@@ -178,7 +207,7 @@ impl App {
                 // First time seeing this position
                 self.trends.insert(name.clone(), Trend::Neutral);
             }
-            
+
             self.previous_values.insert(name, current_value);
         }
     }
@@ -194,23 +223,142 @@ impl App {
 
     pub fn get_trend_color(&self, name: &str, base_color: Color) -> Color {
         match self.trends.get(name) {
-            Some(Trend::Up) => if self.flash_state { Color::LightGreen } else { Color::Green },
-            Some(Trend::Down) => if self.flash_state { Color::LightRed } else { Color::Red },
+            Some(Trend::Up) => {
+                if self.flash_state {
+                    Color::LightGreen
+                } else {
+                    Color::Green
+                }
+            }
+            Some(Trend::Down) => {
+                if self.flash_state {
+                    Color::LightRed
+                } else {
+                    Color::Red
+                }
+            }
             _ => base_color,
         }
     }
 
+    pub fn select_next(&mut self) {
+        if let Some(portfolio) = &self.portfolio {
+            if self.selected_position < portfolio.positions.len().saturating_sub(1) {
+                self.selected_position += 1;
+            }
+        }
+    }
 
+    pub fn select_previous(&mut self) {
+        if self.selected_position > 0 {
+            self.selected_position -= 1;
+        }
+    }
+
+    pub fn enter_edit_mode(&mut self) {
+        if let Some(portfolio) = &self.portfolio {
+            if self.selected_position < portfolio.positions.len() {
+                self.mode = AppMode::Edit;
+                self.edit_input = portfolio.positions[self.selected_position]
+                    .get_amount()
+                    .to_string();
+            }
+        }
+    }
+
+    pub fn exit_edit_mode(&mut self) {
+        self.mode = AppMode::Normal;
+        self.edit_input.clear();
+    }
+
+    pub fn save_edit(&mut self) -> Result<(), String> {
+        if let Some(portfolio) = &mut self.portfolio {
+            if self.selected_position < portfolio.positions.len() {
+                match self.edit_input.parse::<f64>() {
+                    Ok(new_amount) => {
+                        if new_amount >= 0.0 {
+                            // Update the position amount
+                            portfolio.positions[self.selected_position].set_amount(new_amount);
+
+                            // Save to file
+                            self.save_to_file()?;
+
+                            self.exit_edit_mode();
+                            Ok(())
+                        } else {
+                            Err("Amount must be non-negative".to_string())
+                        }
+                    }
+                    Err(_) => Err("Invalid number format".to_string()),
+                }
+            } else {
+                Err("Invalid position selected".to_string())
+            }
+        } else {
+            Err("No portfolio loaded".to_string())
+        }
+    }
+
+    fn save_to_file(&self) -> Result<(), String> {
+        if let Some(portfolio) = &self.portfolio {
+            let positions_data: Vec<serde_json::Value> = portfolio
+                .positions
+                .iter()
+                .map(|pos| {
+                    let mut obj = serde_json::Map::new();
+
+                    if let Some(name) = pos.get_name_option() {
+                        obj.insert(
+                            "Name".to_string(),
+                            serde_json::Value::String(name.to_string()),
+                        );
+                    }
+
+                    if let Some(ticker) = pos.get_ticker() {
+                        obj.insert(
+                            "Ticker".to_string(),
+                            serde_json::Value::String(ticker.to_string()),
+                        );
+                    }
+
+                    obj.insert(
+                        "AssetClass".to_string(),
+                        serde_json::Value::String(pos.get_asset_class().to_string()),
+                    );
+                    obj.insert(
+                        "Amount".to_string(),
+                        serde_json::Value::Number(
+                            serde_json::Number::from_f64(pos.get_amount()).unwrap(),
+                        ),
+                    );
+
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+
+            let json_string = serde_json::to_string_pretty(&positions_data)
+                .map_err(|e| format!("Failed to serialize data: {e}"))?;
+
+            std::fs::write(&self.data_file_path, json_string)
+                .map_err(|e| format!("Failed to write to file: {e}"))?;
+        }
+        Ok(())
+    }
 }
 
-pub async fn run_tui(portfolio: Portfolio, currency: String, positions_str: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_tui(
+    portfolio: Portfolio,
+    currency: String,
+    positions_str: String,
+    data_file_path: String,
+) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(currency, positions_str);
+    let mut app = App::new(currency, positions_str, data_file_path);
     app.set_portfolio(portfolio);
 
     let res = run_app(&mut terminal, &mut app).await;
@@ -230,10 +378,7 @@ pub async fn run_tui(portfolio: Portfolio, currency: String, positions_str: Stri
     Ok(())
 }
 
-async fn run_app<B: Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut App,
-) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, app))?;
 
@@ -250,36 +395,80 @@ async fn run_app<B: Backend>(
         if crossterm::event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            app.should_quit = true;
+                    match app.mode {
+                        AppMode::Normal => {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    app.should_quit = true;
+                                }
+                                // Vim navigation - hjkl
+                                KeyCode::Char('h') | KeyCode::Left => {
+                                    app.previous_tab();
+                                }
+                                KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+                                    app.next_tab();
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if app.current_tab == Tab::Balances {
+                                        app.select_next();
+                                    }
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if app.current_tab == Tab::Balances {
+                                        app.select_previous();
+                                    }
+                                }
+                                KeyCode::Char('e') => {
+                                    if app.current_tab == Tab::Balances {
+                                        app.enter_edit_mode();
+                                    }
+                                }
+                                KeyCode::BackTab => {
+                                    app.previous_tab();
+                                }
+                                KeyCode::Char('1') => app.current_tab = Tab::Overview,
+                                KeyCode::Char('2') => app.current_tab = Tab::Balances,
+                                _ => {}
+                            }
                         }
-                        // Vim navigation - hjkl
-                        KeyCode::Char('h') | KeyCode::Left => {
-                            app.previous_tab();
+                        AppMode::Edit => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.exit_edit_mode();
+                                }
+                                KeyCode::Enter => {
+                                    match app.save_edit() {
+                                        Ok(()) => {
+                                            // Refresh portfolio data after edit
+                                            let positions_str = app.positions_str.clone();
+                                            let portfolio =
+                                                crate::create_live_portfolio(positions_str).await;
+                                            app.update_trends(&portfolio);
+                                            app.set_portfolio(portfolio);
+                                        }
+                                        Err(e) => {
+                                            app.error_message = Some(e);
+                                            app.exit_edit_mode();
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    app.edit_input.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    if c.is_ascii_digit()
+                                        || (c == '.' && !app.edit_input.contains('.'))
+                                    {
+                                        app.edit_input.push(c);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
-                        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
-                            app.next_tab();
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            // Could add scrolling here if needed
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            // Could add scrolling here if needed
-                        }
-
-                        KeyCode::BackTab => {
-                            app.previous_tab();
-                        }
-                        KeyCode::Char('1') => app.current_tab = Tab::Overview,
-                        KeyCode::Char('2') => app.current_tab = Tab::Balances,
-                        _ => {}
                     }
                 }
             }
         }
-
-
 
         if app.should_quit {
             break;
@@ -298,7 +487,9 @@ fn ui(f: &mut Frame, app: &App) {
         .iter()
         .map(|t| {
             let style = if *t == app.current_tab {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -307,10 +498,19 @@ fn ui(f: &mut Frame, app: &App) {
         .collect();
 
     let tabs = Tabs::new(tab_titles)
-        .block(Block::default().borders(Borders::ALL).title("Portfolio TUI"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Portfolio TUI"),
+        )
         .style(Style::default().fg(Color::White))
         .highlight_style(Style::default().fg(Color::Yellow))
-        .select(Tab::all().iter().position(|&t| t == app.current_tab).unwrap_or(0));
+        .select(
+            Tab::all()
+                .iter()
+                .position(|&t| t == app.current_tab)
+                .unwrap_or(0),
+        );
 
     f.render_widget(tabs, chunks[0]);
 
@@ -330,9 +530,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7),  // Total value display
-                Constraint::Min(0),     // Allocation section
-                Constraint::Length(3),  // Help
+                Constraint::Length(7), // Total value display
+                Constraint::Min(0),    // Allocation section
+                Constraint::Length(3), // Help
             ])
             .split(area);
 
@@ -340,7 +540,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let total_value = portfolio.get_total_value();
         // Create formatted currency for big text with full accuracy
         let big_text_value = match app.currency.as_str() {
-            "USD" | "CAD" | "AUD" | "HKD" | "SGD" => format!("${}", format_with_commas(total_value)),
+            "USD" | "CAD" | "AUD" | "HKD" | "SGD" => {
+                format!("${}", format_with_commas(total_value))
+            }
             "EUR" => format!("{} EUR", format_with_commas(total_value)),
             "GBP" => format!("£{}", format_with_commas(total_value)),
             "JPY" => {
@@ -360,30 +562,40 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                     .rev()
                     .collect::<String>();
                 format!("{formatted_with_commas} JPY")
-            },
+            }
             "CHF" => format!("{} CHF", format_with_commas(total_value)),
             _ => format!("{} {}", format_with_commas(total_value), app.currency),
         };
-        
+
         let big_text = BigText::builder()
             .pixel_size(PixelSize::Quadrant)
-            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
             .lines(vec![big_text_value.clone().into()])
             .build();
 
         let refresh_indicator = if app.flash_state { "●" } else { "○" };
         let big_text_widget = Block::default()
             .borders(Borders::ALL)
-            .title(format!("Total Portfolio Value ({}) {}", app.currency, refresh_indicator))
+            .title(format!(
+                "Total Portfolio Value ({}) {}",
+                app.currency, refresh_indicator
+            ))
             .title_alignment(Alignment::Center);
 
         f.render_widget(big_text_widget, main_chunks[0]);
-        
+
         // Center the big text within the widget
-        let inner = main_chunks[0].inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let inner = main_chunks[0].inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
         let big_text_width = big_text_value.len() as u16 * 4; // Approximate width per character in big text
         let available_width = inner.width;
-        
+
         let centered_area = if big_text_width < available_width {
             let margin = (available_width - big_text_width) / 2;
             Layout::default()
@@ -397,7 +609,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         } else {
             inner
         };
-        
+
         f.render_widget(big_text, centered_area);
 
         // Allocation section: bar chart on left, detailed list on right
@@ -434,11 +646,13 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|(asset_class, percentage)| {
                 // Find a position with this asset class to get trend color
-                let trend_color = portfolio.positions.iter()
+                let trend_color = portfolio
+                    .positions
+                    .iter()
                     .find(|p| p.get_asset_class() == *asset_class)
                     .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
                     .unwrap_or(Color::Cyan);
-                
+
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{asset_class:<15}"),
@@ -463,7 +677,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(list, allocation_chunks[1]);
 
         // Help text
-        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (up/down) | 1-2 (direct) | q (quit)")
+        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (select in Balances) | e (edit in Balances) | 1-2 (direct) | q (quit)")
             .block(Block::default().borders(Borders::ALL).title("Help"))
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
@@ -478,60 +692,91 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
         let header_cells = ["Name", "Asset Class", "Amount", "Balance"]
             .iter()
-            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+            .map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
         let header = Row::new(header_cells).height(1).bottom_margin(1);
 
-        let rows = portfolio.positions.iter().map(|position| {
+        let rows = portfolio.positions.iter().enumerate().map(|(i, position)| {
             let name = position.get_name();
             let balance_color = app.get_trend_color(name, Color::White);
-            
+
+            // Highlight selected row
+            let row_style = if i == app.selected_position && app.current_tab == Tab::Balances {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
             // Add indicator for positions with tickers (live data) vs static positions
             let name_with_indicator = if position.get_ticker().is_some() {
                 format!("● {}", position.get_name()) // Live data indicator
             } else {
                 format!("○ {}", position.get_name()) // Static data indicator
             };
-            
+
             let cells = vec![
                 Cell::from(name_with_indicator).style(Style::default().fg(balance_color)),
                 Cell::from(position.get_asset_class()).style(Style::default().fg(balance_color)),
-                Cell::from(format!("{:.2}", position.get_amount())).style(Style::default().fg(balance_color)),
-                Cell::from(format_currency(position.get_balance(), &app.currency)).style(Style::default().fg(balance_color)),
+                Cell::from(format_amount(position.get_amount()))
+                    .style(Style::default().fg(balance_color)),
+                Cell::from(format_currency(position.get_balance(), &app.currency))
+                    .style(Style::default().fg(balance_color)),
             ];
-            Row::new(cells).height(1)
+            Row::new(cells).height(1).style(row_style)
         });
 
         let total_value = portfolio.get_total_value();
         let total_row = Row::new(vec![
-            Cell::from("TOTAL").style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Cell::from("TOTAL").style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Cell::from(""),
             Cell::from(""),
-            Cell::from(format_currency(total_value, &app.currency)).style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]).height(1);
-
-        let table = Table::new(rows.chain(std::iter::once(total_row)), [
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(30),
+            Cell::from(format_currency(total_value, &app.currency)).style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Portfolio Balances"),
+        .height(1);
+
+        let help_text = match app.mode {
+            AppMode::Normal => "Navigation: j/k (select) | e (edit) | h/l (tabs) | q (quit)",
+            AppMode::Edit => "Edit Mode: Enter (save) | Esc (cancel)",
+        };
+
+        let table_title = format!("Portfolio Balances - {help_text}");
+
+        let table = Table::new(
+            rows.chain(std::iter::once(total_row)),
+            [
+                Constraint::Percentage(30),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(30),
+            ],
         )
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(table_title))
         .style(Style::default().fg(Color::White));
 
         f.render_widget(table, area);
+
+        // Render edit dialog if in edit mode
+        if app.mode == AppMode::Edit {
+            render_edit_dialog(f, app);
+        }
     } else {
         render_loading(f, area);
     }
 }
-
-
-
-
 
 fn render_loading(f: &mut Frame, area: Rect) {
     let loading_text = Paragraph::new("Loading portfolio data...")
@@ -540,6 +785,157 @@ fn render_loading(f: &mut Frame, area: Rect) {
         .alignment(Alignment::Center);
 
     f.render_widget(loading_text, area);
+}
+
+fn render_edit_dialog(f: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 40, f.area());
+    f.render_widget(Clear, popup_area);
+
+    if let Some(portfolio) = &app.portfolio {
+        if app.selected_position < portfolio.positions.len() {
+            let position = &portfolio.positions[app.selected_position];
+
+            // Create main layout for the popup
+            let popup_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Title section
+                    Constraint::Length(4), // Current value section
+                    Constraint::Length(4), // Input section
+                    Constraint::Length(3), // Instructions
+                ])
+                .margin(1)
+                .split(popup_area);
+
+            // Main border
+            let main_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Edit Position Amount ")
+                .title_alignment(Alignment::Center)
+                .style(Style::default().bg(Color::Black));
+            f.render_widget(main_block, popup_area);
+
+            // Position name and asset class
+            let position_info = format!(
+                "Position: {} ({})",
+                position.get_name(),
+                position.get_asset_class()
+            );
+            let info_paragraph = Paragraph::new(position_info)
+                .style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::NONE));
+            f.render_widget(info_paragraph, popup_layout[0]);
+
+            // Current value display with smart decimal formatting
+            let current_value = format!("Current Amount: {}", format_amount(position.get_amount()));
+            let current_balance = format!(
+                "Current Balance: {}",
+                format_currency(position.get_balance(), &app.currency)
+            );
+            let current_text = format!("{current_value}\n{current_balance}");
+
+            let current_paragraph = Paragraph::new(current_text)
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Gray))
+                        .title(" Current "),
+                );
+            f.render_widget(current_paragraph, popup_layout[1]);
+
+            // Input field with cursor
+            let input_display = if app.edit_input.is_empty() {
+                "".to_string()
+            } else {
+                app.edit_input.clone()
+            };
+
+            // Add blinking cursor indicator
+            let cursor = if app.flash_state { "█" } else { "▌" };
+            let input_with_cursor = format!("{input_display}{cursor}");
+
+            // Calculate new balance preview if input is valid
+            let (preview_text, input_style) = if app.edit_input.is_empty() {
+                (
+                    "Enter amount...".to_string(),
+                    Style::default().fg(Color::Gray),
+                )
+            } else if let Ok(new_amount) = app.edit_input.parse::<f64>() {
+                if new_amount < 0.0 {
+                    (
+                        "Amount cannot be negative".to_string(),
+                        Style::default().fg(Color::Red),
+                    )
+                } else {
+                    let new_balance = if position.get_ticker().is_some() {
+                        // For positions with tickers, calculate balance using last spot price
+                        let last_spot = position.get_balance() / position.get_amount();
+                        new_amount * last_spot
+                    } else {
+                        // For cash positions, amount equals balance
+                        new_amount
+                    };
+
+                    let preview = format!(
+                        "New Amount: {}\nNew Balance: {}",
+                        format_amount(new_amount),
+                        format_currency(new_balance, &app.currency)
+                    );
+                    (preview, Style::default().fg(Color::Green))
+                }
+            } else {
+                (
+                    "Invalid number format".to_string(),
+                    Style::default().fg(Color::Red),
+                )
+            };
+
+            // Split input area into input field and preview
+            let input_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(0)])
+                .split(popup_layout[2]);
+
+            // Input field
+            let input_field = Paragraph::new(input_with_cursor)
+                .style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" New Amount "),
+                );
+            f.render_widget(input_field, input_chunks[0]);
+
+            // Preview area
+            let preview_paragraph = Paragraph::new(preview_text)
+                .style(input_style)
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::NONE));
+            f.render_widget(preview_paragraph, input_chunks[1]);
+
+            // Instructions
+            let instructions = "Enter: Save Changes | Esc: Cancel | Type numbers and decimal point";
+            let instructions_paragraph = Paragraph::new(instructions)
+                .style(Style::default().fg(Color::Cyan))
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::NONE));
+            f.render_widget(instructions_paragraph, popup_layout[3]);
+        }
+    }
 }
 
 fn render_error_popup(f: &mut Frame, error: &str) {

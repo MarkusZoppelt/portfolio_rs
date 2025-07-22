@@ -48,7 +48,14 @@ impl Portfolio {
 
         for position in &self.positions {
             if let Some(ticker) = position.get_ticker() {
-                positions_with_ticker.push((ticker, position.get_amount(), position.get_ticker().unwrap_or(position.get_name()).to_string()));
+                positions_with_ticker.push((
+                    ticker,
+                    position.get_amount(),
+                    position
+                        .get_ticker()
+                        .unwrap_or(position.get_name())
+                        .to_string(),
+                ));
                 tasks.push(get_historic_price(ticker, date));
             } else {
                 cash_sum += position.get_amount();
@@ -63,9 +70,7 @@ impl Portfolio {
                         sum += quote.close * amount;
                     }
                     Err(e) => {
-                        errors.push(format!(
-                            "Error getting last quote for {label}: {e}"
-                        ));
+                        errors.push(format!("Error getting last quote for {label}: {e}"));
                         continue;
                     }
                 },
@@ -203,9 +208,11 @@ impl Portfolio {
         };
 
         let current_value = self.get_total_value();
-        
-        let ytd_performance = (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0;
-        let monthly_performance = (last - value_at_beginning_of_month) / value_at_beginning_of_month * 100.0;
+
+        let ytd_performance =
+            (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0;
+        let monthly_performance =
+            (last - value_at_beginning_of_month) / value_at_beginning_of_month * 100.0;
         let recent_performance = (last - current_value) / current_value * 100.0;
 
         Ok((ytd_performance, monthly_performance, recent_performance))
@@ -286,7 +293,7 @@ mod tests {
         // Should include cash amount directly, and use tickers for others
         match value {
             Ok(v) => assert!(v > 0.0),
-            Err(e) => panic!("Error occurred in performance command: {}", e),
+            Err(e) => panic!("Error occurred in performance command: {e}"),
         }
     }
 }
