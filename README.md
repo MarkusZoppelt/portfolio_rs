@@ -1,7 +1,6 @@
 <p align="center">
     <img src="https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/logo.png" alt="portfolio_rs logo"><br>
     <img src="https://github.com/markuszoppelt/portfolio_rs/actions/workflows/rust.yml/badge.svg" alt="build status badge">
-	<img src="https://github.com/MarkusZoppelt/portfolio_rs/actions/workflows/rust-clippy.yml/badge.svg" alt="clippy analyze status badge">
 </p>
 
 A command line tool with interactive TUI for managing financial investment portfolios written in Rust.
@@ -45,31 +44,34 @@ If no file is specified, the tool uses the file from your config. If you need he
 
 ## TUI Features
 
-The interactive Terminal User Interface (`portfolio_rs tui`) provides:
+The interactive Terminal User Interface (default mode) provides:
 
 - **Overview & Allocation Tab**: Large display of total portfolio value, visual bar chart, and detailed allocation breakdown
-- **Balances Tab**: Detailed table of all positions with amounts and current values  
-- **Performance Tab**: Performance metrics (YTD, monthly, recent changes)
+- **Balances Tab**: Detailed table of all positions with amounts, current values, and **edit functionality**
 
 ### TUI Navigation
 - `h` / `l` : Switch tabs left/right (vim-style)
-- `j` / `k` : Navigate up/down
+- `j` / `k` : Navigate up/down (select positions in Balances tab)
+- `e` : Edit selected position amount (in Balances tab)
 - `Tab` / `←` `→` : Switch between tabs
-- `1-3` : Jump directly to specific tabs
+- `1-2` : Jump directly to specific tabs
 - `q` / `Esc` : Quit the application
+
+### Edit Functionality
+- Select any position with `j`/`k` and press `e` to edit
+- Real-time balance preview and input validation
+- Changes are saved automatically to your data file
+- Supports decimal precision for crypto and fractional shares
 
 
 ## Demo
 ![demo](https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/demo.gif)
 
 ## Configuration
-Upon first run, `portfolio_rs` will create a default `config.yml` file.
-The location of the config file depends on the operating system.
-Use `portfolio_rs config` to print the config directory.
+Upon first run, `portfolio_rs` will create a default config file.
+Use `portfolio_rs config` to show the config file location.
 
-Probably the most useful entry in the config is `portfolio_file` where you can
-set the **absolute** path to a data file that will be used when no data file is
-passed as an argument.
+The most useful config entry is `portfolio_file` where you can set the **absolute** path to your data file. This will be used when no file is specified as an argument.
 
 ## Bonus: GPG Encryption
 This tool supports (gpg) encrypted json files.
