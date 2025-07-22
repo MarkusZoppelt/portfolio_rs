@@ -17,6 +17,7 @@ use ratatui::{
 use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tui_big_text::{BigText, PixelSize};
 
 fn format_currency(value: f64, currency: &str) -> String {
@@ -133,6 +134,7 @@ pub struct App {
     pub selected_position: usize,
     pub edit_input: String,
     pub data_file_path: String,
+    pub portfolio_receiver: Option<mpsc::UnboundedReceiver<Portfolio>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,7 +162,24 @@ impl App {
             selected_position: 0,
             edit_input: String::new(),
             data_file_path,
+            portfolio_receiver: None,
         }
+    }
+
+    pub fn set_portfolio_receiver(&mut self, receiver: mpsc::UnboundedReceiver<Portfolio>) {
+        self.portfolio_receiver = Some(receiver);
+    }
+
+    pub fn try_receive_portfolio_update(&mut self) -> bool {
+        if let Some(receiver) = &mut self.portfolio_receiver {
+            if let Ok(portfolio) = receiver.try_recv() {
+                self.update_trends(&portfolio);
+                self.set_portfolio(portfolio);
+                self.mark_refreshed();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn set_portfolio(&mut self, portfolio: Portfolio) {
@@ -212,9 +231,7 @@ impl App {
         }
     }
 
-    pub fn should_refresh(&self) -> bool {
-        self.last_update.elapsed() >= Duration::from_secs(1)
-    }
+
 
     pub fn mark_refreshed(&mut self) {
         self.last_update = Instant::now();
@@ -358,8 +375,25 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(currency, positions_str, data_file_path);
+    let mut app = App::new(currency, positions_str.clone(), data_file_path);
     app.set_portfolio(portfolio);
+
+    // Create channel for background portfolio updates
+    let (portfolio_sender, portfolio_receiver) = mpsc::unbounded_channel();
+    app.set_portfolio_receiver(portfolio_receiver);
+
+    // Spawn background task for portfolio updates
+    let positions_str_bg = positions_str.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5)); // Update every 5 seconds instead of 1
+        loop {
+            interval.tick().await;
+            let portfolio = crate::create_live_portfolio(positions_str_bg.clone()).await;
+            if portfolio_sender.send(portfolio).is_err() {
+                break; // Channel closed, exit task
+            }
+        }
+    });
 
     let res = run_app(&mut terminal, &mut app).await;
 
@@ -382,14 +416,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
     loop {
         terminal.draw(|f| ui(f, app))?;
 
-        // Check if we should refresh data
-        if app.should_refresh() {
-            let positions_str = app.positions_str.clone();
-            let portfolio = crate::create_live_portfolio(positions_str).await;
-            app.update_trends(&portfolio);
-            app.set_portfolio(portfolio);
-            app.mark_refreshed();
-        }
+        // Check for portfolio updates from background task (non-blocking)
+        app.try_receive_portfolio_update();
 
         // Use poll to check for events with timeout
         if crossterm::event::poll(Duration::from_millis(100))? {
@@ -439,12 +467,11 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                 KeyCode::Enter => {
                                     match app.save_edit() {
                                         Ok(()) => {
-                                            // Refresh portfolio data after edit
-                                            let positions_str = app.positions_str.clone();
-                                            let portfolio =
-                                                crate::create_live_portfolio(positions_str).await;
-                                            app.update_trends(&portfolio);
-                                            app.set_portfolio(portfolio);
+                                            // Update positions_str with new data from file
+                                            if let Ok(new_positions_str) = std::fs::read_to_string(&app.data_file_path) {
+                                                app.positions_str = new_positions_str;
+                                            }
+                                            // Portfolio will be refreshed by background task
                                         }
                                         Err(e) => {
                                             app.error_message = Some(e);
@@ -577,7 +604,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             .lines(vec![big_text_value.clone().into()])
             .build();
 
-        let refresh_indicator = if app.flash_state { "●" } else { "○" };
+        let refresh_indicator = if app.flash_state { "🔄" } else { "📊" };
         let big_text_widget = Block::default()
             .borders(Borders::ALL)
             .title(format!(
