@@ -64,6 +64,14 @@ The interactive Terminal User Interface (default mode) provides:
 - Supports decimal precision for crypto and fractional shares
 
 
+## Screenshots
+
+### Overview & Allocation Tab
+![TUI Overview](https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/tui_overview.png)
+
+### Balances Tab with Edit Functionality
+![TUI Balances](https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/tui_balances.png)
+
 ## Demo
 ![demo](https://raw.githubusercontent.com/MarkusZoppelt/portfolio_rs/main/img/demo.gif)
 
