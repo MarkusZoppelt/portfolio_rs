@@ -77,7 +77,7 @@ impl Portfolio {
                 Err(e) => {
                     let err_str = format!("{e}");
                     if err_str.contains("Bad Request") {
-                        eprintln!("Warning: Skipping {label} due to Yahoo Bad Request: {err_str}");
+                        // Silently skip bad requests to avoid log spam
                         continue;
                     }
                     errors.push(format!(

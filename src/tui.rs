@@ -134,7 +134,8 @@ pub struct App {
     pub selected_position: usize,
     pub edit_input: String,
     pub data_file_path: String,
-    pub portfolio_receiver: Option<mpsc::UnboundedReceiver<Portfolio>>,
+    pub portfolio_receiver: Option<mpsc::UnboundedReceiver<(Portfolio, NetworkStatus)>>,
+    pub network_status: NetworkStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,6 +143,13 @@ pub enum Trend {
     Up,
     Down,
     Neutral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NetworkStatus {
+    Connected,
+    Disconnected,
+    Partial,
 }
 
 impl App {
@@ -163,18 +171,20 @@ impl App {
             edit_input: String::new(),
             data_file_path,
             portfolio_receiver: None,
+            network_status: NetworkStatus::Connected,
         }
     }
 
-    pub fn set_portfolio_receiver(&mut self, receiver: mpsc::UnboundedReceiver<Portfolio>) {
+    pub fn set_portfolio_receiver(&mut self, receiver: mpsc::UnboundedReceiver<(Portfolio, NetworkStatus)>) {
         self.portfolio_receiver = Some(receiver);
     }
 
     pub fn try_receive_portfolio_update(&mut self) -> bool {
         if let Some(receiver) = &mut self.portfolio_receiver {
-            if let Ok(portfolio) = receiver.try_recv() {
+            if let Ok((portfolio, network_status)) = receiver.try_recv() {
                 self.update_trends(&portfolio);
                 self.set_portfolio(portfolio);
+                self.network_status = network_status;
                 self.mark_refreshed();
                 return true;
             }
@@ -388,8 +398,8 @@ pub async fn run_tui(
         let mut interval = tokio::time::interval(Duration::from_secs(5)); // Update every 5 seconds instead of 1
         loop {
             interval.tick().await;
-            let portfolio = crate::create_live_portfolio(positions_str_bg.clone()).await;
-            if portfolio_sender.send(portfolio).is_err() {
+            let (portfolio, network_status) = crate::create_live_portfolio(positions_str_bg.clone()).await;
+            if portfolio_sender.send((portfolio, network_status)).is_err() {
                 break; // Channel closed, exit task
             }
         }
@@ -605,11 +615,16 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             .build();
 
         let refresh_indicator = if app.flash_state { "🔄" } else { "📊" };
+        let network_indicator = match app.network_status {
+            NetworkStatus::Connected => "🟢",
+            NetworkStatus::Partial => "🟡",
+            NetworkStatus::Disconnected => "🔴",
+        };
         let big_text_widget = Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                "Total Portfolio Value ({}) {}",
-                app.currency, refresh_indicator
+                "Total Portfolio Value ({}) {} {}",
+                app.currency, refresh_indicator, network_indicator
             ))
             .title_alignment(Alignment::Center);
 

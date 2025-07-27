@@ -63,9 +63,18 @@ fn cli() -> Command {
 }
 
 // returns a porfolio with the latest quotes from json data
-pub async fn create_live_portfolio(positions_str: String) -> Portfolio {
+pub async fn create_live_portfolio(positions_str: String) -> (Portfolio, crate::tui::NetworkStatus) {
+    create_live_portfolio_with_logging(positions_str, false).await
+}
+
+// returns a porfolio with the latest quotes from json data, with optional error logging
+pub async fn create_live_portfolio_with_logging(positions_str: String, log_errors: bool) -> (Portfolio, crate::tui::NetworkStatus) {
     let positions = from_string(&positions_str);
     let mut portfolio = Portfolio::new();
+    let _total_positions = positions.len();
+    let mut successful_positions = 0;
+    let mut failed_positions = 0;
+    
     // move tasks into the async closure passed to tokio::spawn()
     let tasks: Vec<_> = positions
         .into_iter()
@@ -76,13 +85,37 @@ pub async fn create_live_portfolio(positions_str: String) -> Portfolio {
         let p = task.await;
         match p {
             Ok(p) => match p {
-                Ok(p) => portfolio.add_position(p),
-                Err(e) => eprintln!("Error handling position: {e:?}"),
+                Ok(p) => {
+                    portfolio.add_position(p);
+                    successful_positions += 1;
+                },
+                Err(e) => {
+                    if log_errors {
+                        eprintln!("Error handling position: {e:?}");
+                    }
+                    // Skip positions with network errors (will be retried in TUI mode)
+                    failed_positions += 1;
+                },
             },
-            Err(e) => eprintln!("Error handling position: {e:?}"),
+            Err(e) => {
+                if log_errors {
+                    eprintln!("Error handling position: {e:?}");
+                }
+                // Skip positions with task errors (will be retried in TUI mode)
+                failed_positions += 1;
+            },
         }
     }
-    portfolio
+    
+    let network_status = if failed_positions == 0 {
+        crate::tui::NetworkStatus::Connected
+    } else if successful_positions == 0 {
+        crate::tui::NetworkStatus::Disconnected
+    } else {
+        crate::tui::NetworkStatus::Partial
+    };
+    
+    (portfolio, network_status)
 }
 
 // TODO: change this to store entire portfolio in DB
@@ -173,7 +206,7 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename) {
                 Ok(positions_str) => {
-                    let portfolio = create_live_portfolio(positions_str).await;
+                    let (portfolio, _network_status) = create_live_portfolio_with_logging(positions_str, true).await;
                     portfolio.print(true);
                     store_balance_in_db(&portfolio);
                 }
@@ -184,7 +217,7 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename) {
                 Ok(positions_str) => {
-                    let portfolio = create_live_portfolio(positions_str).await;
+                    let (portfolio, _network_status) = create_live_portfolio_with_logging(positions_str, true).await;
                     portfolio.draw_pie_chart();
                     portfolio.print_allocation();
                 }
@@ -195,7 +228,7 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename) {
                 Ok(positions_str) => {
-                    let portfolio = create_live_portfolio(positions_str).await;
+                    let (portfolio, _network_status) = create_live_portfolio_with_logging(positions_str, true).await;
                     portfolio.print_performance().await;
                 }
                 Err(e) => eprintln!("{e}"),
@@ -206,7 +239,7 @@ async fn main() {
             let filename = get_filename(None);
             match load_portfolio(filename.clone()) {
                 Ok(positions_str) => {
-                    let portfolio = create_live_portfolio(positions_str.clone()).await;
+                    let (portfolio, _network_status) = create_live_portfolio(positions_str.clone()).await;
                     if let Err(e) =
                         tui::run_tui(portfolio, cfg.currency.clone(), positions_str, filename).await
                     {
@@ -236,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_live_portfolio() {
         let positions_str = std::fs::read_to_string("example_data.json").unwrap();
-        let portfolio = create_live_portfolio(positions_str).await;
+        let (portfolio, _network_status) = create_live_portfolio(positions_str).await;
         let x: Result<Portfolio, ParseError> = Ok(portfolio);
         assert!(x.is_ok());
     }
