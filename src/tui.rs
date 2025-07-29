@@ -116,6 +116,14 @@ impl Tab {
     fn all() -> &'static [Tab] {
         &[Tab::Overview, Tab::Balances]
     }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "overview" => Some(Tab::Overview),
+            "balances" => Some(Tab::Balances),
+            _ => None,
+        }
+    }
 }
 
 pub struct App {
@@ -175,7 +183,10 @@ impl App {
         }
     }
 
-    pub fn set_portfolio_receiver(&mut self, receiver: mpsc::UnboundedReceiver<(Portfolio, NetworkStatus)>) {
+    pub fn set_portfolio_receiver(
+        &mut self,
+        receiver: mpsc::UnboundedReceiver<(Portfolio, NetworkStatus)>,
+    ) {
         self.portfolio_receiver = Some(receiver);
     }
 
@@ -240,8 +251,6 @@ impl App {
             self.previous_values.insert(name, current_value);
         }
     }
-
-
 
     pub fn mark_refreshed(&mut self) {
         self.last_update = Instant::now();
@@ -378,6 +387,7 @@ pub async fn run_tui(
     currency: String,
     positions_str: String,
     data_file_path: String,
+    tab: Option<Tab>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -387,6 +397,9 @@ pub async fn run_tui(
 
     let mut app = App::new(currency, positions_str.clone(), data_file_path);
     app.set_portfolio(portfolio);
+    if let Some(tab) = tab {
+        app.current_tab = tab;
+    }
 
     // Create channel for background portfolio updates
     let (portfolio_sender, portfolio_receiver) = mpsc::unbounded_channel();
@@ -398,7 +411,8 @@ pub async fn run_tui(
         let mut interval = tokio::time::interval(Duration::from_secs(5)); // Update every 5 seconds instead of 1
         loop {
             interval.tick().await;
-            let (portfolio, network_status) = crate::create_live_portfolio(positions_str_bg.clone()).await;
+            let (portfolio, network_status) =
+                crate::create_live_portfolio(positions_str_bg.clone()).await;
             if portfolio_sender.send((portfolio, network_status)).is_err() {
                 break; // Channel closed, exit task
             }
@@ -478,7 +492,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                     match app.save_edit() {
                                         Ok(()) => {
                                             // Update positions_str with new data from file
-                                            if let Ok(new_positions_str) = std::fs::read_to_string(&app.data_file_path) {
+                                            if let Ok(new_positions_str) =
+                                                std::fs::read_to_string(&app.data_file_path)
+                                            {
                                                 app.positions_str = new_positions_str;
                                             }
                                             // Portfolio will be refreshed by background task

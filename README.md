@@ -28,7 +28,12 @@ Look at the [example data](example_data.json) for the format and data scheme.
 
 **Default: Interactive TUI** (recommended):
 
-    portfolio_rs [JSON_FILE]
+    portfolio_rs [JSON_FILE] [--tab TAB]
+
+You may *optionally* specify which tab to open at start-up:
+
+    portfolio_rs [JSON_FILE] --tab overview     # Start on Overview & Allocation tab (default)
+    portfolio_rs [JSON_FILE] --tab balances     # Start on Balances tab
 
 **CLI Commands** (optional):
 

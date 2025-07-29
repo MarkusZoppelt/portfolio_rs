@@ -35,6 +35,11 @@ fn cli() -> Command {
             arg!([FILE] "JSON file with your positions")
                 .help("Portfolio data file (uses config file if not specified)"),
         )
+        .arg(
+            arg!(--tab <TAB> "Tab to open at start")
+                .default_value("overview")
+                .help("Specify the tab to open at start (overview/balances)"),
+        )
         .subcommand(Command::new("config").about("Print the path to the config file"))
         .subcommand(
             Command::new("balances")
@@ -63,18 +68,23 @@ fn cli() -> Command {
 }
 
 // returns a porfolio with the latest quotes from json data
-pub async fn create_live_portfolio(positions_str: String) -> (Portfolio, crate::tui::NetworkStatus) {
+pub async fn create_live_portfolio(
+    positions_str: String,
+) -> (Portfolio, crate::tui::NetworkStatus) {
     create_live_portfolio_with_logging(positions_str, false).await
 }
 
 // returns a porfolio with the latest quotes from json data, with optional error logging
-pub async fn create_live_portfolio_with_logging(positions_str: String, log_errors: bool) -> (Portfolio, crate::tui::NetworkStatus) {
+pub async fn create_live_portfolio_with_logging(
+    positions_str: String,
+    log_errors: bool,
+) -> (Portfolio, crate::tui::NetworkStatus) {
     let positions = from_string(&positions_str);
     let mut portfolio = Portfolio::new();
     let _total_positions = positions.len();
     let mut successful_positions = 0;
     let mut failed_positions = 0;
-    
+
     // move tasks into the async closure passed to tokio::spawn()
     let tasks: Vec<_> = positions
         .into_iter()
@@ -88,14 +98,14 @@ pub async fn create_live_portfolio_with_logging(positions_str: String, log_error
                 Ok(p) => {
                     portfolio.add_position(p);
                     successful_positions += 1;
-                },
+                }
                 Err(e) => {
                     if log_errors {
                         eprintln!("Error handling position: {e:?}");
                     }
                     // Skip positions with network errors (will be retried in TUI mode)
                     failed_positions += 1;
-                },
+                }
             },
             Err(e) => {
                 if log_errors {
@@ -103,10 +113,10 @@ pub async fn create_live_portfolio_with_logging(positions_str: String, log_error
                 }
                 // Skip positions with task errors (will be retried in TUI mode)
                 failed_positions += 1;
-            },
+            }
         }
     }
-    
+
     let network_status = if failed_positions == 0 {
         crate::tui::NetworkStatus::Connected
     } else if successful_positions == 0 {
@@ -114,7 +124,7 @@ pub async fn create_live_portfolio_with_logging(positions_str: String, log_error
     } else {
         crate::tui::NetworkStatus::Partial
     };
-    
+
     (portfolio, network_status)
 }
 
@@ -144,6 +154,17 @@ fn open_encrpted_file(filename: String) -> String {
     }
 }
 
+fn get_arg_value(matches: Option<&clap::ArgMatches>, arg_name: &str) -> Option<String> {
+    matches.and_then(|m| m.get_one::<String>(arg_name).map(|s| s.to_string()))
+}
+
+fn parse_tab(tab_str: Option<String>) -> Option<crate::tui::Tab> {
+    match tab_str {
+        Some(s) => crate::tui::Tab::from_str(&s).or(Some(crate::tui::Tab::Overview)),
+        None => Some(crate::tui::Tab::Overview), // Default to overview
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cfg: Config = confy::load("portfolio", "config").unwrap();
@@ -167,10 +188,8 @@ async fn main() {
         let mut filename = String::new();
 
         // Try to get filename from subcommand or main args
-        if let Some(matches) = matches {
-            if let Some(f) = matches.get_one::<String>("FILE") {
-                filename = f.to_string();
-            }
+        if let Some(f) = get_arg_value(matches, "FILE") {
+            filename = f;
         }
 
         // Fall back to config file
@@ -206,7 +225,8 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename) {
                 Ok(positions_str) => {
-                    let (portfolio, _network_status) = create_live_portfolio_with_logging(positions_str, true).await;
+                    let (portfolio, _network_status) =
+                        create_live_portfolio_with_logging(positions_str, true).await;
                     portfolio.print(true);
                     store_balance_in_db(&portfolio);
                 }
@@ -217,7 +237,8 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename) {
                 Ok(positions_str) => {
-                    let (portfolio, _network_status) = create_live_portfolio_with_logging(positions_str, true).await;
+                    let (portfolio, _network_status) =
+                        create_live_portfolio_with_logging(positions_str, true).await;
                     portfolio.draw_pie_chart();
                     portfolio.print_allocation();
                 }
@@ -228,7 +249,8 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename) {
                 Ok(positions_str) => {
-                    let (portfolio, _network_status) = create_live_portfolio_with_logging(positions_str, true).await;
+                    let (portfolio, _network_status) =
+                        create_live_portfolio_with_logging(positions_str, true).await;
                     portfolio.print_performance().await;
                 }
                 Err(e) => eprintln!("{e}"),
@@ -236,12 +258,20 @@ async fn main() {
         }
         _ => {
             // Default to TUI when no subcommand is given
-            let filename = get_filename(None);
+            let filename = get_filename(Some(&matches));
+            let tab_value = parse_tab(get_arg_value(Some(&matches), "tab"));
             match load_portfolio(filename.clone()) {
                 Ok(positions_str) => {
-                    let (portfolio, _network_status) = create_live_portfolio(positions_str.clone()).await;
-                    if let Err(e) =
-                        tui::run_tui(portfolio, cfg.currency.clone(), positions_str, filename).await
+                    let (portfolio, _network_status) =
+                        create_live_portfolio(positions_str.clone()).await;
+                    if let Err(e) = tui::run_tui(
+                        portfolio,
+                        cfg.currency.clone(),
+                        positions_str,
+                        filename,
+                        tab_value,
+                    )
+                    .await
                     {
                         eprintln!("Error running TUI: {e}");
                     }
@@ -264,6 +294,118 @@ mod tests {
     fn test_cli() {
         let matches = cli().get_matches_from(vec!["portfolio_rs", "balances", "example_data.json"]);
         assert_eq!(matches.subcommand_name(), Some("balances"));
+    }
+
+    #[test]
+    fn test_cli_with_tab_flag() {
+        let matches = cli().get_matches_from(vec!["portfolio_rs", "--tab", "balances"]);
+        assert_eq!(
+            get_arg_value(Some(&matches), "tab"),
+            Some("balances".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cli_with_file_and_tab() {
+        let matches =
+            cli().get_matches_from(vec!["portfolio_rs", "data.json", "--tab", "balances"]);
+        assert_eq!(
+            get_arg_value(Some(&matches), "FILE"),
+            Some("data.json".to_string())
+        );
+        assert_eq!(
+            get_arg_value(Some(&matches), "tab"),
+            Some("balances".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cli_tab_order_independence() {
+        let matches =
+            cli().get_matches_from(vec!["portfolio_rs", "--tab", "balances", "data.json"]);
+        assert_eq!(
+            get_arg_value(Some(&matches), "FILE"),
+            Some("data.json".to_string())
+        );
+        assert_eq!(
+            get_arg_value(Some(&matches), "tab"),
+            Some("balances".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cli_default_tab() {
+        let matches = cli().get_matches_from(vec!["portfolio_rs", "data.json"]);
+        assert_eq!(
+            get_arg_value(Some(&matches), "tab"),
+            Some("overview".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_tab_overview() {
+        let result = parse_tab(Some("overview".to_string()));
+        assert_eq!(result, Some(crate::tui::Tab::Overview));
+    }
+
+    #[test]
+    fn test_parse_tab_balance() {
+        let result = parse_tab(Some("balances".to_string()));
+        assert_eq!(result, Some(crate::tui::Tab::Balances));
+    }
+
+    #[test]
+    fn test_parse_tab_case_insensitive() {
+        assert_eq!(
+            parse_tab(Some("OVERVIEW".to_string())),
+            Some(crate::tui::Tab::Overview)
+        );
+        assert_eq!(
+            parse_tab(Some("Balances".to_string())),
+            Some(crate::tui::Tab::Balances)
+        );
+        assert_eq!(
+            parse_tab(Some("bAlAnCeS".to_string())),
+            Some(crate::tui::Tab::Balances)
+        );
+    }
+
+    #[test]
+    fn test_parse_tab_invalid_defaults_to_overview() {
+        let result = parse_tab(Some("invalid".to_string()));
+        assert_eq!(result, Some(crate::tui::Tab::Overview));
+    }
+
+    #[test]
+    fn test_parse_tab_none_defaults_to_overview() {
+        let result = parse_tab(None);
+        assert_eq!(result, Some(crate::tui::Tab::Overview));
+    }
+
+    #[test]
+    fn test_parse_tab_empty_string_defaults_to_overview() {
+        let result = parse_tab(Some("".to_string()));
+        assert_eq!(result, Some(crate::tui::Tab::Overview));
+    }
+
+    #[test]
+    fn test_get_arg_value_existing() {
+        let matches = cli().get_matches_from(vec!["portfolio_rs", "--tab", "balances"]);
+        assert_eq!(
+            get_arg_value(Some(&matches), "tab"),
+            Some("balances".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_arg_value_missing() {
+        let matches = cli().get_matches_from(vec!["portfolio_rs"]);
+        assert_eq!(get_arg_value(Some(&matches), "FILE"), None);
+    }
+
+    #[test]
+    fn test_get_arg_value_none_matches() {
+        assert_eq!(get_arg_value(None, "tab"), None);
     }
 
     #[tokio::test]
