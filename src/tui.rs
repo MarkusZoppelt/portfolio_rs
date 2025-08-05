@@ -955,8 +955,7 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
                     };
 
                     let preview = format!(
-                        "New Amount: {}\nNew Balance: {}",
-                        app.edit_input, // Show exactly what user typed instead of formatted amount
+                        "New Balance: {}",
                         format_currency(new_balance, &app.currency)
                     );
                     (preview, Style::default().fg(Color::Green))
@@ -968,7 +967,7 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
                     if trimmed[..trimmed.len()-1].parse::<f64>().is_ok() {
                         // Valid intermediate state like "1." or "123."
                         (
-                            format!("New Amount: {}\nEnter decimal places...", app.edit_input),
+                            "Enter decimal places...".to_string(),
                             Style::default().fg(Color::Yellow),
                         )
                     } else {
@@ -980,7 +979,7 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
                 } else if trimmed == "." {
                     // Just a dot, waiting for digits
                     (
-                        "New Amount: .\nEnter digits...".to_string(),
+                        "Enter digits...".to_string(),
                         Style::default().fg(Color::Yellow),
                     )
                 } else {
@@ -994,7 +993,7 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
             // Split input area into input field and preview
             let input_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(0)])
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
                 .split(popup_layout[2]);
 
             // Input field
