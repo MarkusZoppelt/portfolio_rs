@@ -23,6 +23,6 @@ chrono = "0.4.41"
 sled = "0.34.7"
 colored = "3.0.0"
 confy = { version = "1.0.0", features = ["yaml_conf"], default-features = false }
-ratatui = "0.28.1"
+ratatui = "0.29.0"
 crossterm = "0.28.1"
 tui-big-text = "0.6.0"
