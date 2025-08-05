@@ -295,9 +295,14 @@ impl App {
         if let Some(portfolio) = &self.portfolio {
             if self.selected_position < portfolio.positions.len() {
                 self.mode = AppMode::Edit;
-                self.edit_input = portfolio.positions[self.selected_position]
-                    .get_amount()
-                    .to_string();
+                // Start with the raw number as string to preserve user input format
+                let amount = portfolio.positions[self.selected_position].get_amount();
+                // Convert to string preserving reasonable precision, but allow user to modify
+                self.edit_input = if amount.fract() == 0.0 {
+                    format!("{}", amount as i64)
+                } else {
+                    format!("{amount}")
+                };
             }
         }
     }
@@ -343,13 +348,18 @@ impl App {
                 .map(|pos| {
                     let mut obj = serde_json::Map::new();
 
+                    // Only include Name if it exists and is different from ticker
                     if let Some(name) = pos.get_name_option() {
-                        obj.insert(
-                            "Name".to_string(),
-                            serde_json::Value::String(name.to_string()),
-                        );
+                        // Only add Name field if it's explicitly set (not derived from ticker)
+                        if pos.get_ticker().is_none() || Some(name) != pos.get_ticker() {
+                            obj.insert(
+                                "Name".to_string(),
+                                serde_json::Value::String(name.to_string()),
+                            );
+                        }
                     }
 
+                    // Always include Ticker if it exists
                     if let Some(ticker) = pos.get_ticker() {
                         obj.insert(
                             "Ticker".to_string(),
@@ -364,7 +374,9 @@ impl App {
                     obj.insert(
                         "Amount".to_string(),
                         serde_json::Value::Number(
-                            serde_json::Number::from_f64(pos.get_amount()).unwrap(),
+                            serde_json::Number::from_f64(pos.get_amount()).unwrap_or_else(|| {
+                                serde_json::Number::from_f64(0.0).unwrap()
+                            }),
                         ),
                     );
 
@@ -944,16 +956,39 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
 
                     let preview = format!(
                         "New Amount: {}\nNew Balance: {}",
-                        format_amount(new_amount),
+                        app.edit_input, // Show exactly what user typed instead of formatted amount
                         format_currency(new_balance, &app.currency)
                     );
                     (preview, Style::default().fg(Color::Green))
                 }
             } else {
-                (
-                    "Invalid number format".to_string(),
-                    Style::default().fg(Color::Red),
-                )
+                // Check if it's a valid intermediate state (like "1." or "0.")
+                let trimmed = app.edit_input.trim();
+                if trimmed.ends_with('.') && trimmed.len() > 1 {
+                    if trimmed[..trimmed.len()-1].parse::<f64>().is_ok() {
+                        // Valid intermediate state like "1." or "123."
+                        (
+                            format!("New Amount: {}\nEnter decimal places...", app.edit_input),
+                            Style::default().fg(Color::Yellow),
+                        )
+                    } else {
+                        (
+                            "Invalid number format".to_string(),
+                            Style::default().fg(Color::Red),
+                        )
+                    }
+                } else if trimmed == "." {
+                    // Just a dot, waiting for digits
+                    (
+                        "New Amount: .\nEnter digits...".to_string(),
+                        Style::default().fg(Color::Yellow),
+                    )
+                } else {
+                    (
+                        "Invalid number format".to_string(),
+                        Style::default().fg(Color::Red),
+                    )
+                }
             };
 
             // Split input area into input field and preview
