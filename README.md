@@ -26,9 +26,9 @@ Look at the [example data](example_data.json) for the format and data scheme.
 
 ### 2. Launch the portfolio tool:
 
-**Default: Interactive TUI** (recommended):
+**Default: Customizable Interactive TUI** (recommended):
 
-    portfolio_rs [JSON_FILE] [--tab TAB]
+    portfolio_rs [JSON_FILE] [--tab TAB] [--disable COMPONENTS]
 
 You may *optionally* specify which tab to open at start-up:
 
@@ -44,6 +44,7 @@ You may *optionally* specify which tab to open at start-up:
 **Configuration:**
 
     portfolio_rs config                   # Show config file location
+    portfolio_rs components               # Show available components
 
 If no file is specified, the tool uses the file from your config. If you need help, try `portfolio_rs --help` for usage information.
 
@@ -53,6 +54,36 @@ The interactive Terminal User Interface (default mode) provides:
 
 - **Overview & Allocation Tab**: Large display of total portfolio value, visual bar chart, and detailed allocation breakdown
 - **Balances Tab**: Detailed table of all positions with amounts, current values, and **edit functionality**
+
+### TUI Customization
+
+You can disable specific UI components using the `--disable` flag with comma-separated component names:
+
+**Overview Tab Components:**
+- `tab_bar` - Top navigation tabs
+- `total_value` - Large portfolio value display
+- `asset_allocation` - Visual bar chart
+- `detailed_allocation` - Allocation percentage list
+- `help` - Help text at bottom
+
+**Balances Tab Components:**
+- `tab_bar` - Top navigation tabs
+- `name` - Position name column
+- `asset_class` - Asset class column  
+- `amount` - Amount/quantity column
+- `balance` - Balance/value column
+
+**Examples:**
+```bash
+# Hide tab bar and help text
+portfolio_rs --disable tab_bar,help example_data.json
+
+# Show only the allocation chart (hide detailed list)
+portfolio_rs --disable detailed_allocation example_data.json
+
+# Minimal balances view (name and balance only)
+portfolio_rs --disable asset_class,amount example_data.json
+```
 
 ### TUI Navigation
 - `h` / `l` : Switch tabs left/right (vim-style)

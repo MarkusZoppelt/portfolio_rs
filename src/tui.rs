@@ -14,11 +14,130 @@ use ratatui::{
     },
     Frame, Terminal,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tui_big_text::{BigText, PixelSize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Component {
+    // Overview tab components
+    TabBar,
+    TotalValue,
+    AssetAllocation,
+    DetailedAllocation,
+    Help,
+    // Balances tab components (table columns)
+    Name,
+    AssetClass,
+    Amount,
+    Balance,
+}
+
+impl Component {
+    /// Returns all available components
+    pub fn all() -> Vec<Component> {
+        vec![
+            Component::TabBar,
+            Component::TotalValue,
+            Component::AssetAllocation,
+            Component::DetailedAllocation,
+            Component::Help,
+            Component::Name,
+            Component::AssetClass,
+            Component::Amount,
+            Component::Balance,
+        ]
+    }
+
+    /// Returns the string representation of the component
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Component::TabBar => "tab_bar",
+            Component::TotalValue => "total_value",
+            Component::AssetAllocation => "asset_allocation",
+            Component::DetailedAllocation => "detailed_allocation",
+            Component::Help => "help",
+            Component::Name => "name",
+            Component::AssetClass => "asset_class",
+            Component::Amount => "amount",
+            Component::Balance => "balance",
+        }
+    }
+
+    /// Returns a description of what the component does
+    pub fn description(&self) -> &'static str {
+        match self {
+            Component::TabBar => "Top navigation bar showing active tab",
+            Component::TotalValue => "Total portfolio value display",
+            Component::AssetAllocation => "Asset bar chart",
+            Component::DetailedAllocation => "Asset percentages",
+            Component::Help => "Keyboard shortcuts",
+            Component::Name => "Name column in the balances table",
+            Component::AssetClass => "Asset Class column in the balances table",
+            Component::Amount => "Amount column in the balances table",
+            Component::Balance => "Balance column in the balances table",
+        }
+    }
+}
+
+impl FromStr for Component {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "tab_bar" => Ok(Component::TabBar),
+            "total_value" => Ok(Component::TotalValue),
+            "asset_allocation" => Ok(Component::AssetAllocation),
+            "detailed_allocation" => Ok(Component::DetailedAllocation),
+            "help" => Ok(Component::Help),
+            "name" => Ok(Component::Name),
+            "asset_class" => Ok(Component::AssetClass),
+            "amount" => Ok(Component::Amount),
+            "balance" => Ok(Component::Balance),
+            _ => Err(format!("Unknown component: '{s}'")),
+        }
+    }
+}
+
+impl std::fmt::Display for Component {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DisabledComponents {
+    disabled: HashSet<Component>,
+}
+
+impl DisabledComponents {
+    pub fn new(disabled_list: Vec<String>) -> Self {
+        let mut disabled = HashSet::new();
+
+        for component_str in disabled_list {
+            match Component::from_str(&component_str) {
+                Ok(component) => {
+                    disabled.insert(component);
+                }
+                Err(err) => eprintln!("Warning: {err}"),
+            }
+        }
+
+        DisabledComponents { disabled }
+    }
+
+    #[cfg(test)]
+    pub fn disable_component(&mut self, component: Component) {
+        self.disabled.insert(component);
+    }
+
+    pub fn is_disabled(&self, component: Component) -> bool {
+        self.disabled.contains(&component)
+    }
+}
 
 fn format_currency(value: f64, currency: &str) -> String {
     let formatted_number = if value >= 1000.0 {
@@ -144,6 +263,7 @@ pub struct App {
     pub data_file_path: String,
     pub portfolio_receiver: Option<mpsc::UnboundedReceiver<(Portfolio, NetworkStatus)>>,
     pub network_status: NetworkStatus,
+    pub disabled_components: DisabledComponents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,7 +281,12 @@ pub enum NetworkStatus {
 }
 
 impl App {
-    pub fn new(currency: String, positions_str: String, data_file_path: String) -> App {
+    pub fn new(
+        currency: String,
+        positions_str: String,
+        data_file_path: String,
+        disabled_components: DisabledComponents,
+    ) -> App {
         App {
             current_tab: Tab::Overview,
             portfolio: None,
@@ -180,6 +305,7 @@ impl App {
             data_file_path,
             portfolio_receiver: None,
             network_status: NetworkStatus::Connected,
+            disabled_components,
         }
     }
 
@@ -374,9 +500,8 @@ impl App {
                     obj.insert(
                         "Amount".to_string(),
                         serde_json::Value::Number(
-                            serde_json::Number::from_f64(pos.get_amount()).unwrap_or_else(|| {
-                                serde_json::Number::from_f64(0.0).unwrap()
-                            }),
+                            serde_json::Number::from_f64(pos.get_amount())
+                                .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
                         ),
                     );
 
@@ -400,6 +525,7 @@ pub async fn run_tui(
     positions_str: String,
     data_file_path: String,
     tab: Option<Tab>,
+    disabled_components: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -407,7 +533,8 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(currency, positions_str.clone(), data_file_path);
+    let disabled = DisabledComponents::new(disabled_components);
+    let mut app = App::new(currency, positions_str.clone(), data_file_path, disabled);
     app.set_portfolio(portfolio);
     if let Some(tab) = tab {
         app.current_tab = tab;
@@ -543,45 +670,61 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(f.area());
+    let chunks = if app.disabled_components.is_disabled(Component::TabBar) {
+        // If tab bar is disabled, use the full area for content
+        vec![f.area()]
+    } else {
+        // Normal layout with tab bar
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(f.area())
+            .to_vec()
+    };
 
-    let tab_titles: Vec<Line> = Tab::all()
-        .iter()
-        .map(|t| {
-            let style = if *t == app.current_tab {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            Line::from(Span::styled(t.title(), style))
-        })
-        .collect();
+    // Only render tab bar if not disabled
+    if !app.disabled_components.is_disabled(Component::TabBar) {
+        let tab_titles: Vec<Line> = Tab::all()
+            .iter()
+            .map(|t| {
+                let style = if *t == app.current_tab {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                Line::from(Span::styled(t.title(), style))
+            })
+            .collect();
 
-    let tabs = Tabs::new(tab_titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Portfolio TUI"),
-        )
-        .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().fg(Color::Yellow))
-        .select(
-            Tab::all()
-                .iter()
-                .position(|&t| t == app.current_tab)
-                .unwrap_or(0),
-        );
+        let tabs = Tabs::new(tab_titles)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Portfolio TUI"),
+            )
+            .style(Style::default().fg(Color::White))
+            .highlight_style(Style::default().fg(Color::Yellow))
+            .select(
+                Tab::all()
+                    .iter()
+                    .position(|&t| t == app.current_tab)
+                    .unwrap_or(0),
+            );
 
-    f.render_widget(tabs, chunks[0]);
+        f.render_widget(tabs, chunks[0]);
+    }
+
+    let content_area = if app.disabled_components.is_disabled(Component::TabBar) {
+        chunks[0]
+    } else {
+        chunks[1]
+    };
 
     match app.current_tab {
-        Tab::Overview => render_overview(f, chunks[1], app),
-        Tab::Balances => render_balances(f, chunks[1], app),
+        Tab::Overview => render_overview(f, content_area, app),
+        Tab::Balances => render_balances(f, content_area, app),
     }
 
     if let Some(error) = &app.error_message {
@@ -589,170 +732,246 @@ fn ui(f: &mut Frame, app: &App) {
     }
 }
 
+fn render_asset_allocation(f: &mut Frame, area: Rect, portfolio: &Portfolio) {
+    let allocation = portfolio.get_allocation();
+    let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
+    allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+
+    // Bar chart for visual allocation
+    let data: Vec<(&str, u64)> = allocation_vec
+        .iter()
+        .map(|(name, percentage)| (name.as_str(), **percentage as u64))
+        .collect();
+
+    let barchart = BarChart::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Asset Allocation"),
+        )
+        .data(&data)
+        .bar_width(9)
+        .bar_style(Style::default().fg(Color::Yellow))
+        .value_style(Style::default().fg(Color::Black).bg(Color::Yellow));
+
+    f.render_widget(barchart, area);
+}
+
+fn render_detailed_allocation(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: &App) {
+    let allocation = portfolio.get_allocation();
+    let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
+    allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+
+    // Detailed allocation list
+    let detailed_list: Vec<ListItem> = allocation_vec
+        .iter()
+        .map(|(asset_class, percentage)| {
+            // Find a position with this asset class to get trend color
+            let trend_color = portfolio
+                .positions
+                .iter()
+                .find(|p| p.get_asset_class() == *asset_class)
+                .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
+                .unwrap_or(Color::Cyan);
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{asset_class:<15}"),
+                    Style::default().fg(trend_color),
+                ),
+                Span::styled(
+                    format!("{percentage:>8.2}%"),
+                    Style::default().fg(trend_color),
+                ),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(detailed_list)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Detailed Allocation"),
+        )
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(list, area);
+}
+
 fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
-        // Main layout: top section for total value, bottom for allocation details
+        // Calculate constraints based on disabled components
+        let mut constraints = Vec::new();
+
+        if !app.disabled_components.is_disabled(Component::TotalValue) {
+            constraints.push(Constraint::Length(7)); // Total value display
+        }
+
+        if !app
+            .disabled_components
+            .is_disabled(Component::AssetAllocation)
+            || !app
+                .disabled_components
+                .is_disabled(Component::DetailedAllocation)
+        {
+            constraints.push(Constraint::Min(0)); // Allocation section
+        }
+
+        if !app.disabled_components.is_disabled(Component::Help) {
+            constraints.push(Constraint::Length(3)); // Help
+        }
+
+        // If all components are disabled, show a placeholder
+        if constraints.is_empty() {
+            let placeholder = Paragraph::new("All overview components are disabled")
+                .block(Block::default().borders(Borders::ALL).title("Overview"))
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
+            f.render_widget(placeholder, area);
+            return;
+        }
+
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7), // Total value display
-                Constraint::Min(0),    // Allocation section
-                Constraint::Length(3), // Help
-            ])
+            .constraints(constraints)
             .split(area);
 
-        // Total Portfolio Value (big text display)
-        let total_value = portfolio.get_total_value();
-        // Create formatted currency for big text with full accuracy
-        let big_text_value = match app.currency.as_str() {
-            "USD" | "CAD" | "AUD" | "HKD" | "SGD" => {
-                format!("${}", format_with_commas(total_value))
-            }
-            "EUR" => format!("{} EUR", format_with_commas(total_value)),
-            "GBP" => format!("£{}", format_with_commas(total_value)),
-            "JPY" => {
-                let integer_value = total_value as i64;
-                let formatted = format!("{integer_value}");
-                let formatted_with_commas = formatted
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-                    .chars()
-                    .collect::<Vec<_>>()
-                    .chunks(3)
-                    .map(|chunk| chunk.iter().collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .chars()
-                    .rev()
-                    .collect::<String>();
-                format!("{formatted_with_commas} JPY")
-            }
-            "CHF" => format!("{} CHF", format_with_commas(total_value)),
-            _ => format!("{} {}", format_with_commas(total_value), app.currency),
-        };
+        let mut chunk_index = 0;
 
-        let big_text = BigText::builder()
-            .pixel_size(PixelSize::Quadrant)
-            .style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .lines(vec![big_text_value.clone().into()])
-            .build();
+        // Total Portfolio Value
+        if !app.disabled_components.is_disabled(Component::TotalValue) {
+            let total_value = portfolio.get_total_value();
+            // Create formatted currency for big text with full accuracy
+            let big_text_value = match app.currency.as_str() {
+                "USD" | "CAD" | "AUD" | "HKD" | "SGD" => {
+                    format!("${}", format_with_commas(total_value))
+                }
+                "EUR" => format!("{} EUR", format_with_commas(total_value)),
+                "GBP" => format!("£{}", format_with_commas(total_value)),
+                "JPY" => {
+                    let integer_value = total_value as i64;
+                    let formatted = format!("{integer_value}");
+                    let formatted_with_commas = formatted
+                        .chars()
+                        .rev()
+                        .collect::<String>()
+                        .chars()
+                        .collect::<Vec<_>>()
+                        .chunks(3)
+                        .map(|chunk| chunk.iter().collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                        .chars()
+                        .rev()
+                        .collect::<String>();
+                    format!("{formatted_with_commas} JPY")
+                }
+                "CHF" => format!("{} CHF", format_with_commas(total_value)),
+                _ => format!("{} {}", format_with_commas(total_value), app.currency),
+            };
 
-        let refresh_indicator = if app.flash_state { "🔄" } else { "📊" };
-        let network_indicator = match app.network_status {
-            NetworkStatus::Connected => "🟢",
-            NetworkStatus::Partial => "🟡",
-            NetworkStatus::Disconnected => "🔴",
-        };
-        let big_text_widget = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(
-                "Total Portfolio Value ({}) {} {}",
-                app.currency, refresh_indicator, network_indicator
-            ))
-            .title_alignment(Alignment::Center);
+            let big_text = BigText::builder()
+                .pixel_size(PixelSize::Quadrant)
+                .style(
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .lines(vec![big_text_value.clone().into()])
+                .build();
 
-        f.render_widget(big_text_widget, main_chunks[0]);
+            let refresh_indicator = if app.flash_state { "🔄" } else { "📊" };
+            let network_indicator = match app.network_status {
+                NetworkStatus::Connected => "🟢",
+                NetworkStatus::Partial => "🟡",
+                NetworkStatus::Disconnected => "🔴",
+            };
+            let big_text_widget = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "Total Portfolio Value ({}) {} {}",
+                    app.currency, refresh_indicator, network_indicator
+                ))
+                .title_alignment(Alignment::Center);
 
-        // Center the big text within the widget
-        let inner = main_chunks[0].inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
-        let big_text_width = big_text_value.len() as u16 * 4; // Approximate width per character in big text
-        let available_width = inner.width;
+            f.render_widget(big_text_widget, main_chunks[chunk_index]);
 
-        let centered_area = if big_text_width < available_width {
-            let margin = (available_width - big_text_width) / 2;
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(margin),
-                    Constraint::Min(0),
-                    Constraint::Length(margin),
-                ])
-                .split(inner)[1]
-        } else {
-            inner
-        };
+            // Center the big text within the widget
+            let inner = main_chunks[chunk_index].inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            let big_text_width = big_text_value.len() as u16 * 4; // Approximate width per character in big text
+            let available_width = inner.width;
 
-        f.render_widget(big_text, centered_area);
+            let centered_area = if big_text_width < available_width {
+                let margin = (available_width - big_text_width) / 2;
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Length(margin),
+                        Constraint::Min(0),
+                        Constraint::Length(margin),
+                    ])
+                    .split(inner)[1]
+            } else {
+                inner
+            };
+
+            f.render_widget(big_text, centered_area);
+            chunk_index += 1;
+        }
 
         // Allocation section: bar chart on left, detailed list on right
-        let allocation_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(main_chunks[1]);
+        if !app
+            .disabled_components
+            .is_disabled(Component::AssetAllocation)
+            || !app
+                .disabled_components
+                .is_disabled(Component::DetailedAllocation)
+        {
+            let allocation_area = main_chunks[chunk_index];
 
-        let allocation = portfolio.get_allocation();
-        let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
-        allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            if app
+                .disabled_components
+                .is_disabled(Component::AssetAllocation)
+                && !app
+                    .disabled_components
+                    .is_disabled(Component::DetailedAllocation)
+            {
+                // Only show detailed allocation (full width)
+                render_detailed_allocation(f, allocation_area, portfolio, app);
+            } else if !app
+                .disabled_components
+                .is_disabled(Component::AssetAllocation)
+                && app
+                    .disabled_components
+                    .is_disabled(Component::DetailedAllocation)
+            {
+                // Only show asset allocation bar chart (full width)
+                render_asset_allocation(f, allocation_area, portfolio);
+            } else {
+                // Show both (split horizontally)
+                let allocation_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .split(allocation_area);
 
-        // Bar chart for visual allocation
-        let data: Vec<(&str, u64)> = allocation_vec
-            .iter()
-            .map(|(name, percentage)| (name.as_str(), **percentage as u64))
-            .collect();
-
-        let barchart = BarChart::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Asset Allocation"),
-            )
-            .data(&data)
-            .bar_width(9)
-            .bar_style(Style::default().fg(Color::Yellow))
-            .value_style(Style::default().fg(Color::Black).bg(Color::Yellow));
-
-        f.render_widget(barchart, allocation_chunks[0]);
-
-        // Detailed allocation list
-        let detailed_list: Vec<ListItem> = allocation_vec
-            .iter()
-            .map(|(asset_class, percentage)| {
-                // Find a position with this asset class to get trend color
-                let trend_color = portfolio
-                    .positions
-                    .iter()
-                    .find(|p| p.get_asset_class() == *asset_class)
-                    .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
-                    .unwrap_or(Color::Cyan);
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{asset_class:<15}"),
-                        Style::default().fg(trend_color),
-                    ),
-                    Span::styled(
-                        format!("{percentage:>8.2}%"),
-                        Style::default().fg(trend_color),
-                    ),
-                ]))
-            })
-            .collect();
-
-        let list = List::new(detailed_list)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Detailed Allocation"),
-            )
-            .style(Style::default().fg(Color::White));
-
-        f.render_widget(list, allocation_chunks[1]);
+                render_asset_allocation(f, allocation_chunks[0], portfolio);
+                render_detailed_allocation(f, allocation_chunks[1], portfolio, app);
+            }
+            chunk_index += 1;
+        }
 
         // Help text
-        let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (select in Balances) | e (edit in Balances) | 1-2 (direct) | q (quit)")
-            .block(Block::default().borders(Borders::ALL).title("Help"))
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center);
+        if !app.disabled_components.is_disabled(Component::Help) {
+            let help_text = Paragraph::new("Navigation: h/l (tabs) | j/k (select in Balances) | e (edit in Balances) | 1-2 (direct) | q (quit)")
+                .block(Block::default().borders(Borders::ALL).title("Help"))
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
 
-        f.render_widget(help_text, main_chunks[2]);
+            f.render_widget(help_text, main_chunks[chunk_index]);
+        }
     } else {
         render_loading(f, area);
     }
@@ -760,15 +979,44 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_balances(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
-        let header_cells = ["Name", "Asset Class", "Amount", "Balance"]
-            .iter()
-            .map(|h| {
-                Cell::from(*h).style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            });
+        // Build header cells based on disabled components
+        let mut header_names = Vec::new();
+        let mut constraints = Vec::new();
+
+        if !app.disabled_components.is_disabled(Component::Name) {
+            header_names.push("Name");
+            constraints.push(Constraint::Percentage(30));
+        }
+        if !app.disabled_components.is_disabled(Component::AssetClass) {
+            header_names.push("Asset Class");
+            constraints.push(Constraint::Percentage(20));
+        }
+        if !app.disabled_components.is_disabled(Component::Amount) {
+            header_names.push("Amount");
+            constraints.push(Constraint::Percentage(20));
+        }
+        if !app.disabled_components.is_disabled(Component::Balance) {
+            header_names.push("Balance");
+            constraints.push(Constraint::Percentage(30));
+        }
+
+        // If all columns are disabled, show a placeholder
+        if header_names.is_empty() {
+            let placeholder = Paragraph::new("All balance columns are disabled")
+                .block(Block::default().borders(Borders::ALL).title("Balances"))
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
+            f.render_widget(placeholder, area);
+            return;
+        }
+
+        let header_cells = header_names.iter().map(|h| {
+            Cell::from(*h).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
         let header = Row::new(header_cells).height(1).bottom_margin(1);
 
         let rows = portfolio.positions.iter().enumerate().map(|(i, position)| {
@@ -782,40 +1030,78 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 Style::default()
             };
 
-            // Add indicator for positions with tickers (live data) vs static positions
-            let name_with_indicator = if position.get_ticker().is_some() {
-                format!("● {}", position.get_name()) // Live data indicator
-            } else {
-                format!("○ {}", position.get_name()) // Static data indicator
-            };
+            // Build row cells based on disabled components
+            let mut cells = Vec::new();
 
-            let cells = vec![
-                Cell::from(name_with_indicator).style(Style::default().fg(balance_color)),
-                Cell::from(position.get_asset_class()).style(Style::default().fg(balance_color)),
-                Cell::from(format_amount(position.get_amount()))
-                    .style(Style::default().fg(balance_color)),
-                Cell::from(format_currency(position.get_balance(), &app.currency))
-                    .style(Style::default().fg(balance_color)),
-            ];
+            if !app.disabled_components.is_disabled(Component::Name) {
+                // Add indicator for positions with tickers (live data) vs static positions
+                let name_with_indicator = if position.get_ticker().is_some() {
+                    format!("● {}", position.get_name()) // Live data indicator
+                } else {
+                    format!("○ {}", position.get_name()) // Static data indicator
+                };
+                cells.push(
+                    Cell::from(name_with_indicator).style(Style::default().fg(balance_color)),
+                );
+            }
+
+            if !app.disabled_components.is_disabled(Component::AssetClass) {
+                cells.push(
+                    Cell::from(position.get_asset_class())
+                        .style(Style::default().fg(balance_color)),
+                );
+            }
+
+            if !app.disabled_components.is_disabled(Component::Amount) {
+                cells.push(
+                    Cell::from(format_amount(position.get_amount()))
+                        .style(Style::default().fg(balance_color)),
+                );
+            }
+
+            if !app.disabled_components.is_disabled(Component::Balance) {
+                cells.push(
+                    Cell::from(format_currency(position.get_balance(), &app.currency))
+                        .style(Style::default().fg(balance_color)),
+                );
+            }
+
             Row::new(cells).height(1).style(row_style)
         });
 
+        // Build total row
         let total_value = portfolio.get_total_value();
-        let total_row = Row::new(vec![
-            Cell::from("TOTAL").style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(format_currency(total_value, &app.currency)).style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
-        .height(1);
+        let mut total_cells = Vec::new();
+
+        if !app.disabled_components.is_disabled(Component::Name) {
+            total_cells.push(
+                Cell::from("TOTAL").style(
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+        }
+
+        if !app.disabled_components.is_disabled(Component::AssetClass) {
+            total_cells.push(Cell::from(""));
+        }
+
+        if !app.disabled_components.is_disabled(Component::Amount) {
+            total_cells.push(Cell::from(""));
+        }
+
+        if !app.disabled_components.is_disabled(Component::Balance) {
+            total_cells.push(
+                Cell::from(format_currency(total_value, &app.currency)).style(
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+        }
+
+        let total_row = Row::new(total_cells).height(1);
 
         let help_text = match app.mode {
             AppMode::Normal => "Navigation: j/k (select) | e (edit) | h/l (tabs) | q (quit)",
@@ -824,18 +1110,10 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
 
         let table_title = format!("Portfolio Balances - {help_text}");
 
-        let table = Table::new(
-            rows.chain(std::iter::once(total_row)),
-            [
-                Constraint::Percentage(30),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(30),
-            ],
-        )
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(table_title))
-        .style(Style::default().fg(Color::White));
+        let table = Table::new(rows.chain(std::iter::once(total_row)), constraints)
+            .header(header)
+            .block(Block::default().borders(Borders::ALL).title(table_title))
+            .style(Style::default().fg(Color::White));
 
         f.render_widget(table, area);
 
@@ -964,7 +1242,7 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
                 // Check if it's a valid intermediate state (like "1." or "0.")
                 let trimmed = app.edit_input.trim();
                 if trimmed.ends_with('.') && trimmed.len() > 1 {
-                    if trimmed[..trimmed.len()-1].parse::<f64>().is_ok() {
+                    if trimmed[..trimmed.len() - 1].parse::<f64>().is_ok() {
                         // Valid intermediate state like "1." or "123."
                         (
                             "Enter decimal places...".to_string(),

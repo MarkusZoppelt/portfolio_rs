@@ -40,7 +40,17 @@ fn cli() -> Command {
                 .default_value("overview")
                 .help("Specify the tab to open at start (overview/balances)"),
         )
+        .arg(
+            arg!(--disable <COMPONENTS> "Disable specific TUI components")
+                .help("Comma-separated list of components to disable.")
+                .value_delimiter(',')
+                .action(clap::ArgAction::Append),
+        )
         .subcommand(Command::new("config").about("Print the path to the config file"))
+        .subcommand(
+            Command::new("components")
+                .about("List all available TUI components that can be disabled"),
+        )
         .subcommand(
             Command::new("balances")
                 .about("Show the current balances of your portfolio (CLI mode)")
@@ -171,6 +181,15 @@ async fn main() {
 
     let matches = cli().get_matches();
 
+    let disabled_components: Vec<String> = matches
+        .get_many::<String>("disable")
+        .unwrap_or_default()
+        .cloned()
+        .collect();
+
+    // Validate disabled components and show warnings
+    let _disabled = tui::DisabledComponents::new(disabled_components.clone());
+
     // Handle config subcommand
     if let Some(_matches) = matches.subcommand_matches("config") {
         println!(
@@ -183,13 +202,48 @@ async fn main() {
         return;
     }
 
+    // Handle components subcommand
+    if let Some(_matches) = matches.subcommand_matches("components") {
+        println!("Available TUI components that can be disabled:\n");
+
+        let components = tui::Component::all();
+        let max_width = components
+            .iter()
+            .map(|c| c.as_str().len())
+            .max()
+            .unwrap_or(0);
+
+        for component in components {
+            println!(
+                "  {:width$} - {}",
+                component.as_str(),
+                component.description(),
+                width = max_width
+            );
+        }
+
+        println!("\nExample usage:");
+        println!("  portfolio_rs --disable tab_bar,help");
+        println!("  portfolio_rs example_data.json --disable tab_bar,help");
+        return;
+    }
+
     // Get filename from arguments or config
-    let get_filename = |matches: Option<&clap::ArgMatches>| -> String {
+    let get_filename = |sub_matches: Option<&clap::ArgMatches>| -> String {
         let mut filename = String::new();
 
-        // Try to get filename from subcommand or main args
-        if let Some(f) = get_arg_value(matches, "FILE") {
-            filename = f;
+        // Try to get filename from subcommand first
+        if let Some(sub_matches) = sub_matches {
+            if let Some(f) = sub_matches.get_one::<String>("FILE") {
+                filename = f.to_string();
+            }
+        }
+
+        // If not found in subcommand, try main command args
+        if filename.is_empty() {
+            if let Some(f) = matches.get_one::<String>("FILE") {
+                filename = f.to_string();
+            }
         }
 
         // Fall back to config file
@@ -260,6 +314,7 @@ async fn main() {
             // Default to TUI when no subcommand is given
             let filename = get_filename(Some(&matches));
             let tab_value = parse_tab(get_arg_value(Some(&matches), "tab"));
+
             match load_portfolio(filename.clone()) {
                 Ok(positions_str) => {
                     let (portfolio, _network_status) =
@@ -270,6 +325,7 @@ async fn main() {
                         positions_str,
                         filename,
                         tab_value,
+                        disabled_components,
                     )
                     .await
                     {
@@ -406,6 +462,80 @@ mod tests {
     #[test]
     fn test_get_arg_value_none_matches() {
         assert_eq!(get_arg_value(None, "tab"), None);
+    }
+
+    #[test]
+    fn test_cli_disable_argument() {
+        let matches = cli().get_matches_from(vec![
+            "portfolio_rs",
+            "--disable",
+            "tab_bar,total_value",
+            "balances",
+            "example_data.json",
+        ]);
+        let disabled_components: Vec<String> = matches
+            .get_many::<String>("disable")
+            .unwrap_or_default()
+            .cloned()
+            .collect();
+        assert_eq!(disabled_components, vec!["tab_bar", "total_value"]);
+    }
+
+    #[test]
+    fn test_disabled_components_parsing() {
+        use tui::Component;
+        let disabled = tui::DisabledComponents::new(vec![
+            "tab_bar".to_string(),
+            "total_value".to_string(),
+            "name".to_string(),
+        ]);
+        assert!(disabled.is_disabled(Component::TabBar));
+        assert!(disabled.is_disabled(Component::TotalValue));
+        assert!(disabled.is_disabled(Component::Name));
+        assert!(!disabled.is_disabled(Component::AssetAllocation));
+        assert!(!disabled.is_disabled(Component::Help));
+    }
+
+    #[test]
+    fn test_component_enum_from_string() {
+        use std::str::FromStr;
+        use tui::Component;
+
+        // Test valid components
+        assert_eq!(Component::from_str("tab_bar").unwrap(), Component::TabBar);
+        assert_eq!(
+            Component::from_str("total_value").unwrap(),
+            Component::TotalValue
+        );
+        assert_eq!(Component::from_str("HELP").unwrap(), Component::Help); // Case insensitive
+        assert_eq!(Component::from_str("  name  ").unwrap(), Component::Name); // Whitespace trimmed
+
+        // Test invalid component
+        assert!(Component::from_str("invalid_component").is_err());
+    }
+
+    #[test]
+    fn test_component_enum_as_str() {
+        use tui::Component;
+
+        assert_eq!(Component::TabBar.as_str(), "tab_bar");
+        assert_eq!(Component::TotalValue.as_str(), "total_value");
+        assert_eq!(Component::Help.as_str(), "help");
+        assert_eq!(Component::Name.as_str(), "name");
+    }
+
+    #[test]
+    fn test_disabled_components_with_enum() {
+        use tui::{Component, DisabledComponents};
+
+        let mut disabled = DisabledComponents::default();
+        disabled.disable_component(Component::TabBar);
+        disabled.disable_component(Component::Help);
+
+        assert!(disabled.is_disabled(Component::TabBar));
+        assert!(disabled.is_disabled(Component::Help));
+        assert!(!disabled.is_disabled(Component::TotalValue));
+        assert!(!disabled.is_disabled(Component::Name));
     }
 
     #[tokio::test]
