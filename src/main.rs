@@ -226,21 +226,12 @@ async fn main() {
     }
 
     // Get filename from arguments or config
-    let get_filename = |sub_matches: Option<&clap::ArgMatches>| -> String {
+    let get_filename = |matches: Option<&clap::ArgMatches>| -> String {
         let mut filename = String::new();
 
-        // Try to get filename from subcommand first
-        if let Some(sub_matches) = sub_matches {
-            if let Some(f) = sub_matches.get_one::<String>("FILE") {
-                filename = f.to_string();
-            }
-        }
-
-        // If not found in subcommand, try main command args
-        if filename.is_empty() {
-            if let Some(f) = matches.get_one::<String>("FILE") {
-                filename = f.to_string();
-            }
+        // Try to get filename from subcommand or main args
+        if let Some(f) = get_arg_value(matches, "FILE") {
+            filename = f;
         }
 
         // Fall back to config file
