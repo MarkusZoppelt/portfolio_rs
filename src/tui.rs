@@ -114,19 +114,24 @@ pub struct DisabledComponents {
 }
 
 impl DisabledComponents {
-    pub fn new(disabled_list: Vec<String>) -> Self {
+    pub fn new(disabled_list: Vec<String>) -> Result<Self, Vec<String>> {
         let mut disabled = HashSet::new();
+        let mut errors = Vec::new();
 
         for component_str in disabled_list {
             match Component::from_str(&component_str) {
                 Ok(component) => {
                     disabled.insert(component);
                 }
-                Err(err) => eprintln!("Warning: {err}"),
+                Err(err) => errors.push(err),
             }
         }
 
-        DisabledComponents { disabled }
+        if errors.is_empty() {
+            Ok(DisabledComponents { disabled })
+        } else {
+            Err(errors)
+        }
     }
 
     #[cfg(test)]
@@ -533,7 +538,12 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let disabled = DisabledComponents::new(disabled_components);
+    let disabled = match DisabledComponents::new(disabled_components) {
+        Ok(disabled) => disabled,
+        Err(errors) => {
+            return Err(format!("Invalid disabled components - {}", errors.join(", ")).into());
+        }
+    };
     let mut app = App::new(currency, positions_str.clone(), data_file_path, disabled);
     app.set_portfolio(portfolio);
     if let Some(tab) = tab {

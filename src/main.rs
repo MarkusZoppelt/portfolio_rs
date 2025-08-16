@@ -187,9 +187,6 @@ async fn main() {
         .cloned()
         .collect();
 
-    // Validate disabled components and show warnings
-    let _disabled = tui::DisabledComponents::new(disabled_components.clone());
-
     // Handle config subcommand
     if let Some(_matches) = matches.subcommand_matches("config") {
         println!(
@@ -488,7 +485,8 @@ mod tests {
             "tab_bar".to_string(),
             "total_value".to_string(),
             "name".to_string(),
-        ]);
+        ])
+        .unwrap();
         assert!(disabled.is_disabled(Component::TabBar));
         assert!(disabled.is_disabled(Component::TotalValue));
         assert!(disabled.is_disabled(Component::Name));
