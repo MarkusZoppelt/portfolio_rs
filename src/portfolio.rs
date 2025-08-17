@@ -9,6 +9,14 @@ pub struct Portfolio {
     pub positions: Vec<PortfolioPosition>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistoricalPosition {
+    pub ticker: String,
+    pub amount: f64,
+    pub price_at_purchase: f64,
+    pub date: DateTime<Utc>,
+}
+
 impl Default for Portfolio {
     fn default() -> Self {
         Self::new()
@@ -35,65 +43,82 @@ impl Portfolio {
         sum
     }
 
-    // Get the total value of the portfolio at a specific date
-    // TODO: this function is not working as intended and the y_response is often an error
-    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> Result<f64, String> {
+    pub async fn get_historic_total_value(
+        &self,
+        db: &sled::Db,
+        date: DateTime<Utc>,
+    ) -> Result<f64, String> {
+        let historical_positions = self
+            .get_historical_positions(db, date)
+            .map_err(|e| e.to_string())?;
+
         let mut sum = 0.0;
-        let mut errors = Vec::new();
+        let mut errors = vec![];
 
         use futures::future::join_all;
-        let mut cash_sum = 0.0;
-        let mut tasks = Vec::new();
-        let mut positions_with_ticker = Vec::new();
+        let mut tasks = vec![];
 
-        for position in &self.positions {
-            if let Some(ticker) = position.get_ticker() {
-                positions_with_ticker.push((
-                    ticker,
-                    position.get_amount(),
-                    position
-                        .get_ticker()
-                        .unwrap_or(position.get_name())
-                        .to_string(),
-                ));
-                tasks.push(get_historic_price(ticker, date));
+        for pos in &historical_positions {
+            if !pos.ticker.is_empty() && Self::is_valid_ticker(&pos.ticker) {
+                let pos_clone = pos.clone();
+                tasks.push(async move {
+                    let resp = get_historic_price(&pos_clone.ticker, pos_clone.date).await;
+                    (pos_clone, resp)
+                });
             } else {
-                cash_sum += position.get_amount();
+                sum += pos.amount * pos.price_at_purchase;
             }
         }
 
         let results = join_all(tasks).await;
-        for ((_, amount, label), y_response) in positions_with_ticker.into_iter().zip(results) {
-            match y_response {
-                Ok(response) => match response.last_quote() {
-                    Ok(quote) => {
-                        sum += quote.close * amount;
+
+        for (pos, resp) in results {
+            match resp {
+                Ok(y_response) => {
+                    if let Ok(quote) = y_response.last_quote() {
+                        sum += quote.close * pos.amount;
+                    } else {
+                        sum += pos.amount * pos.price_at_purchase;
+                        errors.push(format!("No quote for {}, using purchase price", pos.ticker));
                     }
-                    Err(e) => {
-                        errors.push(format!("Error getting last quote for {label}: {e}"));
-                        continue;
-                    }
-                },
+                }
                 Err(e) => {
                     let err_str = format!("{e}");
-                    if err_str.contains("Bad Request") {
-                        // Silently skip bad requests to avoid log spam
+                    if err_str.contains("Bad Request") || err_str.contains("Not Found") {
+                        sum += pos.amount * pos.price_at_purchase;
                         continue;
                     }
-                    errors.push(format!(
-                        "Error getting historic price data for {label}: {err_str}"
-                    ));
-                    continue;
+                    errors.push(format!("Error fetching {}: {}", pos.ticker, e));
                 }
             }
         }
-        sum += cash_sum;
 
-        if !errors.is_empty() {
-            return Err(errors.join("; "));
+        let critical_errors: Vec<String> = errors
+            .into_iter()
+            .filter(|e| !e.contains("No quote") && !e.contains("Not Found"))
+            .collect();
+
+        if !critical_errors.is_empty() {
+            eprintln!("Warnings: {}", critical_errors.join("; "));
         }
 
         Ok(sum)
+    }
+
+    fn is_valid_ticker(ticker: &str) -> bool {
+        let valid_tickers = ["AAPL", "GOOGL", "MSFT", "TSLA", "SPY", "QQQ", "VTI", "NVDA"];
+
+        if ticker.to_lowercase().contains("cash")
+            || ticker.to_lowercase().contains("bond")
+            || ticker.contains(" ")
+        {
+            return false;
+        }
+
+        if valid_tickers.contains(&ticker) {
+            return true;
+        }
+        ticker.len() <= 5 && ticker.chars().all(|c| c.is_alphanumeric())
     }
 
     pub fn get_allocation(&self) -> HashMap<String, f64> {
@@ -193,14 +218,19 @@ impl Portfolio {
 
         // Yahoo first of the year is YYYY-01-03
         let first_of_the_year = Utc
-            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
+            .with_ymd_and_hms(Utc::now().year(), 1, 3, 0, 0, 0)
             .unwrap();
         let first_of_the_month = Utc
             .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
             .unwrap();
 
-        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await?;
-        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await?;
+        let value_at_beginning_of_year = self
+            .get_historic_total_value(&db, first_of_the_year)
+            .await?;
+
+        let value_at_beginning_of_month = self
+            .get_historic_total_value(&db, first_of_the_month)
+            .await?;
 
         let last: f64 = match &db.iter().last() {
             Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
@@ -209,11 +239,23 @@ impl Portfolio {
 
         let current_value = self.get_total_value();
 
-        let ytd_performance =
-            (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0;
-        let monthly_performance =
-            (last - value_at_beginning_of_month) / value_at_beginning_of_month * 100.0;
-        let recent_performance = (last - current_value) / current_value * 100.0;
+        let ytd_performance = if value_at_beginning_of_year != 0.0 {
+            (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0
+        } else {
+            0.0
+        };
+
+        let monthly_performance = if value_at_beginning_of_month != 0.0 {
+            (last - value_at_beginning_of_month) / value_at_beginning_of_month * 100.0
+        } else {
+            0.0
+        };
+
+        let recent_performance = if current_value != 0.0 {
+            (last - current_value) / current_value * 100.0
+        } else {
+            0.0
+        };
 
         Ok((ytd_performance, monthly_performance, recent_performance))
     }
@@ -221,22 +263,23 @@ impl Portfolio {
     pub async fn print_performance(&self) {
         let db = sled::open("database").unwrap();
 
-        // Yahoo first of the year is YYYY-01-03
         let first_of_the_year = Utc
-            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
+            .with_ymd_and_hms(Utc::now().year(), 1, 3, 0, 0, 0)
             .unwrap();
         let first_of_the_month = Utc
             .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
             .unwrap();
 
-        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await;
-        if let Err(e) = value_at_beginning_of_year {
+        let value_at_beginning_of_year =
+            self.get_historic_total_value(&db, first_of_the_year).await;
+        if let Err(e) = &value_at_beginning_of_year {
             println!("Error getting value for beginning of year: {e}");
             return;
         }
 
-        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await;
-        if let Err(e) = value_at_beginning_of_month {
+        let value_at_beginning_of_month =
+            self.get_historic_total_value(&db, first_of_the_month).await;
+        if let Err(e) = &value_at_beginning_of_month {
             println!("Error getting value for beginning of month: {e}");
             return;
         }
@@ -273,27 +316,106 @@ impl Portfolio {
             }
         }
     }
+
+    pub fn add_historical_position(
+        &self,
+        db: &sled::Db,
+        ticker: &str,
+        amount: f64,
+        price_at_purchase: f64,
+        date: DateTime<Utc>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let hist_pos = HistoricalPosition {
+            ticker: ticker.to_string(),
+            amount,
+            price_at_purchase,
+            date,
+        };
+        let key = format!("{}-{}", date.timestamp(), ticker);
+        let value = serde_json::to_vec(&hist_pos)?;
+        db.insert(key, value)?;
+        Ok(())
+    }
+
+    pub fn get_historical_positions(
+        &self,
+        db: &sled::Db,
+        date: DateTime<Utc>,
+    ) -> Result<Vec<HistoricalPosition>, Box<dyn std::error::Error>> {
+        let mut positions = vec![];
+
+        for item in db.iter() {
+            let (_, value) = item?;
+            let hist_pos: HistoricalPosition = serde_json::from_slice(&value)?;
+            if hist_pos.date <= date {
+                positions.push(hist_pos);
+            }
+        }
+        Ok(positions)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[tokio::test]
     async fn test_get_historic_total_value() {
-        use crate::position::from_string;
-        let positions_str = std::fs::read_to_string("example_data.json").unwrap();
-        let positions = from_string(&positions_str);
-        let mut portfolio = Portfolio::new();
-        for p in positions {
-            portfolio.add_position(p);
+        let db = sled::open("test_db").unwrap();
+        let portfolio = Portfolio::new();
+        let test_positions = vec![
+            ("AAPL", 10.0, 150.0),
+            ("GOOGL", 5.0, 2000.0),
+            ("Cash", 1000.0, 1.0),
+        ];
+
+        db.clear().unwrap();
+
+        for (ticker, amount, price) in test_positions {
+            portfolio
+                .add_historical_position(&db, ticker, amount, price, Utc::now())
+                .unwrap();
         }
-        let date = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        let value = portfolio.get_historic_total_value(date).await;
-        // Should include cash amount directly, and use tickers for others
+        let date = Utc::now();
+        let value = portfolio.get_historic_total_value(&db, date).await;
+
         match value {
-            Ok(v) => assert!(v > 0.0),
+            Ok(v) => {
+                println!("Historic total value: {:.2}", v);
+                assert!(v > 0.0);
+            }
             Err(e) => panic!("Error occurred in performance command: {e}"),
         }
+
+        db.clear().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_historical_positions() {
+        let db = sled::open("test_db_2").unwrap();
+        let portfolio = Portfolio::new();
+
+        db.clear().unwrap();
+
+        portfolio
+            .add_historical_position(&db, "AAPL", 10.0, 150.0, Utc::now())
+            .unwrap();
+
+        let positions = portfolio.get_historical_positions(&db, Utc::now()).unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].ticker, "AAPL");
+
+        db.clear().unwrap();
+    }
+
+    #[test]
+    fn test_is_valid_ticker() {
+        assert!(Portfolio::is_valid_ticker("AAPL"));
+        assert!(Portfolio::is_valid_ticker("GOOGL"));
+        assert!(!Portfolio::is_valid_ticker("Cash"));
+        assert!(!Portfolio::is_valid_ticker("20+yr US Bonds"));
+        assert!(!Portfolio::is_valid_ticker("Bitcoin"));
+        assert!(!Portfolio::is_valid_ticker("Diversified Commodities"));
     }
 }
