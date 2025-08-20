@@ -304,7 +304,7 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
         }
         
         // Move to next week
-        current_date = current_date + chrono::Duration::days(7);
+        current_date += chrono::Duration::days(7);
         week_index += 1;
     }
     
@@ -1338,11 +1338,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                         }
                         AppMode::Edit => {
                             // Legacy mode - can be removed later
-                            match key.code {
-                                KeyCode::Esc => {
-                                    app.exit_edit_mode();
-                                }
-                                _ => {}
+                            if key.code == KeyCode::Esc {
+                                app.exit_edit_mode();
                             }
                         }
                     }
@@ -1473,7 +1470,7 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
         (y_max.abs().max(1.0)) * 0.05
     };
     y_min = (y_min - pad).max(0.0);
-    y_max = y_max + pad;
+    y_max += pad;
     if y_max <= y_min {
         y_max = y_min + y_min.max(1.0) * 0.1;
     }
@@ -1543,7 +1540,7 @@ fn render_detailed_allocation_positions(f: &mut Frame, area: Rect, portfolio: &P
         
         // Create horizontal bar (max 30 characters wide)
         let bar_width = ((percentage / 100.0) * 30.0) as usize;
-        let bar_width = bar_width.max(1).min(30);
+        let bar_width = bar_width.clamp(1, 30);
         
         // Truncate name to fit in available space
         let display_name = if name.len() > 12 { &name[..12] } else { name };
