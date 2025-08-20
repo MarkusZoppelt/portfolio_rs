@@ -3,6 +3,17 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct Purchase {
+    // Optional ISO date string (e.g., 2024-01-15)
+    pub date: Option<String>,
+    pub quantity: f64,
+    #[serde(default)]
+    pub price: Option<f64>,
+    pub fees: Option<f64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortfolioPosition {
@@ -13,6 +24,14 @@ pub struct PortfolioPosition {
 
     #[serde(skip_deserializing)]
     last_spot: f64,
+
+    // Optional list of historical purchases to compute cost basis and PnL
+    #[serde(default)]
+    purchases: Vec<Purchase>,
+
+    // Previous close used to compute daily variation
+    #[serde(skip_deserializing)]
+    previous_close: Option<f64>,
 }
 
 impl PortfolioPosition {
@@ -36,14 +55,24 @@ impl PortfolioPosition {
 
     pub fn get_balance(&self) -> f64 {
         if let Some(_ticker) = &self.ticker {
-            self.last_spot * self.amount
+            // Use purchased quantity if available, otherwise fall back to amount
+            let quantity = if !self.purchases.is_empty() {
+                self.purchases.iter().map(|p| p.quantity).sum::<f64>()
+            } else {
+                self.amount
+            };
+            self.last_spot * quantity
         } else {
             self.amount
         }
     }
 
     pub fn get_amount(&self) -> f64 {
-        self.amount
+        if !self.purchases.is_empty() {
+            self.purchases.iter().map(|p| p.quantity).sum::<f64>()
+        } else {
+            self.amount
+        }
     }
 
     pub fn get_ticker(&self) -> Option<&str> {
@@ -57,6 +86,83 @@ impl PortfolioPosition {
     pub fn set_amount(&mut self, amount: f64) {
         self.amount = amount;
     }
+
+    pub fn market_price(&self) -> f64 {
+        self.last_spot
+    }
+
+    pub fn market_value(&self) -> f64 {
+        self.get_balance()
+    }
+
+    pub fn average_cost(&self) -> Option<f64> {
+        if self.purchases.is_empty() {
+            return None;
+        }
+
+        let mut total_quantity = 0.0_f64;
+        let mut total_cost = 0.0_f64;
+
+        for p in &self.purchases {
+            if let Some(price) = p.price {
+                if price > 0.0 {
+                    total_quantity += p.quantity;
+                    total_cost += p.quantity * price + p.fees.unwrap_or(0.0);
+                }
+            }
+        }
+
+        if total_quantity > 0.0 {
+            Some(total_cost / total_quantity)
+        } else {
+            None
+        }
+    }
+
+    pub fn total_invested(&self) -> Option<f64> {
+        if self.purchases.is_empty() {
+            return None;
+        }
+
+        let invested = self
+            .purchases
+            .iter()
+            .filter_map(|p| p.price.map(|price| (price, p)))
+            .filter(|(price, _)| *price > 0.0)
+            .map(|(price, p)| p.quantity * price + p.fees.unwrap_or(0.0))
+            .sum::<f64>();
+
+        if invested > 0.0 { Some(invested) } else { None }
+    }
+
+    pub fn pnl(&self) -> Option<f64> {
+        let invested = self.total_invested()?;
+        Some(self.market_value() - invested)
+    }
+
+    pub fn historic_variation_percent(&self) -> Option<f64> {
+        let invested = self.total_invested()?;
+        if invested <= 0.0 {
+            return None;
+        }
+        Some((self.market_value() - invested) / invested * 100.0)
+    }
+
+    pub fn daily_variation_percent(&self) -> Option<f64> {
+        let prev = self.previous_close?;
+        if prev <= 0.0 {
+            return None;
+        }
+        Some((self.market_price() - prev) / prev * 100.0)
+    }
+
+    pub fn get_purchases(&self) -> &[Purchase] {
+        &self.purchases
+    }
+
+    pub fn get_previous_close(&self) -> Option<f64> {
+        self.previous_close
+    }
 }
 
 pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
@@ -68,6 +174,36 @@ async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooE
     yahoo::YahooConnector::new()?
         .get_latest_quotes(ticker, "1d")
         .await
+}
+
+// Try to get the previous close price for daily variation calculations
+async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
+    let end = OffsetDateTime::now_utc();
+    let start = end - time::Duration::days(7);
+
+    let resp = yahoo::YahooConnector::new()?
+        .get_quote_history(ticker, start, end)
+        .await?;
+
+    let quotes = resp.quotes()?;
+    if quotes.len() >= 2 {
+        Ok(quotes[quotes.len() - 2].close)
+    } else if let Some(last) = quotes.last() {
+        Ok(last.close)
+    } else {
+        Err(yahoo::YahooError::NoResult)
+    }
+}
+
+pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
+    use chrono::NaiveDate;
+    let s = date_str.trim();
+    let parsed = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(s, "%Y/%m/%d"))
+        .or_else(|_| NaiveDate::parse_from_str(s, "%d-%m-%Y"))
+        .ok()?;
+    Utc.with_ymd_and_hms(parsed.year(), parsed.month(), parsed.day(), 0, 0, 0)
+        .single()
 }
 
 // get the price at a given date
@@ -102,7 +238,8 @@ async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
 pub async fn handle_position(
     position: &mut PortfolioPosition,
 ) -> Result<PortfolioPosition, yahoo::YahooError> {
-    if let Some(ticker) = &position.ticker {
+    if let Some(ticker_owned) = position.ticker.clone() {
+        let ticker = ticker_owned.as_str();
         let quote = get_quote_price(ticker).await?;
         if let Ok(last_spot) = quote.last_quote() {
             position.update_price(last_spot.close)
@@ -115,10 +252,40 @@ pub async fn handle_position(
             }
         }
 
+        // fetch previous close for daily variation
+        if let Ok(prev_close) = get_previous_close(ticker).await {
+            position.previous_close = Some(prev_close);
+        }
+
+        // Fill missing purchase prices using historic data
+        if !position.purchases.is_empty() {
+            let mut filled_purchases = Vec::with_capacity(position.purchases.len());
+            for mut p in position.purchases.clone() {
+                let needs_price = p.price.map(|v| v <= 0.0).unwrap_or(true);
+                if needs_price && p.quantity > 0.0 {
+                    if let Some(date_str) = &p.date {
+                        if let Some(date) = parse_purchase_date(date_str) {
+                            if let Ok(resp) = get_historic_price(ticker, date).await {
+                                if let Ok(q) = resp.last_quote() {
+                                    p.price = Some(q.close.max(0.0));
+                                } else if let Ok(quotes) = resp.quotes() {
+                                    if let Some(last) = quotes.last() {
+                                        p.price = Some(last.close.max(0.0));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                filled_purchases.push(p);
+            }
+            position.purchases = filled_purchases;
+        }
+
         // if no name was provided in the JSON, try to get it from Yahoo Finance
         if position.name.is_none() {
-            if let Some(ticker) = &position.ticker {
-                let name = get_quote_name(ticker).await?;
+            if let Some(ticker_again) = &position.ticker {
+                let name = get_quote_name(ticker_again).await?;
                 position.name = Some(name);
             }
         }
@@ -130,6 +297,8 @@ pub async fn handle_position(
         asset_class: position.asset_class.to_string(),
         amount: position.amount,
         last_spot: position.last_spot,
+        purchases: position.purchases.clone(),
+        previous_close: position.previous_close,
     })
 }
 
@@ -171,6 +340,8 @@ mod tests {
             asset_class: "Stock".to_string(),
             amount: 1.0,
             last_spot: 0.0,
+            purchases: vec![],
+            previous_close: None,
         };
 
         let updated_position = handle_position(&mut position)
