@@ -565,6 +565,7 @@ impl App {
     pub fn try_receive_portfolio_update(&mut self) -> bool {
         if let Some(receiver) = &mut self.portfolio_receiver {
             if let Ok((portfolio, network_status)) = receiver.try_recv() {
+                // Portfolio is already sorted by the background task
                 self.update_trends(&portfolio);
                 self.set_portfolio(portfolio);
                 self.network_status = network_status;
@@ -1063,8 +1064,10 @@ pub async fn run_tui(
             // Always read latest file content if possible; fall back to initial string
             let positions_str_current = std::fs::read_to_string(&data_file_path_bg)
                 .unwrap_or_else(|_| positions_str_bg.clone());
-            let (portfolio, network_status) =
+            let (mut portfolio, network_status) =
                 crate::create_live_portfolio(positions_str_current).await;
+            // Sort in memory for display only
+            portfolio.sort_positions_by_value_desc();
             if portfolio_sender.send((portfolio, network_status)).is_err() {
                 break; // Channel closed, exit task
             }
@@ -1082,7 +1085,9 @@ pub async fn run_tui(
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let (portfolio, _status) = crate::create_live_portfolio_with_logging(positions_str_current, false).await;
+            let (mut portfolio, _status) = crate::create_live_portfolio_with_logging(positions_str_current, false).await;
+            // Sort in memory for consistency
+            portfolio.sort_positions_by_value_desc();
             // Batch method is much faster (single fetch per ticker)
             let series = compute_weekly_series_batch(&portfolio).await;
             if historic_sender.send(series).is_err() {
@@ -1155,8 +1160,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                     {
                                         app.positions_str = new_positions_str.clone();
                                     }
-                                    let (portfolio, network_status) =
+                                    let (mut portfolio, network_status) =
                                         crate::create_live_portfolio(app.positions_str.clone()).await;
+                                    // Sort in memory for display only
+                                    portfolio.sort_positions_by_value_desc();
                                     // Also recompute weekly historic series immediately (fast batch)
                                     let hist_series = compute_weekly_series_batch(&portfolio).await;
                                     app.update_trends(&portfolio);
@@ -1219,8 +1226,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                             {
                                                 app.positions_str = new_positions_str;
                                             }
-                                            let (portfolio, network_status) =
+                                             let (mut portfolio, network_status) =
                                                 crate::create_live_portfolio(app.positions_str.clone()).await;
+                                             // Sort in memory for display only
+                                             portfolio.sort_positions_by_value_desc();
                                             let hist_series = compute_weekly_series_batch(&portfolio).await;
                                             app.update_trends(&portfolio);
                                             app.set_portfolio(portfolio);
@@ -1289,8 +1298,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                             {
                                                 app.positions_str = new_positions_str;
                                             }
-                                            let (portfolio, network_status) =
+                                             let (mut portfolio, network_status) =
                                                 crate::create_live_portfolio(app.positions_str.clone()).await;
+                                             // Sort in memory for display only
+                                             portfolio.sort_positions_by_value_desc();
                                             let hist_series = compute_weekly_series_batch(&portfolio).await;
                                             app.update_trends(&portfolio);
                                             app.set_portfolio(portfolio);
