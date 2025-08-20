@@ -1,35 +1,77 @@
 [
   {
-    "Ticker": "SPY",
+    "Amount": 50,
     "AssetClass": "Stocks",
-    "Amount": 2
+    "Ticker": "SPY",
+    "Purchases": [
+      {
+        "Date": "2025/04/15",
+        "Quantity": 37
+      },
+      {
+        "Date": "2025/07/03",
+        "Quantity": 13
+      }
+    ],
+    "Name": "Stocks"
   },
   {
-    "Name": "20+yr US Bonds",
-    "Ticker": "TLT",
+    "Amount": 55,
     "AssetClass": "Bonds",
-    "Amount": 4
+    "Ticker": "TLT",
+    "Purchases": [
+      {
+        "Date": "2025/05/10",
+        "Quantity": 55
+      }
+    ],
+    "Name": "Bonds"
   },
   {
-    "Name": "Diversified Commodities",
+    "Amount": 3,
     "Ticker": "GSG",
     "AssetClass": "Commodities",
-    "Amount": 3
+    "Purchases": [
+      {
+        "Date": "2025/03/22",
+        "Quantity": 3.0
+      }
+    ],
+    "Name": "Diversified Commodities"
   },
   {
+    "Amount": 10,
     "Ticker": "GLD",
     "AssetClass": "Gold",
-    "Amount": 1
+    "Purchases": [
+      {
+        "Date": "2025/06/18",
+        "Quantity": 10.0
+      }
+    ],
+    "Name": "Gold"
   },
   {
-    "Name": "Bitcoin",
+    "Amount": 0.45,
     "Ticker": "BTC-USD",
     "AssetClass": "Crypto",
-    "Amount": 0.01
+    "Purchases": [
+      {
+        "Date": "2025/05/28",
+        "Quantity": 0.45
+      }
+    ],
+    "Name": "Bitcoin"
   },
   {
-    "Name": "Cash",
+    "Amount": 50000,
     "AssetClass": "Cash",
-    "Amount": 200
+    "Purchases": [
+      {
+        "Date": "2025/07/10",
+        "Quantity": 50000
+      }
+    ],
+    "Name": "Cash"
   }
 ]
