@@ -1524,7 +1524,7 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
     f.render_widget(chart, area);
 }
 
-fn render_pie_chart(f: &mut Frame, area: Rect, portfolio: &Portfolio) {
+fn render_detailed_allocation_positions(f: &mut Frame, area: Rect, portfolio: &Portfolio) {
     let colors = [
         Color::Red, Color::Green, Color::Blue, Color::Yellow, 
         Color::Magenta, Color::Cyan, Color::White, Color::LightRed,
@@ -1570,53 +1570,12 @@ fn render_pie_chart(f: &mut Frame, area: Rect, portfolio: &Portfolio) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Asset Breakdown")
+                .title("Detailed Allocation")
         )
         .style(Style::default().fg(Color::White))
         .alignment(Alignment::Left);
 
     f.render_widget(pie_widget, area);
-}
-
-fn render_detailed_allocation(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: &App) {
-    let allocation = portfolio.get_allocation();
-    let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
-    allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
-
-    // Detailed allocation list
-    let detailed_list: Vec<ListItem> = allocation_vec
-        .iter()
-        .map(|(asset_class, percentage)| {
-            // Find a position with this asset class to get trend color
-            let trend_color = portfolio
-                .positions
-                .iter()
-                .find(|p| p.get_asset_class() == *asset_class)
-                .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
-                .unwrap_or(Color::Cyan);
-
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{asset_class:<15}"),
-                    Style::default().fg(trend_color),
-                ),
-                Span::styled(
-                    format!("{percentage:>8.2}%"),
-                    Style::default().fg(trend_color),
-                ),
-            ]))
-        })
-        .collect();
-
-    let list = List::new(detailed_list)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Detailed Allocation"),
-        )
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(list, area);
 }
 
 fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
@@ -2041,8 +2000,8 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                     .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(content_chunks[1]);
 
-        render_pie_chart(f, bottom_chunks[0], portfolio);
-        render_detailed_allocation(f, bottom_chunks[1], portfolio, app);
+        render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
+        render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
 
             chunk_index += 1;
 
@@ -2608,4 +2567,45 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: &App) {
+    let allocation = portfolio.get_allocation();
+    let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
+    allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+
+    // Detailed allocation list
+    let detailed_list: Vec<ListItem> = allocation_vec
+        .iter()
+        .map(|(asset_class, percentage)| {
+            // Find a position with this asset class to get trend color
+            let trend_color = portfolio
+                .positions
+                .iter()
+                .find(|p| p.get_asset_class() == *asset_class)
+                .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
+                .unwrap_or(Color::Cyan);
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{asset_class:<15}"),
+                    Style::default().fg(trend_color),
+                ),
+                Span::styled(
+                    format!("{percentage:>8.2}%"),
+                    Style::default().fg(trend_color),
+                ),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(detailed_list)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Asset Breakdown"),
+        )
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(list, area);
 }
