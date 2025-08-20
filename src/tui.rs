@@ -1445,15 +1445,38 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
     }
 
     // Find min/max values for scaling
-    let min_value = historic_data.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-    let max_value = historic_data.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
-    let min_week = historic_data.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
-    let max_week = historic_data.iter().map(|(d, _)| *d).fold(f64::NEG_INFINITY, f64::max);
+    let min_value = historic_data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::INFINITY, f64::min);
+    let max_value = historic_data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_week = historic_data
+        .iter()
+        .map(|(d, _)| *d)
+        .fold(f64::INFINITY, f64::min);
+    let max_week = historic_data
+        .iter()
+        .map(|(d, _)| *d)
+        .fold(f64::NEG_INFINITY, f64::max);
 
-    // Add some padding to the value range
-    let value_padding = (max_value - min_value) * 0.1;
-    let y_min = (min_value - value_padding).max(0.0);
-    let y_max = max_value + value_padding;
+    // Robust y-range with sensible padding even for flat series
+    let mut y_min = min_value.max(0.0);
+    let mut y_max = max_value;
+    let span = (y_max - y_min).abs();
+    let pad = if span > 0.0 {
+        span * 0.1
+    } else {
+        // Flat series: add a small absolute pad based on magnitude, min 1.0
+        (y_max.abs().max(1.0)) * 0.05
+    };
+    y_min = (y_min - pad).max(0.0);
+    y_max = y_max + pad;
+    if y_max <= y_min {
+        y_max = y_min + y_min.max(1.0) * 0.1;
+    }
 
     let datasets = vec![Dataset::default()
         .marker(ratatui::symbols::Marker::Braille)
@@ -1481,17 +1504,21 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
                 ])
         )
         .y_axis(
-            Axis::default()
-                .title(app.currency.as_str())
-                .style(Style::default().fg(Color::Gray))
-                .bounds([y_min, y_max])
-                .labels(vec![
-                    Line::from(format!("{:.0}", y_min)),
-                    Line::from(format!("{:.0}", (y_min + y_max) * 0.25)),
-                    Line::from(format!("{:.0}", (y_min + y_max) * 0.5)),
-                    Line::from(format!("{:.0}", (y_min + y_max) * 0.75)),
-                    Line::from(format!("{:.0}", y_max)),
-                ])
+            {
+                let range = (y_max - y_min).max(f64::EPSILON);
+                let tick = |t: f64| y_min + range * t;
+                Axis::default()
+                    .title(app.currency.as_str())
+                    .style(Style::default().fg(Color::Gray))
+                    .bounds([y_min, y_max])
+                    .labels(vec![
+                        Line::from(format!("{:.0}", y_min)),
+                        Line::from(format!("{:.0}", tick(0.25))),
+                        Line::from(format!("{:.0}", tick(0.5))),
+                        Line::from(format!("{:.0}", tick(0.75))),
+                        Line::from(format!("{:.0}", y_max)),
+                    ])
+            }
         );
 
     f.render_widget(chart, area);
