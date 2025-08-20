@@ -826,11 +826,11 @@ impl App {
             return Err("Price cannot be negative".to_string());
         }
 
-        // Save to file
+                            // Save to file
         self.save_purchase_edit_to_file(&self.purchase_date_input, quantity, price)?;
-        
-        self.exit_edit_mode();
-        Ok(())
+
+                            self.exit_edit_mode();
+                            Ok(())
     }
 
     pub fn save_new_purchase(&mut self) -> Result<(), String> {
@@ -995,10 +995,10 @@ impl App {
 
                         // Save the updated data
                         let json_string = serde_json::to_string_pretty(&original_data)
-                            .map_err(|e| format!("Failed to serialize data: {e}"))?;
+                .map_err(|e| format!("Failed to serialize data: {e}"))?;
 
-                        std::fs::write(&self.data_file_path, json_string)
-                            .map_err(|e| format!("Failed to write to file: {e}"))?;
+            std::fs::write(&self.data_file_path, json_string)
+                .map_err(|e| format!("Failed to write to file: {e}"))?;
 
                         return Ok(());
                     }
@@ -1867,9 +1867,28 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
         let mut chunk_index = 0;
 
-        // Total Portfolio Value (same as before)
+        // Total Portfolio Value with daily PnL
         if !app.disabled_components.is_disabled(Component::TotalValue) {
             let total_value = portfolio.get_total_value();
+            // Compute daily PnL and %Day on securities only (exclude cash)
+            let mut prev_sec_sum = 0.0_f64;
+            let mut sec_value_sum = 0.0_f64;
+            for position in &portfolio.positions {
+                let is_cash = position.get_ticker().is_none()
+                    && position.get_asset_class().to_lowercase() == "cash";
+                if is_cash { continue; }
+                let value = position.get_balance();
+                sec_value_sum += value;
+                let prev = position.daily_variation_percent().map(|dv| {
+                    let ratio = dv / 100.0;
+                    if (1.0 + ratio).abs() > f64::EPSILON { value / (1.0 + ratio) } else { value }
+                });
+                prev_sec_sum += prev.unwrap_or(value);
+            }
+            let day_pnl_abs = sec_value_sum - prev_sec_sum;
+            let daily_percent = if prev_sec_sum > 0.0 {
+                (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0
+            } else { 0.0 };
             let big_text_value = match app.currency.as_str() {
                 "USD" | "CAD" | "AUD" | "HKD" | "SGD" => {
                     format!("${}", format_with_commas(total_value))
@@ -1918,7 +1937,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .title(format!(
                     "Total Portfolio Value ({}) {} {}",
-                    app.currency, refresh_indicator, network_indicator
+                    app.currency,
+                    refresh_indicator,
+                    network_indicator
                 ))
                 .title_alignment(Alignment::Center);
 
@@ -1928,9 +1949,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 horizontal: 1,
                 vertical: 1,
             });
+            // Center big text across the full inner area
             let big_text_width = big_text_value.len() as u16 * 4;
             let available_width = inner.width;
-
             let centered_area = if big_text_width < available_width {
                 let margin = (available_width - big_text_width) / 2;
                 Layout::default()
@@ -1944,8 +1965,63 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 inner
             };
-
             f.render_widget(big_text, centered_area);
+
+            let thirds = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
+                .split(inner);
+            let right_area = thirds[1];
+
+            let pnl_color = if day_pnl_abs >= 0.0 { Color::Green } else { Color::Red };
+            let pct_color = if daily_percent >= 0.0 { Color::Green } else { Color::Red };
+
+            let right_content = vec![
+                Line::from(vec![
+                    Span::styled("Day PnL ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format_currency(day_pnl_abs, &app.currency),
+                        Style::default().fg(pnl_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("%Day ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("{:+.2}%", daily_percent),
+                        Style::default().fg(pct_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ];
+            // Vertically center inside the right third, and horizontally center the block while left-aligning text
+            let content_lines = 2u16; // two lines: Day PnL and %Day
+            let vpad = right_area.height.saturating_sub(content_lines).saturating_div(2);
+            let vchunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(vpad),
+                    Constraint::Length(content_lines),
+                    Constraint::Min(0),
+                ])
+                .split(right_area);
+
+            // Estimate content width to center the block horizontally
+            let day_value_str = format_currency(day_pnl_abs, &app.currency);
+            let pct_value_str = format!("{:+.2}%", daily_percent);
+            let day_line_text = format!("Day PnL {day_value_str}");
+            let pct_line_text = format!("%Day {pct_value_str}");
+            let max_w = day_line_text.chars().count().max(pct_line_text.chars().count()) as u16;
+            let hpad = vchunks[1].width.saturating_sub(max_w).saturating_div(2);
+            let hchunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(hpad),
+                    Constraint::Length(max_w),
+                    Constraint::Min(0),
+                ])
+                .split(vchunks[1]);
+
+            let right_paragraph = Paragraph::new(right_content).alignment(Alignment::Left);
+            f.render_widget(right_paragraph, hchunks[1]);
             chunk_index += 1;
         }
 
@@ -2231,16 +2307,13 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::PnL) {
-            let pnl_total = total_value
-                - {
-                    let mut invested_sum = 0.0_f64;
-                    for p in &portfolio.positions {
-                        if let Some(i) = p.total_invested() {
-                            invested_sum += i;
-                        }
-                    }
-                    invested_sum
-                };
+            // Securities-only PnL: exclude cash from value side
+            let mut invested_sum = 0.0_f64;
+            for p in &portfolio.positions {
+                if let Some(i) = p.total_invested() { invested_sum += i; }
+            }
+            let securities_value: f64 = portfolio.positions.iter().filter(|p| !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase()=="cash")).map(|p| p.get_balance()).sum();
+            let pnl_total = securities_value - invested_sum;
             let color = if pnl_total >= 0.0 { Color::Green } else { Color::Red };
             total_cells.push(
                 Cell::from(format!("{pnl_total:.2}"))
@@ -2250,15 +2323,12 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
         if !app.disabled_components.is_disabled(Component::Hist) {
             let mut invested_sum = 0.0_f64;
             for p in &portfolio.positions {
-                if let Some(i) = p.total_invested() {
-                    invested_sum += i;
-                }
+                if let Some(i) = p.total_invested() { invested_sum += i; }
             }
+            let securities_value: f64 = portfolio.positions.iter().filter(|p| !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase()=="cash")).map(|p| p.get_balance()).sum();
             let hist_pct = if invested_sum > 0.0 {
-                (total_value - invested_sum) / invested_sum * 100.0
-            } else {
-                0.0
-            };
+                (securities_value - invested_sum) / invested_sum * 100.0
+            } else { 0.0 };
             let color = if hist_pct >= 0.0 { Color::Green } else { Color::Red };
             total_cells.push(
                 Cell::from(format!("{hist_pct:.2}%"))
@@ -2266,29 +2336,25 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::Daily) {
-            // Calculate total daily variation like CLI does
-            let mut total_prev_value_for_day = 0.0_f64;
+            // Calculate total daily variation for securities only
+            let mut prev_sec_sum = 0.0_f64;
+            let mut sec_value_sum = 0.0_f64;
             for position in &portfolio.positions {
+                let is_cash = position.get_ticker().is_none() && position.get_asset_class().to_lowercase()=="cash";
+                if is_cash { continue; }
                 let value = position.get_balance();
+                sec_value_sum += value;
                 let day_var = position.daily_variation_percent();
                 let prev_value_for_position = match day_var {
                     Some(dv) => {
                         let ratio = dv / 100.0;
-                        if (1.0 + ratio).abs() > f64::EPSILON {
-                            value / (1.0 + ratio)
-                        } else {
-                            value
-                        }
+                        if (1.0 + ratio).abs() > f64::EPSILON { value / (1.0 + ratio) } else { value }
                     }
                     None => value,
                 };
-                total_prev_value_for_day += prev_value_for_position;
+                prev_sec_sum += prev_value_for_position;
             }
-            let total_day_var = if total_prev_value_for_day > 0.0 {
-                (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-            } else {
-                0.0
-            };
+            let total_day_var = if prev_sec_sum > 0.0 { (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0 } else { 0.0 };
             let color = if total_day_var >= 0.0 { Color::Green } else { Color::Red };
             total_cells.push(
                 Cell::from(format!("{total_day_var:.2}%"))

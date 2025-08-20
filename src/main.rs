@@ -75,6 +75,14 @@ fn cli() -> Command {
                         .help("Portfolio data file (uses config file if not specified)"),
                 ),
         )
+        .subcommand(
+            Command::new("sort")
+                .about("Sort positions by current value (desc) and overwrite the JSON file")
+                .arg(
+                    arg!([FILE] "JSON file with your positions")
+                        .help("Portfolio data file (uses config file if not specified)"),
+                ),
+        )
 }
 
 // returns a porfolio with the latest quotes from json data
@@ -161,6 +169,53 @@ fn open_encrpted_file(filename: String) -> String {
         String::from_utf8(output.stdout).unwrap()
     } else {
         read_to_string(filename).unwrap()
+    }
+}
+
+// Auto-sort the JSON array by current value (desc) using the provided live portfolio
+fn autosort_json_by_live_value_file(filename: &str, live_portfolio: &Portfolio) {
+    if filename.ends_with(".gpg") {
+        // don't rewrite encrypted files
+        return;
+    }
+
+    let Ok(contents) = std::fs::read_to_string(filename) else { return; };
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&contents) else { return; };
+    let Some(arr) = parsed.as_array_mut() else { return; };
+
+    // Determine desired order keys by sorting positions by balance desc
+    let mut refs: Vec<&crate::position::PortfolioPosition> = live_portfolio.positions.iter().collect();
+    refs.sort_by(|a, b| b.get_balance().partial_cmp(&a.get_balance()).unwrap_or(std::cmp::Ordering::Equal));
+    let order_keys: Vec<String> = refs
+        .into_iter()
+        .map(|p| {
+            let name = p.get_name_option().unwrap_or("");
+            let ticker = p.get_ticker().unwrap_or("");
+            if !ticker.is_empty() { format!("{name}|{ticker}") } else { name.to_string() }
+        })
+        .collect();
+
+    // Drain original array and sort to match order_keys (stable fallback by original index)
+    let mut keyed: Vec<(String, serde_json::Value, usize)> = arr
+        .drain(..)
+        .enumerate()
+        .map(|(idx, v)| {
+            let name = v.get("Name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let ticker = v.get("Ticker").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let key = if !ticker.is_empty() { format!("{name}|{ticker}") } else { name };
+            (key, v, idx)
+        })
+        .collect();
+
+    keyed.sort_by(|a, b| {
+        let ia = order_keys.iter().position(|k| k == &a.0).unwrap_or(usize::MAX);
+        let ib = order_keys.iter().position(|k| k == &b.0).unwrap_or(usize::MAX);
+        ia.cmp(&ib).then(a.2.cmp(&b.2))
+    });
+
+    let new_arr: Vec<serde_json::Value> = keyed.into_iter().map(|(_, v, _)| v).collect();
+    if let Ok(pretty) = serde_json::to_string_pretty(&new_arr) {
+        let _ = std::fs::write(filename, pretty);
     }
 }
 
@@ -269,6 +324,9 @@ async fn main() {
                 Ok(positions_str) => {
                     let (portfolio, _network_status) =
                         create_live_portfolio_with_logging(positions_str, true).await;
+                    // Auto-sort file on every run (simple approach)
+                    let filename_actual = get_filename(Some(sub_matches));
+                    autosort_json_by_live_value_file(&filename_actual, &portfolio);
                     portfolio.print(true);
                     store_balance_in_db(&portfolio);
                 }
@@ -281,6 +339,8 @@ async fn main() {
                 Ok(positions_str) => {
                     let (portfolio, _network_status) =
                         create_live_portfolio_with_logging(positions_str, true).await;
+                    let filename_actual = get_filename(Some(sub_matches));
+                    autosort_json_by_live_value_file(&filename_actual, &portfolio);
                     portfolio.draw_pie_chart();
                     portfolio.print_allocation();
                 }
@@ -293,7 +353,53 @@ async fn main() {
                 Ok(positions_str) => {
                     let (portfolio, _network_status) =
                         create_live_portfolio_with_logging(positions_str, true).await;
+                    let filename_actual = get_filename(Some(sub_matches));
+                    autosort_json_by_live_value_file(&filename_actual, &portfolio);
                     portfolio.print_performance().await;
+                }
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+        Some(("sort", sub_matches)) => {
+            let filename = get_filename(Some(sub_matches));
+            match load_portfolio(filename.clone()) {
+                Ok(positions_str) => {
+                    let positions = crate::position::from_string(&positions_str);
+                    let mut portfolio = Portfolio::new();
+                    for p in positions { portfolio.add_position(p); }
+                    // Need live prices to compute balances accurately
+                    let (mut live_portfolio, _status) = create_live_portfolio_with_logging(positions_str, true).await;
+                    live_portfolio.sort_positions_by_value_desc();
+                    // Sort original JSON array by the same order of names to preserve fields
+                    let mut original: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&filename).unwrap()).unwrap();
+                    if let serde_json::Value::Array(ref mut arr) = original {
+                        // Map name/ticker to index for stable identification
+                        let mut keyed: Vec<(String, serde_json::Value)> = arr.drain(..).map(|v| {
+                            let name = v.get("Name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                            let ticker = v.get("Ticker").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                            let key = if !ticker.is_empty() { format!("{name}|{ticker}") } else { name };
+                            (key, v)
+                        }).collect();
+
+                        let order_keys: Vec<String> = live_portfolio.positions.iter().map(|p| {
+                            let name = p.get_name_option().unwrap_or("");
+                            let ticker = p.get_ticker().unwrap_or("");
+                            if !ticker.is_empty() { format!("{name}|{ticker}") } else { name.to_string() }
+                        }).collect();
+
+                        keyed.sort_by(|a, b| {
+                            let ia = order_keys.iter().position(|k| k == &a.0).unwrap_or(usize::MAX);
+                            let ib = order_keys.iter().position(|k| k == &b.0).unwrap_or(usize::MAX);
+                            ia.cmp(&ib)
+                        });
+
+                        let new_arr: Vec<serde_json::Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                        let pretty = serde_json::to_string_pretty(&new_arr).unwrap();
+                        std::fs::write(&filename, pretty).unwrap();
+                        println!("Sorted and saved: {}", filename);
+                    } else {
+                        eprintln!("Input JSON is not an array; cannot sort");
+                    }
                 }
                 Err(e) => eprintln!("{e}"),
             }
@@ -307,6 +413,7 @@ async fn main() {
                 Ok(positions_str) => {
                     let (portfolio, _network_status) =
                         create_live_portfolio(positions_str.clone()).await;
+                    autosort_json_by_live_value_file(&filename, &portfolio);
                     if let Err(e) = tui::run_tui(
                         portfolio,
                         cfg.currency.clone(),
