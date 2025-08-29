@@ -172,8 +172,6 @@ fn open_encrpted_file(filename: String) -> String {
     }
 }
 
-
-
 fn get_arg_value(matches: Option<&clap::ArgMatches>, arg_name: &str) -> Option<String> {
     matches.and_then(|m| m.get_one::<String>(arg_name).map(|s| s.to_string()))
 }
@@ -318,7 +316,8 @@ async fn main() {
             let filename = get_filename(Some(sub_matches));
             match load_portfolio(filename.clone()) {
                 Ok(positions_str) => {
-                    let (mut portfolio, _status) = create_live_portfolio_with_logging(positions_str, true).await;
+                    let (mut portfolio, _status) =
+                        create_live_portfolio_with_logging(positions_str, true).await;
                     // Sort in memory for display only
                     portfolio.sort_positions_by_value_desc();
                     println!("Positions sorted by current value (display only, file unchanged):");
@@ -575,19 +574,17 @@ mod tests {
     #[test]
     fn test_disabled_components_backward_compatibility() {
         use tui::{Component, DisabledComponents};
-        
+
         // Test that old asset_allocation name still works
-        let disabled = DisabledComponents::new(vec![
-            "asset_allocation".to_string(),
-        ]).unwrap();
-        
+        let disabled = DisabledComponents::new(vec!["asset_allocation".to_string()]).unwrap();
+
         assert!(disabled.is_disabled(Component::AssetBreakdown));
     }
 
     #[test]
     fn test_disabled_components_error_handling() {
         use tui::DisabledComponents;
-        
+
         // Test with invalid component names
         let result = DisabledComponents::new(vec![
             "portfolio_growth".to_string(),
@@ -595,7 +592,7 @@ mod tests {
             "asset_breakdown".to_string(),
             "another_invalid".to_string(),
         ]);
-        
+
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert_eq!(errors.len(), 2);

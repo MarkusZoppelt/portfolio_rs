@@ -183,7 +183,10 @@ impl Portfolio {
 
     // Print the portfolio as a table
     pub fn print(&self, include_sum: bool) {
-        use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor, ContentArrangement, Table};
+        use comfy_table::{
+            presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
+            ContentArrangement, Table,
+        };
 
         let mut table = Table::new();
         table
@@ -223,12 +226,16 @@ impl Portfolio {
             let hist_var = position.historic_variation_percent();
 
             // Check if this is a cash position (no ticker and cash asset class)
-            let is_cash = position.get_ticker().is_none() && 
-                         position.get_asset_class().to_lowercase() == "cash";
+            let is_cash = position.get_ticker().is_none()
+                && position.get_asset_class().to_lowercase() == "cash";
 
             total_value += value;
-            if let Some(i) = invested { total_invested += i; }
-            if let Some(p) = pnl { total_pnl += p; }
+            if let Some(i) = invested {
+                total_invested += i;
+            }
+            if let Some(p) = pnl {
+                total_pnl += p;
+            }
 
             // Estimate previous value from daily % to compute portfolio daily change
             let prev_value_for_row = match day_var {
@@ -254,12 +261,16 @@ impl Portfolio {
             let avg_cost_str = if is_cash {
                 "-".to_string()
             } else {
-                avg_cost.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".to_string())
+                avg_cost
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "-".to_string())
             };
             let invested_str = if is_cash {
                 "-".to_string()
             } else {
-                invested.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".to_string())
+                invested
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "-".to_string())
             };
             let asset_class = position.get_asset_class();
             let asset_color = match asset_class.to_lowercase().as_str() {
@@ -278,7 +289,9 @@ impl Portfolio {
                 match pnl {
                     Some(v) => {
                         let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                        Cell::new(format!("{v:.2}")).set_alignment(CellAlignment::Right).fg(c)
+                        Cell::new(format!("{v:.2}"))
+                            .set_alignment(CellAlignment::Right)
+                            .fg(c)
                     }
                     None => Cell::new("-").set_alignment(CellAlignment::Right),
                 }
@@ -290,7 +303,9 @@ impl Portfolio {
                 match day_var {
                     Some(v) => {
                         let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                        Cell::new(format!("{v:.2}%")).set_alignment(CellAlignment::Right).fg(c)
+                        Cell::new(format!("{v:.2}%"))
+                            .set_alignment(CellAlignment::Right)
+                            .fg(c)
                     }
                     None => Cell::new("-").set_alignment(CellAlignment::Right),
                 }
@@ -302,14 +317,24 @@ impl Portfolio {
                 match hist_var {
                     Some(v) => {
                         let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                        Cell::new(format!("{v:.2}%")).set_alignment(CellAlignment::Right).fg(c)
+                        Cell::new(format!("{v:.2}%"))
+                            .set_alignment(CellAlignment::Right)
+                            .fg(c)
                     }
                     None => Cell::new("-").set_alignment(CellAlignment::Right),
                 }
             };
 
-            let price_str = if is_cash { "-".to_string() } else { format!("{price:.2}") };
-            let value_str = if is_cash { "-".to_string() } else { format!("{value:.2}") };
+            let price_str = if is_cash {
+                "-".to_string()
+            } else {
+                format!("{price:.2}")
+            };
+            let value_str = if is_cash {
+                "-".to_string()
+            } else {
+                format!("{value:.2}")
+            };
 
             table.add_row(vec![
                 Cell::new(position.get_name()),
@@ -327,7 +352,10 @@ impl Portfolio {
 
         // Broker-style overview summary above balances
         if include_sum {
-            use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor, ContentArrangement, Table};
+            use comfy_table::{
+                presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
+                ContentArrangement, Table,
+            };
             let day_pnl_abs = total_value - total_prev_value_for_day;
             let total_day_var = if total_prev_value_for_day > 0.0 {
                 (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
@@ -336,7 +364,9 @@ impl Portfolio {
             };
             let hist_percent = if total_invested > 0.0 {
                 (total_value - total_invested) / total_invested * 100.0
-            } else { 0.0 };
+            } else {
+                0.0
+            };
 
             let mut overview = Table::new();
             overview
@@ -356,25 +386,34 @@ impl Portfolio {
 
             let colorize_pct = |v: f64| {
                 let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                Cell::new(format!("{v:.2}%")).set_alignment(CellAlignment::Right).fg(c)
+                Cell::new(format!("{v:.2}%"))
+                    .set_alignment(CellAlignment::Right)
+                    .fg(c)
             };
             let colorize_money = |v: f64| {
                 let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                Cell::new(format!("{v:.2}")).set_alignment(CellAlignment::Right).fg(c)
+                Cell::new(format!("{v:.2}"))
+                    .set_alignment(CellAlignment::Right)
+                    .fg(c)
             };
 
             overview.add_row(vec![
                 Cell::new(format!("{total_value:.2}")).set_alignment(CellAlignment::Right),
                 Cell::new(format!("{securities_value:.2}")).set_alignment(CellAlignment::Right),
                 Cell::new(format!("{cash_value:.2}")).set_alignment(CellAlignment::Right),
-                Cell::new(if total_invested > 0.0 { format!("{total_invested:.2}") } else { "-".to_string() }).set_alignment(CellAlignment::Right),
+                Cell::new(if total_invested > 0.0 {
+                    format!("{total_invested:.2}")
+                } else {
+                    "-".to_string()
+                })
+                .set_alignment(CellAlignment::Right),
                 colorize_money(total_pnl),
                 colorize_pct(hist_percent),
                 colorize_money(day_pnl_abs),
                 colorize_pct(total_day_var),
             ]);
 
-            println!("{}", overview);
+            println!("{overview}");
         }
 
         if include_sum {
@@ -393,20 +432,45 @@ impl Portfolio {
                 Cell::new(""),
                 Cell::new(""),
                 Cell::new(""),
-                Cell::new(format!("{total_invested:.2}")).set_alignment(CellAlignment::Right).add_attribute(Attribute::Bold),
+                Cell::new(format!("{total_invested:.2}"))
+                    .set_alignment(CellAlignment::Right)
+                    .add_attribute(Attribute::Bold),
                 Cell::new("").set_alignment(CellAlignment::Right),
-                Cell::new(format!("{total_value:.2}")).set_alignment(CellAlignment::Right).add_attribute(Attribute::Bold),
+                Cell::new(format!("{total_value:.2}"))
+                    .set_alignment(CellAlignment::Right)
+                    .add_attribute(Attribute::Bold),
                 {
-                    let c = if total_pnl >= 0.0 { TColor::Green } else { TColor::Red };
-                    Cell::new(format!("{total_pnl:.2}")).set_alignment(CellAlignment::Right).add_attribute(Attribute::Bold).fg(c)
+                    let c = if total_pnl >= 0.0 {
+                        TColor::Green
+                    } else {
+                        TColor::Red
+                    };
+                    Cell::new(format!("{total_pnl:.2}"))
+                        .set_alignment(CellAlignment::Right)
+                        .add_attribute(Attribute::Bold)
+                        .fg(c)
                 },
                 {
-                    let c = if total_hist_var >= 0.0 { TColor::Green } else { TColor::Red };
-                    Cell::new(format!("{total_hist_var:.2}%")).set_alignment(CellAlignment::Right).add_attribute(Attribute::Bold).fg(c)
+                    let c = if total_hist_var >= 0.0 {
+                        TColor::Green
+                    } else {
+                        TColor::Red
+                    };
+                    Cell::new(format!("{total_hist_var:.2}%"))
+                        .set_alignment(CellAlignment::Right)
+                        .add_attribute(Attribute::Bold)
+                        .fg(c)
                 },
                 {
-                    let c = if total_day_var >= 0.0 { TColor::Green } else { TColor::Red };
-                    Cell::new(format!("{total_day_var:.2}%")).set_alignment(CellAlignment::Right).add_attribute(Attribute::Bold).fg(c)
+                    let c = if total_day_var >= 0.0 {
+                        TColor::Green
+                    } else {
+                        TColor::Red
+                    };
+                    Cell::new(format!("{total_day_var:.2}%"))
+                        .set_alignment(CellAlignment::Right)
+                        .add_attribute(Attribute::Bold)
+                        .fg(c)
                 },
             ]);
         }
@@ -524,17 +588,26 @@ impl Portfolio {
             }
         }
         let pnl = current - invested;
-        let pct = if invested > 0.0 { (pnl / invested) * 100.0 } else { 0.0 };
+        let pct = if invested > 0.0 {
+            (pnl / invested) * 100.0
+        } else {
+            0.0
+        };
         (invested, current, pnl, pct)
     }
 
     pub async fn print_performance(&self) {
-        use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor, ContentArrangement, Table};
+        use comfy_table::{
+            presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
+            ContentArrangement, Table,
+        };
 
         let db = sled::open("database").unwrap();
 
         // Reference points
-        let start_year = Utc.with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0).unwrap();
+        let start_year = Utc
+            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
+            .unwrap();
         let start_month = Utc
             .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 1, 0, 0, 0)
             .unwrap();
@@ -558,7 +631,9 @@ impl Portfolio {
         // Daily aggregated change using previous close (exclude cash)
         let mut total_prev_value_for_day = 0.0_f64;
         for position in &self.positions {
-            if position.get_ticker().is_none() { continue; }
+            if position.get_ticker().is_none() {
+                continue;
+            }
             let value = position.get_balance();
             let prev = position.daily_variation_percent().map(|dv| {
                 let ratio = dv / 100.0;
@@ -635,11 +710,15 @@ impl Portfolio {
         // Helpers
         let colorize_pct = |v: f64| {
             let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-            Cell::new(format!("{v:.2}%")).set_alignment(CellAlignment::Right).fg(c)
+            Cell::new(format!("{v:.2}%"))
+                .set_alignment(CellAlignment::Right)
+                .fg(c)
         };
         let colorize_money = |v: f64| {
             let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-            Cell::new(format!("{v:.2}")).set_alignment(CellAlignment::Right).fg(c)
+            Cell::new(format!("{v:.2}"))
+                .set_alignment(CellAlignment::Right)
+                .fg(c)
         };
         let pct_cell_opt = |ov: Option<f64>| match ov {
             Some(v) => colorize_pct(v),
@@ -681,7 +760,12 @@ impl Portfolio {
             Cell::new(format!("{current_value:.2}")).set_alignment(CellAlignment::Right),
             Cell::new(format!("{securities_value:.2}")).set_alignment(CellAlignment::Right),
             Cell::new(format!("{cash_value:.2}")).set_alignment(CellAlignment::Right),
-            Cell::new(if total_invested > 0.0 { format!("{total_invested:.2}") } else { "-".to_string() }).set_alignment(CellAlignment::Right),
+            Cell::new(if total_invested > 0.0 {
+                format!("{total_invested:.2}")
+            } else {
+                "-".to_string()
+            })
+            .set_alignment(CellAlignment::Right),
             colorize_money(unrealized_pnl),
             colorize_pct(hist_percent),
             colorize_money(day_pnl_abs),
@@ -722,7 +806,11 @@ impl Portfolio {
                 let value = position.get_balance();
                 let prev = {
                     let ratio = pct / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON { value / (1.0 + ratio) } else { value }
+                    if (1.0 + ratio).abs() > f64::EPSILON {
+                        value / (1.0 + ratio)
+                    } else {
+                        value
+                    }
                 };
                 let day_pnl = value - prev;
                 movers.push((position.get_name().to_string(), pct, day_pnl));
@@ -744,10 +832,16 @@ impl Portfolio {
                 Cell::new("Day PnL").add_attribute(Attribute::Bold),
             ]);
         for (name, pct, pnl) in &gainers {
-            let c = if *pct >= 0.0 { TColor::Green } else { TColor::Red };
+            let c = if *pct >= 0.0 {
+                TColor::Green
+            } else {
+                TColor::Red
+            };
             top_gainers.add_row(vec![
                 Cell::new(name.clone()),
-                Cell::new(format!("{pct:.2}%")).set_alignment(CellAlignment::Right).fg(c),
+                Cell::new(format!("{pct:.2}%"))
+                    .set_alignment(CellAlignment::Right)
+                    .fg(c),
                 colorize_money(*pnl),
             ]);
         }
@@ -763,19 +857,29 @@ impl Portfolio {
                 Cell::new("Day PnL").add_attribute(Attribute::Bold),
             ]);
         for (name, pct, pnl) in &losers {
-            let c = if *pct >= 0.0 { TColor::Green } else { TColor::Red };
+            let c = if *pct >= 0.0 {
+                TColor::Green
+            } else {
+                TColor::Red
+            };
             top_losers.add_row(vec![
                 Cell::new(name.clone()),
-                Cell::new(format!("{pct:.2}%")).set_alignment(CellAlignment::Right).fg(c),
+                Cell::new(format!("{pct:.2}%"))
+                    .set_alignment(CellAlignment::Right)
+                    .fg(c),
                 colorize_money(*pnl),
             ]);
         }
 
         // Print sections
-        println!("{}", overview);
-        println!("{}", periods);
-        if !gainers.is_empty() { println!("{}", top_gainers); }
-        if !losers.is_empty() { println!("{}", top_losers); }
+        println!("{overview}");
+        println!("{periods}");
+        if !gainers.is_empty() {
+            println!("{top_gainers}");
+        }
+        if !losers.is_empty() {
+            println!("{top_losers}");
+        }
     }
 }
 

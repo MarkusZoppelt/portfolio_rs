@@ -132,7 +132,11 @@ impl PortfolioPosition {
             .map(|(price, p)| p.quantity * price + p.fees.unwrap_or(0.0))
             .sum::<f64>();
 
-        if invested > 0.0 { Some(invested) } else { None }
+        if invested > 0.0 {
+            Some(invested)
+        } else {
+            None
+        }
     }
 
     pub fn pnl(&self) -> Option<f64> {
