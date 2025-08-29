@@ -29,7 +29,8 @@ pub enum Component {
     // Overview tab components
     TabBar,
     TotalValue,
-    AssetAllocation,
+    PortfolioGrowth,
+    AssetBreakdown,
     DetailedAllocation,
     Help,
     // Balances tab components (table columns)
@@ -51,7 +52,8 @@ impl Component {
         vec![
             Component::TabBar,
             Component::TotalValue,
-            Component::AssetAllocation,
+            Component::PortfolioGrowth,
+            Component::AssetBreakdown,
             Component::DetailedAllocation,
             Component::Help,
             Component::Name,
@@ -72,7 +74,8 @@ impl Component {
         match self {
             Component::TabBar => "tab_bar",
             Component::TotalValue => "total_value",
-            Component::AssetAllocation => "asset_allocation",
+            Component::PortfolioGrowth => "portfolio_growth",
+            Component::AssetBreakdown => "asset_breakdown",
             Component::DetailedAllocation => "detailed_allocation",
             Component::Help => "help",
             Component::Name => "name",
@@ -93,7 +96,8 @@ impl Component {
         match self {
             Component::TabBar => "Top navigation bar showing active tab",
             Component::TotalValue => "Total portfolio value display",
-            Component::AssetAllocation => "Asset bar chart",
+            Component::PortfolioGrowth => "Portfolio growth chart over time",
+            Component::AssetBreakdown => "Asset allocation visualization",
             Component::DetailedAllocation => "Asset percentages",
             Component::Help => "Keyboard shortcuts",
             Component::Name => "Name column in the balances table",
@@ -117,7 +121,9 @@ impl FromStr for Component {
         match s.trim().to_lowercase().as_str() {
             "tab_bar" => Ok(Component::TabBar),
             "total_value" => Ok(Component::TotalValue),
-            "asset_allocation" => Ok(Component::AssetAllocation),
+            "portfolio_growth" => Ok(Component::PortfolioGrowth),
+            "asset_breakdown" => Ok(Component::AssetBreakdown),
+            "asset_allocation" => Ok(Component::AssetBreakdown), // Backward compatibility
             "detailed_allocation" => Ok(Component::DetailedAllocation),
             "help" => Ok(Component::Help),
             "name" => Ok(Component::Name),
@@ -1813,6 +1819,12 @@ fn render_edit_purchase_form(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
+        // Check which main content components are enabled
+        let portfolio_growth_enabled = !app.disabled_components.is_disabled(Component::PortfolioGrowth);
+        let asset_breakdown_enabled = !app.disabled_components.is_disabled(Component::AssetBreakdown);
+        let detailed_allocation_enabled = !app.disabled_components.is_disabled(Component::DetailedAllocation);
+        let any_main_content_enabled = portfolio_growth_enabled || asset_breakdown_enabled || detailed_allocation_enabled;
+
         // New layout: Top section with total value, middle section with graph and pie chart, bottom with help
         let mut constraints = Vec::new();
 
@@ -1820,8 +1832,10 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             constraints.push(Constraint::Length(7)); // Total value display
         }
 
-        // Main content area for graph and pie chart
-        constraints.push(Constraint::Min(0));
+        // Main content area for graph and pie chart - only if at least one component is enabled
+        if any_main_content_enabled {
+            constraints.push(Constraint::Min(0));
+        }
 
         if !app.disabled_components.is_disabled(Component::Help) {
             constraints.push(Constraint::Length(3)); // Help
@@ -1992,26 +2006,57 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             chunk_index += 1;
         }
 
-        // Main content area: Historic graph on top, pie chart and allocation on bottom
-        let content_area = main_chunks[chunk_index];
-        let content_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(content_area);
+        // Main content area: Historic graph on top, detailed allocation and asset breakdown on bottom
+        // Only render if at least one main content component is enabled
+        if any_main_content_enabled {
+            let content_area = main_chunks[chunk_index];
+            
+            // Only create the vertical split if the portfolio growth is enabled
+            if portfolio_growth_enabled && (asset_breakdown_enabled || detailed_allocation_enabled) {
+                let content_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .split(content_area);
 
-        // Historic graph
-        render_historic_graph(f, content_chunks[0], portfolio, app);
+                render_historic_graph(f, content_chunks[0], portfolio, app);
 
-        // Bottom section: Pie chart on left, detailed allocation on right
-        let bottom_chunks = Layout::default()
+                // Bottom section: Detailed allocation on left, asset breakdown on right
+                if asset_breakdown_enabled && detailed_allocation_enabled {
+                    let bottom_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                        .split(content_chunks[1]);
+
+                    render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
+                    render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
+                } else if detailed_allocation_enabled {
+                    render_detailed_allocation_positions(f, content_chunks[1], portfolio);
+                } else if asset_breakdown_enabled {
+                    render_asset_breakdown_grouped(f, content_chunks[1], portfolio, app);
+                }
+            } else if portfolio_growth_enabled {
+                // Only portfolio growth enabled
+                render_historic_graph(f, content_area, portfolio, app);
+            } else if asset_breakdown_enabled && detailed_allocation_enabled {
+                // Only bottom components enabled
+                let bottom_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(content_chunks[1]);
+                    .split(content_area);
 
-        render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
-        render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
+                render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
+                render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
+            } else if detailed_allocation_enabled {
+                // Only detailed allocation enabled
+                render_detailed_allocation_positions(f, content_area, portfolio);
+            } else if asset_breakdown_enabled {
+                // Only asset breakdown enabled
+                render_asset_breakdown_grouped(f, content_area, portfolio, app);
+            }
+            // If none are enabled, just leave the area empty
 
             chunk_index += 1;
+        }
 
         // Help text
         if !app.disabled_components.is_disabled(Component::Help) {
