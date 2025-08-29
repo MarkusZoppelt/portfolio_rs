@@ -512,7 +512,7 @@ mod tests {
         assert!(disabled.is_disabled(Component::TabBar));
         assert!(disabled.is_disabled(Component::TotalValue));
         assert!(disabled.is_disabled(Component::Name));
-        assert!(!disabled.is_disabled(Component::AssetAllocation));
+        assert!(!disabled.is_disabled(Component::AssetBreakdown));
         assert!(!disabled.is_disabled(Component::Help));
     }
 
@@ -551,9 +551,15 @@ mod tests {
         let mut disabled = DisabledComponents::default();
         disabled.disable_component(Component::TabBar);
         disabled.disable_component(Component::Help);
+        disabled.disable_component(Component::PortfolioGrowth);
+        disabled.disable_component(Component::AssetBreakdown);
+        disabled.disable_component(Component::DetailedAllocation);
 
         assert!(disabled.is_disabled(Component::TabBar));
         assert!(disabled.is_disabled(Component::Help));
+        assert!(disabled.is_disabled(Component::PortfolioGrowth));
+        assert!(disabled.is_disabled(Component::AssetBreakdown));
+        assert!(disabled.is_disabled(Component::DetailedAllocation));
         assert!(!disabled.is_disabled(Component::TotalValue));
         assert!(!disabled.is_disabled(Component::Name));
     }
@@ -564,5 +570,36 @@ mod tests {
         let (portfolio, _network_status) = create_live_portfolio(positions_str).await;
         let x: Result<Portfolio, ParseError> = Ok(portfolio);
         assert!(x.is_ok());
+    }
+
+    #[test]
+    fn test_disabled_components_backward_compatibility() {
+        use tui::{Component, DisabledComponents};
+        
+        // Test that old asset_allocation name still works
+        let disabled = DisabledComponents::new(vec![
+            "asset_allocation".to_string(),
+        ]).unwrap();
+        
+        assert!(disabled.is_disabled(Component::AssetBreakdown));
+    }
+
+    #[test]
+    fn test_disabled_components_error_handling() {
+        use tui::DisabledComponents;
+        
+        // Test with invalid component names
+        let result = DisabledComponents::new(vec![
+            "portfolio_growth".to_string(),
+            "invalid_component".to_string(),
+            "asset_breakdown".to_string(),
+            "another_invalid".to_string(),
+        ]);
+        
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 2);
+        assert!(errors.contains(&"Unknown component: 'invalid_component'".to_string()));
+        assert!(errors.contains(&"Unknown component: 'another_invalid'".to_string()));
     }
 }
