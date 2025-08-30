@@ -2,6 +2,14 @@ use chrono::prelude::*;
 use serde::Deserialize;
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
+use std::collections::HashMap;
+use once_cell::sync::Lazy;
+use std::sync::{Mutex, Arc};
+// Caches for Yahoo API requests
+static QUOTE_CACHE: Lazy<Mutex<HashMap<String, Arc<yahoo::YResponse>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static HISTORIC_CACHE: Lazy<Mutex<HashMap<(String, i64), Arc<yahoo::YResponse>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
@@ -169,29 +177,47 @@ pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
     serde_json::from_str::<Vec<PortfolioPosition>>(data).expect("JSON was not well-formatted")
 }
 
-// Get the latest price for a ticker
-async fn get_quote_price(ticker: &str) -> Result<yahoo::YResponse, yahoo::YahooError> {
-    yahoo::YahooConnector::new()?
-        .get_latest_quotes(ticker, "1d")
-        .await
+// Get the latest price for a ticker, cache on success, fallback to cache on failure
+async fn get_quote_price(ticker: &str) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
+    match yahoo::YahooConnector::new()?.get_latest_quotes(ticker, "1d").await {
+        Ok(resp) => {
+            QUOTE_CACHE.lock().unwrap().insert(ticker.to_string(), Arc::new(resp));
+            Ok(Arc::clone(QUOTE_CACHE.lock().unwrap().get(ticker).unwrap()))
+        }
+        Err(e) => {
+            if let Some(cached) = QUOTE_CACHE.lock().unwrap().get(ticker) {
+                Ok(Arc::clone(cached))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
-// Try to get the previous close price for daily variation calculations
+// Try to get the previous close price for daily variation calculations, cache on success, fallback to cache on failure
 async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
     let end = OffsetDateTime::now_utc();
     let start = end - time::Duration::days(7);
-
-    let resp = yahoo::YahooConnector::new()?
-        .get_quote_history(ticker, start, end)
-        .await?;
-
-    let quotes = resp.quotes()?;
-    if quotes.len() >= 2 {
-        Ok(quotes[quotes.len() - 2].close)
-    } else if let Some(last) = quotes.last() {
-        Ok(last.close)
-    } else {
-        Err(yahoo::YahooError::NoResult)
+    match yahoo::YahooConnector::new()?.get_quote_history(ticker, start, end).await {
+        Ok(resp) => {
+            let quotes = resp.quotes()?;
+            let prev_close = if quotes.len() >= 2 {
+                quotes[quotes.len() - 2].close
+            } else if let Some(last) = quotes.last() {
+                last.close
+            } else {
+                return Err(yahoo::YahooError::NoResult);
+            };
+            PREV_CLOSE_CACHE.lock().unwrap().insert(ticker.to_string(), prev_close);
+            Ok(prev_close)
+        }
+        Err(e) => {
+            if let Some(cached) = PREV_CLOSE_CACHE.lock().unwrap().get(ticker) {
+                Ok(*cached)
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 
@@ -206,30 +232,50 @@ pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
         .single()
 }
 
-// get the price at a given date
+// get the price at a given date, cache on success, fallback to cache on failure
 pub async fn get_historic_price(
     ticker: &str,
     date: DateTime<Utc>,
-) -> Result<yahoo::YResponse, yahoo::YahooError> {
+) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
     let start = OffsetDateTime::from_unix_timestamp(date.timestamp()).unwrap();
 
     // get a range of 3 days in case the market is closed on the given date
     let end = start + time::Duration::days(3);
+    let cache_key = (ticker.to_string(), date.timestamp());
 
-    yahoo::YahooConnector::new()?
-        .get_quote_history(ticker, start, end)
-        .await
+    match yahoo::YahooConnector::new()?.get_quote_history(ticker, start, end).await {
+        Ok(resp) => {
+            HISTORIC_CACHE.lock().unwrap().insert(cache_key.clone(), Arc::new(resp));
+            Ok(Arc::clone(HISTORIC_CACHE.lock().unwrap().get(&cache_key).unwrap()))
+        }
+        Err(e) => {
+            if let Some(cached) = HISTORIC_CACHE.lock().unwrap().get(&cache_key) {
+                Ok(Arc::clone(cached))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
-// Try to get the short name for a ticker from Yahoo Finance
+// Try to get the short name for a ticker from Yahoo Finance, cache on success, fallback to cache on failure
 async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
-    let connector = yahoo::YahooConnector::new();
-    let resp = connector?.search_ticker(ticker).await?;
-
-    if let Some(item) = resp.quotes.first() {
-        Ok(item.short_name.clone())
-    } else {
-        Err(yahoo::YahooError::NoResult)
+    match yahoo::YahooConnector::new()?.search_ticker(ticker).await {
+        Ok(resp) => {
+            if let Some(item) = resp.quotes.first() {
+                NAME_CACHE.lock().unwrap().insert(ticker.to_string(), item.short_name.clone());
+                Ok(item.short_name.clone())
+            } else {
+                Err(yahoo::YahooError::NoResult)
+            }
+        }
+        Err(e) => {
+            if let Some(cached) = NAME_CACHE.lock().unwrap().get(ticker) {
+                Ok(cached.clone())
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 
