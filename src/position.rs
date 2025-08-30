@@ -5,10 +5,12 @@ use yahoo_finance_api as yahoo;
 use std::collections::HashMap;
 use once_cell::sync::Lazy;
 use std::sync::{Mutex, Arc};
+// Type alias to reduce type complexity
+type HistoricCacheMap = HashMap<(String, i64), Arc<yahoo::YResponse>>;
 // Caches for Yahoo API requests
 static QUOTE_CACHE: Lazy<Mutex<HashMap<String, Arc<yahoo::YResponse>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static HISTORIC_CACHE: Lazy<Mutex<HashMap<(String, i64), Arc<yahoo::YResponse>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static HISTORIC_CACHE: Lazy<Mutex<HistoricCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Deserialize, Clone)]
