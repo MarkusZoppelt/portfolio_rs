@@ -769,39 +769,50 @@ impl App {
                             if let Some(portfolio) = &self.portfolio {
                                 if self.selected_position < portfolio.positions.len() {
                                     let selected_pos = &portfolio.positions[self.selected_position];
-                                    
+
                                     // Find the position in original data by matching identifiers
                                     for pos_val in original_data.iter() {
                                         if let Some(obj) = pos_val.as_object() {
-                                            let name_match = match (selected_pos.get_name_option(), obj.get("Name")) {
+                                            let name_match = match (
+                                                selected_pos.get_name_option(),
+                                                obj.get("Name"),
+                                            ) {
                                                 (Some(sel_name), Some(json_name)) => {
                                                     json_name.as_str() == Some(sel_name)
                                                 }
                                                 (None, None) => true,
                                                 _ => false,
                                             };
-                                            
-                                            let ticker_match = match (selected_pos.get_ticker(), obj.get("Ticker")) {
+
+                                            let ticker_match = match (
+                                                selected_pos.get_ticker(),
+                                                obj.get("Ticker"),
+                                            ) {
                                                 (Some(sel_ticker), Some(json_ticker)) => {
                                                     json_ticker.as_str() == Some(sel_ticker)
                                                 }
                                                 (None, None) => true,
                                                 _ => false,
                                             };
-                                            
-                                            let asset_class_match = obj.get("AssetClass")
+
+                                            let asset_class_match = obj
+                                                .get("AssetClass")
                                                 .and_then(|v| v.as_str())
                                                 .map(|s| s == selected_pos.get_asset_class())
                                                 .unwrap_or(false);
-                                            
+
                                             if name_match && ticker_match && asset_class_match {
                                                 // Found the matching position, now get the purchase price
                                                 if let Some(purchases_val) = obj.get("Purchases") {
                                                     if let Some(arr) = purchases_val.as_array() {
                                                         if original_index < arr.len() {
-                                                            if let Some(price_val) = arr[original_index].get("Price") {
-                                                                if let Some(p) = price_val.as_f64() {
-                                                                    price_from_json = Some(p.to_string());
+                                                            if let Some(price_val) =
+                                                                arr[original_index].get("Price")
+                                                            {
+                                                                if let Some(p) = price_val.as_f64()
+                                                                {
+                                                                    price_from_json =
+                                                                        Some(p.to_string());
                                                                 }
                                                             }
                                                         }
@@ -929,7 +940,11 @@ impl App {
 
     // Removed unused legacy amount edit functions (save_edit, save_to_file)
 
-    fn find_and_update_position_by_identifier<F>(&self, sorted_position_index: usize, updater: F) -> Result<(), String>
+    fn find_and_update_position_by_identifier<F>(
+        &self,
+        sorted_position_index: usize,
+        updater: F,
+    ) -> Result<(), String>
     where
         F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
     {
@@ -939,23 +954,22 @@ impl App {
             }
 
             let selected_position = &portfolio.positions[sorted_position_index];
-            
+
             // Parse the original file to preserve all data
-            let mut original_data: Vec<serde_json::Value> = serde_json::from_str(&self.positions_str)
-                .map_err(|e| format!("Failed to parse original data: {e}"))?;
+            let mut original_data: Vec<serde_json::Value> =
+                serde_json::from_str(&self.positions_str)
+                    .map_err(|e| format!("Failed to parse original data: {e}"))?;
 
             // Find and update the position in original data by matching identifiers
             let mut found = false;
             for pos_val in original_data.iter_mut() {
                 if let Some(obj) = pos_val.as_object() {
                     let name_match = match (selected_position.get_name_option(), obj.get("Name")) {
-                        (Some(sel_name), Some(json_name)) => {
-                            json_name.as_str() == Some(sel_name)
-                        }
+                        (Some(sel_name), Some(json_name)) => json_name.as_str() == Some(sel_name),
                         (None, None) => true,
                         _ => false,
                     };
-                    
+
                     let ticker_match = match (selected_position.get_ticker(), obj.get("Ticker")) {
                         (Some(sel_ticker), Some(json_ticker)) => {
                             json_ticker.as_str() == Some(sel_ticker)
@@ -963,12 +977,13 @@ impl App {
                         (None, None) => true,
                         _ => false,
                     };
-                    
-                    let asset_class_match = obj.get("AssetClass")
+
+                    let asset_class_match = obj
+                        .get("AssetClass")
                         .and_then(|v| v.as_str())
                         .map(|s| s == selected_position.get_asset_class())
                         .unwrap_or(false);
-                    
+
                     if name_match && ticker_match && asset_class_match {
                         // Apply the update function to this position
                         updater(pos_val)?;
@@ -977,18 +992,21 @@ impl App {
                     }
                 }
             }
-            
+
             if !found {
-                return Err(format!("Could not find position '{}' in original data", selected_position.get_name()));
+                return Err(format!(
+                    "Could not find position '{}' in original data",
+                    selected_position.get_name()
+                ));
             }
-            
+
             // Save the updated data
             let json_string = serde_json::to_string_pretty(&original_data)
                 .map_err(|e| format!("Failed to serialize data: {e}"))?;
-            
+
             std::fs::write(&self.data_file_path, json_string)
                 .map_err(|e| format!("Failed to write to file: {e}"))?;
-            
+
             Ok(())
         } else {
             Err("No portfolio available".to_string())
@@ -998,7 +1016,8 @@ impl App {
     fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<(), String> {
         self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
             // Get the position object
-            let position_obj = position_obj.as_object_mut()
+            let position_obj = position_obj
+                .as_object_mut()
                 .ok_or("Invalid position data")?;
 
             // Get or create the Purchases array
@@ -1060,7 +1079,8 @@ impl App {
     ) -> Result<(), String> {
         self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
             // Get the position object
-            let position_obj = position_obj.as_object_mut()
+            let position_obj = position_obj
+                .as_object_mut()
                 .ok_or("Invalid position data")?;
 
             // Get the Purchases array
@@ -1104,16 +1124,19 @@ impl App {
                             purchase_obj.insert(
                                 "Quantity".to_string(),
                                 serde_json::Value::Number(
-                                    serde_json::Number::from_f64(quantity)
-                                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                                    serde_json::Number::from_f64(quantity).unwrap_or_else(|| {
+                                        serde_json::Number::from_f64(0.0).unwrap()
+                                    }),
                                 ),
                             );
 
                             // Only persist Price if the user explicitly provided it (>0). Otherwise, remove the field
                             if price > 0.0 {
                                 if let Some(num) = serde_json::Number::from_f64(price) {
-                                    purchase_obj
-                                        .insert("Price".to_string(), serde_json::Value::Number(num));
+                                    purchase_obj.insert(
+                                        "Price".to_string(),
+                                        serde_json::Value::Number(num),
+                                    );
                                 }
                             } else {
                                 purchase_obj.remove("Price");
@@ -1128,8 +1151,9 @@ impl App {
                             position_obj.insert(
                                 "Amount".to_string(),
                                 serde_json::Value::Number(
-                                    serde_json::Number::from_f64(total_quantity)
-                                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                                    serde_json::Number::from_f64(total_quantity).unwrap_or_else(
+                                        || serde_json::Number::from_f64(0.0).unwrap(),
+                                    ),
                                 ),
                             );
 

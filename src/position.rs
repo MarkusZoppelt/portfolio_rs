@@ -1,15 +1,17 @@
 use chrono::prelude::*;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
-use std::collections::HashMap;
-use once_cell::sync::Lazy;
-use std::sync::{Mutex, Arc};
 // Type alias to reduce type complexity
 type HistoricCacheMap = HashMap<(String, i64), Arc<yahoo::YResponse>>;
 // Caches for Yahoo API requests
-static QUOTE_CACHE: Lazy<Mutex<HashMap<String, Arc<yahoo::YResponse>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static QUOTE_CACHE: Lazy<Mutex<HashMap<String, Arc<yahoo::YResponse>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 static HISTORIC_CACHE: Lazy<Mutex<HistoricCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -185,7 +187,10 @@ pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
 
 // Get the latest price for a ticker, cache on success, fallback to cache on failure
 async fn get_quote_price(ticker: &str) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
-    match yahoo::YahooConnector::new()?.get_latest_quotes(ticker, "1d").await {
+    match yahoo::YahooConnector::new()?
+        .get_latest_quotes(ticker, "1d")
+        .await
+    {
         Ok(resp) => {
             let response = Arc::new(resp);
             if let Ok(mut cache) = QUOTE_CACHE.lock() {
@@ -211,7 +216,10 @@ async fn get_quote_price(ticker: &str) -> Result<Arc<yahoo::YResponse>, yahoo::Y
 async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
     let end = OffsetDateTime::now_utc();
     let start = end - time::Duration::days(7);
-    match yahoo::YahooConnector::new()?.get_quote_history(ticker, start, end).await {
+    match yahoo::YahooConnector::new()?
+        .get_quote_history(ticker, start, end)
+        .await
+    {
         Ok(resp) => {
             let quotes = resp.quotes()?;
             let prev_close = if quotes.len() >= 2 {
@@ -262,7 +270,10 @@ pub async fn get_historic_price(
     let end = start + time::Duration::days(3);
     let cache_key = (ticker.to_string(), date.timestamp());
 
-    match yahoo::YahooConnector::new()?.get_quote_history(ticker, start, end).await {
+    match yahoo::YahooConnector::new()?
+        .get_quote_history(ticker, start, end)
+        .await
+    {
         Ok(resp) => {
             let response = Arc::new(resp);
             if let Ok(mut cache) = HISTORIC_CACHE.lock() {
