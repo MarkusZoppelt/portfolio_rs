@@ -2,7 +2,7 @@
 name = "portfolio_rs"
 description = "A command line tool with interactive TUI for managing financial investment portfolios written in Rust."
 readme = "README.md"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 license = "MIT"
 authors = ["Markus Zoppelt"]
@@ -13,12 +13,12 @@ categories = ["command-line-utilities", "finance"]
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"
-clap = "4.5.43"
+clap = "4.5.46"
 futures = "0.3.31"
 tokio = { version = "1.47.1", features = ["full"] }
 yahoo_finance_api = "4.0.0"
 piechart = "1.0.0"
-time = "0.3.41"
+time = "0.3.43"
 chrono = "0.4.41"
 sled = "0.34.7"
 colored = "3.0.0"
