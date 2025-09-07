@@ -4,13 +4,15 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::future::join_all;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, Paragraph, Row, Table, Tabs, Wrap,
+        Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, Paragraph,
+        Row, Table, Tabs, Wrap,
     },
     Frame, Terminal,
 };
@@ -18,10 +20,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tui_big_text::{BigText, PixelSize};
-use futures::future::join_all;
-use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,7 +30,8 @@ pub enum Component {
     // Overview tab components
     TabBar,
     TotalValue,
-    AssetAllocation,
+    PortfolioGrowth,
+    AssetBreakdown,
     DetailedAllocation,
     Help,
     // Balances tab components (table columns)
@@ -51,7 +53,8 @@ impl Component {
         vec![
             Component::TabBar,
             Component::TotalValue,
-            Component::AssetAllocation,
+            Component::PortfolioGrowth,
+            Component::AssetBreakdown,
             Component::DetailedAllocation,
             Component::Help,
             Component::Name,
@@ -72,7 +75,8 @@ impl Component {
         match self {
             Component::TabBar => "tab_bar",
             Component::TotalValue => "total_value",
-            Component::AssetAllocation => "asset_allocation",
+            Component::PortfolioGrowth => "portfolio_growth",
+            Component::AssetBreakdown => "asset_breakdown",
             Component::DetailedAllocation => "detailed_allocation",
             Component::Help => "help",
             Component::Name => "name",
@@ -93,7 +97,8 @@ impl Component {
         match self {
             Component::TabBar => "Top navigation bar showing active tab",
             Component::TotalValue => "Total portfolio value display",
-            Component::AssetAllocation => "Asset bar chart",
+            Component::PortfolioGrowth => "Portfolio growth chart over time",
+            Component::AssetBreakdown => "Asset allocation visualization",
             Component::DetailedAllocation => "Asset percentages",
             Component::Help => "Keyboard shortcuts",
             Component::Name => "Name column in the balances table",
@@ -117,7 +122,9 @@ impl FromStr for Component {
         match s.trim().to_lowercase().as_str() {
             "tab_bar" => Ok(Component::TabBar),
             "total_value" => Ok(Component::TotalValue),
-            "asset_allocation" => Ok(Component::AssetAllocation),
+            "portfolio_growth" => Ok(Component::PortfolioGrowth),
+            "asset_breakdown" => Ok(Component::AssetBreakdown),
+            "asset_allocation" => Ok(Component::AssetBreakdown), // Backward compatibility
             "detailed_allocation" => Ok(Component::DetailedAllocation),
             "help" => Ok(Component::Help),
             "name" => Ok(Component::Name),
@@ -251,12 +258,12 @@ fn format_amount(amount: f64) -> String {
 }
 
 fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
-    use chrono::prelude::*;
     use crate::position::parse_purchase_date;
-    
+    use chrono::prelude::*;
+
     let mut purchase_events = Vec::new();
     let now = Utc::now();
-    
+
     // Collect all purchase events with their dates
     for position in &portfolio.positions {
         for purchase in position.get_purchases() {
@@ -272,48 +279,49 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
             }
         }
     }
-    
+
     if purchase_events.is_empty() {
         return vec![];
     }
-    
+
     // Sort by date
     purchase_events.sort_by(|a, b| a.0.cmp(&b.0));
-    
+
     // Create weekly data points by building cumulative portfolio value over time
     let mut weekly_data = Vec::new();
     let mut cumulative_invested = 0.0;
-    
+
     // Get the earliest date
     let earliest_date = purchase_events.first().unwrap().0;
-    
+
     // Create weekly intervals from earliest purchase to now
     let mut current_date = earliest_date;
     let mut event_index = 0;
     let mut week_index: usize = 0;
-    
+
     while current_date <= now {
         // Add all purchases that happened before or on this date
-        while event_index < purchase_events.len() && purchase_events[event_index].0 <= current_date {
+        while event_index < purchase_events.len() && purchase_events[event_index].0 <= current_date
+        {
             cumulative_invested += purchase_events[event_index].2;
             event_index += 1;
         }
-        
+
         if cumulative_invested > 0.0 {
             weekly_data.push((week_index as f64, cumulative_invested));
         }
-        
+
         // Move to next week
         current_date += chrono::Duration::days(7);
         week_index += 1;
     }
-    
+
     // Add current portfolio value as the final point
     let current_value = portfolio.get_total_value();
     if current_value > 0.0 {
         weekly_data.push((week_index as f64, current_value));
     }
-    
+
     weekly_data
 }
 
@@ -336,7 +344,10 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
             }
         }
     }
-    let earliest = match earliest_opt { Some(d) => d, None => return vec![] };
+    let earliest = match earliest_opt {
+        Some(d) => d,
+        None => return vec![],
+    };
     let now = Utc::now();
 
     // Limit to at most ~78 weeks (~18 months) for speed and readability
@@ -365,7 +376,9 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
         async move {
             // Per-ticker timeout to avoid stalls
             let fut = async {
-                let resp = yahoo::YahooConnector::new()?.get_quote_history(&t2, start, end).await?;
+                let resp = yahoo::YahooConnector::new()?
+                    .get_quote_history(&t2, start, end)
+                    .await?;
                 Ok::<yahoo::YResponse, yahoo::YahooError>(resp)
             };
             match tokio::time::timeout(Duration::from_secs(3), fut).await {
@@ -385,7 +398,8 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
                 let qlen = quotes.len().max(1);
                 let mut weekly = Vec::with_capacity(total_weeks);
                 for w in 0..total_weeks {
-                    let idx = ((w as f64 / (total_weeks - 1).max(1) as f64) * (qlen - 1) as f64).round() as usize;
+                    let idx = ((w as f64 / (total_weeks - 1).max(1) as f64) * (qlen - 1) as f64)
+                        .round() as usize;
                     let idx = idx.min(qlen - 1);
                     let price = quotes[idx].close;
                     weekly.push(price);
@@ -394,7 +408,11 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
             }
         } else {
             // No data for this ticker: approximate flat series using current spot via portfolio positions
-            let spot = if let Some((_, amt)) = ticker_amounts.get(i) { *amt } else { 0.0 };
+            let spot = if let Some((_, amt)) = ticker_amounts.get(i) {
+                *amt
+            } else {
+                0.0
+            };
             per_ticker_weekly.push(vec![spot; total_weeks]);
         }
     }
@@ -555,10 +573,7 @@ impl App {
         self.portfolio_receiver = Some(receiver);
     }
 
-    pub fn set_historic_receiver(
-        &mut self,
-        receiver: mpsc::UnboundedReceiver<Vec<(f64, f64)>>,
-    ) {
+    pub fn set_historic_receiver(&mut self, receiver: mpsc::UnboundedReceiver<Vec<(f64, f64)>>) {
         self.historic_receiver = Some(receiver);
     }
 
@@ -723,22 +738,23 @@ impl App {
             if self.selected_position < portfolio.positions.len() {
                 let position = &portfolio.positions[self.selected_position];
                 let purchases = position.get_purchases();
-                
+
                 // selected_purchase: 0 = Add New, 1+ = existing purchases
                 // We need to map from display order (sorted by date) to original order
                 if self.selected_purchase > 0 && self.selected_purchase <= purchases.len() {
                     // Create sorted list to find the actual purchase
-                    let mut purchase_list: Vec<(usize, &crate::position::Purchase)> = purchases.iter().enumerate().collect();
+                    let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
+                        purchases.iter().enumerate().collect();
                     purchase_list.sort_by(|a, b| {
                         let date_a = a.1.date.as_deref().unwrap_or("");
                         let date_b = b.1.date.as_deref().unwrap_or("");
                         date_b.cmp(date_a) // Reverse order for newest first
                     });
-                    
+
                     let display_index = self.selected_purchase - 1; // Convert to 0-based for sorted list
                     if display_index < purchase_list.len() {
                         let (original_index, purchase) = purchase_list[display_index];
-                        
+
                         self.mode = AppMode::EditPurchase;
                         self.edit_field = EditField::Date;
                         self.purchase_date_input = purchase.date.clone().unwrap_or_default();
@@ -746,12 +762,18 @@ impl App {
                         // Only prefill price input if Price existed in the original JSON
                         // Otherwise keep empty so auto prices don't get saved accidentally
                         let mut price_from_json: Option<String> = None;
-                        if let Ok(original_data) = serde_json::from_str::<Vec<serde_json::Value>>(&self.positions_str) {
+                        if let Ok(original_data) =
+                            serde_json::from_str::<Vec<serde_json::Value>>(&self.positions_str)
+                        {
                             if self.selected_position < original_data.len() {
-                                if let Some(purchases_val) = original_data[self.selected_position].get("Purchases") {
+                                if let Some(purchases_val) =
+                                    original_data[self.selected_position].get("Purchases")
+                                {
                                     if let Some(arr) = purchases_val.as_array() {
                                         if original_index < arr.len() {
-                                            if let Some(price_val) = arr[original_index].get("Price") {
+                                            if let Some(price_val) =
+                                                arr[original_index].get("Price")
+                                            {
                                                 if let Some(p) = price_val.as_f64() {
                                                     price_from_json = Some(p.to_string());
                                                 }
@@ -809,9 +831,11 @@ impl App {
             return Err("Quantity is required".to_string());
         }
 
-        let quantity: f64 = self.purchase_quantity_input.parse()
+        let quantity: f64 = self
+            .purchase_quantity_input
+            .parse()
             .map_err(|_| "Invalid quantity format".to_string())?;
-        
+
         if quantity <= 0.0 {
             return Err("Quantity must be positive".to_string());
         }
@@ -819,7 +843,8 @@ impl App {
         let price: f64 = if self.purchase_price_input.trim().is_empty() {
             0.0 // Will be auto-filled by the system
         } else {
-            self.purchase_price_input.parse()
+            self.purchase_price_input
+                .parse()
                 .map_err(|_| "Invalid price format".to_string())?
         };
 
@@ -827,11 +852,11 @@ impl App {
             return Err("Price cannot be negative".to_string());
         }
 
-                            // Save to file
+        // Save to file
         self.save_purchase_edit_to_file(&self.purchase_date_input, quantity, price)?;
 
-                            self.exit_edit_mode();
-                            Ok(())
+        self.exit_edit_mode();
+        Ok(())
     }
 
     pub fn save_new_purchase(&mut self) -> Result<(), String> {
@@ -843,9 +868,11 @@ impl App {
             return Err("Quantity is required".to_string());
         }
 
-        let quantity: f64 = self.purchase_quantity_input.parse()
+        let quantity: f64 = self
+            .purchase_quantity_input
+            .parse()
             .map_err(|_| "Invalid quantity format".to_string())?;
-        
+
         if quantity <= 0.0 {
             return Err("Quantity must be positive".to_string());
         }
@@ -853,7 +880,8 @@ impl App {
         let price: f64 = if self.purchase_price_input.trim().is_empty() {
             0.0 // Will be auto-filled by the system
         } else {
-            self.purchase_price_input.parse()
+            self.purchase_price_input
+                .parse()
                 .map_err(|_| "Invalid price format".to_string())?
         };
 
@@ -863,7 +891,7 @@ impl App {
 
         // Save to file
         self.save_purchase_to_file(&self.purchase_date_input, quantity, price)?;
-        
+
         self.exit_edit_mode();
         Ok(())
     }
@@ -872,15 +900,17 @@ impl App {
 
     fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<(), String> {
         // Parse the original file to preserve all data
-        let mut original_data: Vec<serde_json::Value> = serde_json::from_str(&self.positions_str)
-            .map_err(|e| format!("Failed to parse original data: {e}"))?;
+        let mut original_data: Vec<serde_json::Value> =
+            serde_json::from_str(&self.positions_str)
+                .map_err(|e| format!("Failed to parse original data: {e}"))?;
 
         if self.selected_position >= original_data.len() {
             return Err("Invalid position selected".to_string());
         }
 
         // Get the position object
-        let position_obj = original_data[self.selected_position].as_object_mut()
+        let position_obj = original_data[self.selected_position]
+            .as_object_mut()
             .ok_or("Invalid position data")?;
 
         // Get or create the Purchases array
@@ -888,16 +918,24 @@ impl App {
             .entry("Purchases".to_string())
             .or_insert_with(|| serde_json::Value::Array(vec![]));
 
-        let purchases = purchases_array.as_array_mut()
+        let purchases = purchases_array
+            .as_array_mut()
             .ok_or("Purchases field is not an array")?;
 
         // Create new purchase object
         let mut new_purchase = serde_json::Map::new();
-        new_purchase.insert("Date".to_string(), serde_json::Value::String(date.to_string()));
-        new_purchase.insert("Quantity".to_string(), 
-            serde_json::Value::Number(serde_json::Number::from_f64(quantity)
-                .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap())));
-        
+        new_purchase.insert(
+            "Date".to_string(),
+            serde_json::Value::String(date.to_string()),
+        );
+        new_purchase.insert(
+            "Quantity".to_string(),
+            serde_json::Value::Number(
+                serde_json::Number::from_f64(quantity)
+                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+            ),
+        );
+
         // Only persist Price if the user explicitly provided it (>0). Otherwise, omit the field
         if price > 0.0 {
             if let Some(num) = serde_json::Number::from_f64(price) {
@@ -909,13 +947,18 @@ impl App {
         purchases.push(serde_json::Value::Object(new_purchase));
 
         // Update the Amount field to reflect total quantity
-        let total_quantity: f64 = purchases.iter()
+        let total_quantity: f64 = purchases
+            .iter()
             .filter_map(|p| p.get("Quantity")?.as_f64())
             .sum();
-        
-        position_obj.insert("Amount".to_string(), 
-            serde_json::Value::Number(serde_json::Number::from_f64(total_quantity)
-                .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap())));
+
+        position_obj.insert(
+            "Amount".to_string(),
+            serde_json::Value::Number(
+                serde_json::Number::from_f64(total_quantity)
+                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+            ),
+        );
 
         // Save the updated data
         let json_string = serde_json::to_string_pretty(&original_data)
@@ -927,17 +970,24 @@ impl App {
         Ok(())
     }
 
-    fn save_purchase_edit_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<(), String> {
+    fn save_purchase_edit_to_file(
+        &self,
+        date: &str,
+        quantity: f64,
+        price: f64,
+    ) -> Result<(), String> {
         // Parse the original file to preserve all data
-        let mut original_data: Vec<serde_json::Value> = serde_json::from_str(&self.positions_str)
-            .map_err(|e| format!("Failed to parse original data: {e}"))?;
+        let mut original_data: Vec<serde_json::Value> =
+            serde_json::from_str(&self.positions_str)
+                .map_err(|e| format!("Failed to parse original data: {e}"))?;
 
         if self.selected_position >= original_data.len() {
             return Err("Invalid position selected".to_string());
         }
 
         // Get the position object
-        let position_obj = original_data[self.selected_position].as_object_mut()
+        let position_obj = original_data[self.selected_position]
+            .as_object_mut()
             .ok_or("Invalid position data")?;
 
         // Get the Purchases array
@@ -945,7 +995,8 @@ impl App {
             .get_mut("Purchases")
             .ok_or("No purchases found")?;
 
-        let purchases = purchases_array.as_array_mut()
+        let purchases = purchases_array
+            .as_array_mut()
             .ok_or("Purchases field is not an array")?;
 
         // Find the purchase to edit by mapping from display order to original order
@@ -953,53 +1004,68 @@ impl App {
             if self.selected_position < portfolio.positions.len() {
                 let position = &portfolio.positions[self.selected_position];
                 let portfolio_purchases = position.get_purchases();
-                
+
                 // Create sorted list to find the actual purchase index
-                let mut purchase_list: Vec<(usize, &crate::position::Purchase)> = portfolio_purchases.iter().enumerate().collect();
+                let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
+                    portfolio_purchases.iter().enumerate().collect();
                 purchase_list.sort_by(|a, b| {
                     let date_a = a.1.date.as_deref().unwrap_or("");
                     let date_b = b.1.date.as_deref().unwrap_or("");
                     date_b.cmp(date_a) // Reverse order for newest first
                 });
-                
+
                 let display_index = self.selected_purchase - 1; // Convert to 0-based for sorted list
                 if display_index < purchase_list.len() {
                     let original_index = purchase_list[display_index].0;
-                    
+
                     if original_index < purchases.len() {
                         // Update the purchase at the original index
-                        let purchase_obj = purchases[original_index].as_object_mut()
+                        let purchase_obj = purchases[original_index]
+                            .as_object_mut()
                             .ok_or("Invalid purchase data")?;
-                        
-                        purchase_obj.insert("Date".to_string(), serde_json::Value::String(date.to_string()));
-                        purchase_obj.insert("Quantity".to_string(), 
-                            serde_json::Value::Number(serde_json::Number::from_f64(quantity)
-                                .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap())));
-                        
+
+                        purchase_obj.insert(
+                            "Date".to_string(),
+                            serde_json::Value::String(date.to_string()),
+                        );
+                        purchase_obj.insert(
+                            "Quantity".to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from_f64(quantity)
+                                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                            ),
+                        );
+
                         // Only persist Price if the user explicitly provided it (>0). Otherwise, remove the field
                         if price > 0.0 {
                             if let Some(num) = serde_json::Number::from_f64(price) {
-                                purchase_obj.insert("Price".to_string(), serde_json::Value::Number(num));
+                                purchase_obj
+                                    .insert("Price".to_string(), serde_json::Value::Number(num));
                             }
                         } else {
                             purchase_obj.remove("Price");
                         }
 
                         // Update the Amount field to reflect total quantity
-                        let total_quantity: f64 = purchases.iter()
+                        let total_quantity: f64 = purchases
+                            .iter()
                             .filter_map(|p| p.get("Quantity")?.as_f64())
                             .sum();
-                        
-                        position_obj.insert("Amount".to_string(), 
-                            serde_json::Value::Number(serde_json::Number::from_f64(total_quantity)
-                                .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap())));
+
+                        position_obj.insert(
+                            "Amount".to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from_f64(total_quantity)
+                                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                            ),
+                        );
 
                         // Save the updated data
                         let json_string = serde_json::to_string_pretty(&original_data)
-                .map_err(|e| format!("Failed to serialize data: {e}"))?;
+                            .map_err(|e| format!("Failed to serialize data: {e}"))?;
 
-            std::fs::write(&self.data_file_path, json_string)
-                .map_err(|e| format!("Failed to write to file: {e}"))?;
+                        std::fs::write(&self.data_file_path, json_string)
+                            .map_err(|e| format!("Failed to write to file: {e}"))?;
 
                         return Ok(());
                     }
@@ -1085,7 +1151,8 @@ pub async fn run_tui(
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let (mut portfolio, _status) = crate::create_live_portfolio_with_logging(positions_str_current, false).await;
+            let (mut portfolio, _status) =
+                crate::create_live_portfolio_with_logging(positions_str_current, false).await;
             // Sort in memory for consistency
             portfolio.sort_positions_by_value_desc();
             // Batch method is much faster (single fetch per ticker)
@@ -1161,7 +1228,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                         app.positions_str = new_positions_str.clone();
                                     }
                                     let (mut portfolio, network_status) =
-                                        crate::create_live_portfolio(app.positions_str.clone()).await;
+                                        crate::create_live_portfolio(app.positions_str.clone())
+                                            .await;
                                     // Sort in memory for display only
                                     portfolio.sort_positions_by_value_desc();
                                     // Also recompute weekly historic series immediately (fast batch)
@@ -1226,11 +1294,15 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                             {
                                                 app.positions_str = new_positions_str;
                                             }
-                                             let (mut portfolio, network_status) =
-                                                crate::create_live_portfolio(app.positions_str.clone()).await;
-                                             // Sort in memory for display only
-                                             portfolio.sort_positions_by_value_desc();
-                                            let hist_series = compute_weekly_series_batch(&portfolio).await;
+                                            let (mut portfolio, network_status) =
+                                                crate::create_live_portfolio(
+                                                    app.positions_str.clone(),
+                                                )
+                                                .await;
+                                            // Sort in memory for display only
+                                            portfolio.sort_positions_by_value_desc();
+                                            let hist_series =
+                                                compute_weekly_series_batch(&portfolio).await;
                                             app.update_trends(&portfolio);
                                             app.set_portfolio(portfolio);
                                             app.historic_data = Some(hist_series);
@@ -1252,7 +1324,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                                 let current = app.get_current_input_mut();
 
                                                 // Count digits only (ignoring dashes)
-                                                let digit_count = current.chars().filter(|c| c.is_ascii_digit()).count();
+                                                let digit_count = current
+                                                    .chars()
+                                                    .filter(|c| c.is_ascii_digit())
+                                                    .count();
 
                                                 if digit_count < 8 {
                                                     current.push(c);
@@ -1266,7 +1341,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                         }
                                         EditField::Quantity | EditField::Price => {
                                             // Allow numbers with decimal point
-                                            if c.is_ascii_digit() || (c == '.' && !app.get_current_input().contains('.')) {
+                                            if c.is_ascii_digit()
+                                                || (c == '.'
+                                                    && !app.get_current_input().contains('.'))
+                                            {
                                                 app.get_current_input_mut().push(c);
                                             }
                                         }
@@ -1298,11 +1376,15 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                             {
                                                 app.positions_str = new_positions_str;
                                             }
-                                             let (mut portfolio, network_status) =
-                                                crate::create_live_portfolio(app.positions_str.clone()).await;
-                                             // Sort in memory for display only
-                                             portfolio.sort_positions_by_value_desc();
-                                            let hist_series = compute_weekly_series_batch(&portfolio).await;
+                                            let (mut portfolio, network_status) =
+                                                crate::create_live_portfolio(
+                                                    app.positions_str.clone(),
+                                                )
+                                                .await;
+                                            // Sort in memory for display only
+                                            portfolio.sort_positions_by_value_desc();
+                                            let hist_series =
+                                                compute_weekly_series_batch(&portfolio).await;
                                             app.update_trends(&portfolio);
                                             app.set_portfolio(portfolio);
                                             app.historic_data = Some(hist_series);
@@ -1324,7 +1406,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                                 let current = app.get_current_input_mut();
 
                                                 // Count digits only (ignoring dashes)
-                                                let digit_count = current.chars().filter(|c| c.is_ascii_digit()).count();
+                                                let digit_count = current
+                                                    .chars()
+                                                    .filter(|c| c.is_ascii_digit())
+                                                    .count();
 
                                                 if digit_count < 8 {
                                                     current.push(c);
@@ -1338,7 +1423,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                         }
                                         EditField::Quantity | EditField::Price => {
                                             // Allow numbers with decimal point
-                                            if c.is_ascii_digit() || (c == '.' && !app.get_current_input().contains('.')) {
+                                            if c.is_ascii_digit()
+                                                || (c == '.'
+                                                    && !app.get_current_input().contains('.'))
+                                            {
                                                 app.get_current_input_mut().push(c);
                                             }
                                         }
@@ -1420,14 +1508,12 @@ fn ui(f: &mut Frame, app: &App) {
 
     match app.current_tab {
         Tab::Overview => render_overview(f, content_area, app),
-        Tab::Balances => {
-            match app.mode {
-                AppMode::PurchaseList => render_purchase_list(f, content_area, app),
-                AppMode::AddPurchase => render_add_purchase_form(f, content_area, app),
-                AppMode::EditPurchase => render_edit_purchase_form(f, content_area, app),
-                _ => render_balances(f, content_area, app),
-            }
-        }
+        Tab::Balances => match app.mode {
+            AppMode::PurchaseList => render_purchase_list(f, content_area, app),
+            AppMode::AddPurchase => render_add_purchase_form(f, content_area, app),
+            AppMode::EditPurchase => render_edit_purchase_form(f, content_area, app),
+            _ => render_balances(f, content_area, app),
+        },
     }
 
     if let Some(error) = &app.error_message {
@@ -1442,12 +1528,18 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
     } else {
         get_historic_portfolio_data(portfolio)
     };
-    
+
     if historic_data.is_empty() {
-        let placeholder = Paragraph::new("No purchase history found\nAdd purchase dates and prices to your portfolio.json")
-            .block(Block::default().borders(Borders::ALL).title("Portfolio History (Based on Purchase Dates)"))
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center);
+        let placeholder = Paragraph::new(
+            "No purchase history found\nAdd purchase dates and prices to your portfolio.json",
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Portfolio History (Based on Purchase Dates)"),
+        )
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
         f.render_widget(placeholder, area);
         return;
     }
@@ -1496,7 +1588,7 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Portfolio Growth")
+                .title("Portfolio Growth"),
         )
         .x_axis(
             Axis::default()
@@ -1508,77 +1600,91 @@ fn render_historic_graph(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: 
                     Line::from(format!("{:.0}", max_week * 0.25)),
                     Line::from(format!("{:.0}", max_week * 0.5)),
                     Line::from(format!("{:.0}", max_week * 0.75)),
-                    Line::from(format!("{:.0}", max_week)),
-                ])
+                    Line::from(format!("{max_week:.0}")),
+                ]),
         )
-        .y_axis(
-            {
-                let range = (y_max - y_min).max(f64::EPSILON);
-                let tick = |t: f64| y_min + range * t;
-                Axis::default()
-                    .title(app.currency.as_str())
-                    .style(Style::default().fg(Color::Gray))
-                    .bounds([y_min, y_max])
-                    .labels(vec![
-                        Line::from(format!("{:.0}", y_min)),
-                        Line::from(format!("{:.0}", tick(0.25))),
-                        Line::from(format!("{:.0}", tick(0.5))),
-                        Line::from(format!("{:.0}", tick(0.75))),
-                        Line::from(format!("{:.0}", y_max)),
-                    ])
-            }
-        );
+        .y_axis({
+            let range = (y_max - y_min).max(f64::EPSILON);
+            let tick = |t: f64| y_min + range * t;
+            Axis::default()
+                .title(app.currency.as_str())
+                .style(Style::default().fg(Color::Gray))
+                .bounds([y_min, y_max])
+                .labels(vec![
+                    Line::from(format!("{y_min:.0}")),
+                    Line::from(format!("{:.0}", tick(0.25))),
+                    Line::from(format!("{:.0}", tick(0.5))),
+                    Line::from(format!("{:.0}", tick(0.75))),
+                    Line::from(format!("{y_max:.0}")),
+                ])
+        });
 
     f.render_widget(chart, area);
 }
 
 fn render_detailed_allocation_positions(f: &mut Frame, area: Rect, portfolio: &Portfolio) {
     let colors = [
-        Color::Red, Color::Green, Color::Blue, Color::Yellow, 
-        Color::Magenta, Color::Cyan, Color::White, Color::LightRed,
+        Color::Red,
+        Color::Green,
+        Color::Blue,
+        Color::Yellow,
+        Color::Magenta,
+        Color::Cyan,
+        Color::White,
+        Color::LightRed,
     ];
-    
+
     let positions: Vec<_> = portfolio.positions.iter().take(6).collect(); // Limit to 6 for horizontal display
     let mut pie_lines = Vec::new();
-    
+
     // Create compact horizontal bars with embedded labels
     let mut chart_lines = Vec::new();
-    
+
     for (i, position) in positions.iter().enumerate() {
         let name = position.get_name();
         let percentage = (position.get_balance() / portfolio.get_total_value()) * 100.0;
         let color = colors[i % colors.len()];
-        
+
         // Create horizontal bar (max 30 characters wide)
         let bar_width = ((percentage / 100.0) * 30.0) as usize;
         let bar_width = bar_width.clamp(1, 30);
-        
+
         // Truncate name to fit in available space
         let display_name = if name.len() > 12 { &name[..12] } else { name };
-        
+
         let mut line_spans = Vec::new();
         line_spans.push(Span::styled("● ", Style::default().fg(color)));
-        line_spans.push(Span::styled(format!("{:<12}", display_name), Style::default().fg(Color::White)));
-        line_spans.push(Span::styled(format!("{:>6.1}% ", percentage), Style::default().fg(color)));
-        line_spans.push(Span::styled("█".repeat(bar_width), Style::default().fg(color)));
-        
+        line_spans.push(Span::styled(
+            format!("{display_name:<12}"),
+            Style::default().fg(Color::White),
+        ));
+        line_spans.push(Span::styled(
+            format!("{percentage:>6.1}% "),
+            Style::default().fg(color),
+        ));
+        line_spans.push(Span::styled(
+            "█".repeat(bar_width),
+            Style::default().fg(color),
+        ));
+
         chart_lines.push(Line::from(line_spans));
     }
-    
+
     pie_lines.extend(chart_lines);
-    
+
     if portfolio.positions.len() > 6 {
         pie_lines.push(Line::from(""));
-        pie_lines.push(Line::from(vec![
-            Span::styled(format!("... and {} more positions", portfolio.positions.len() - 6), Style::default().fg(Color::Gray))
-        ]));
+        pie_lines.push(Line::from(vec![Span::styled(
+            format!("... and {} more positions", portfolio.positions.len() - 6),
+            Style::default().fg(Color::Gray),
+        )]));
     }
 
     let pie_widget = Paragraph::new(pie_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Detailed Allocation")
+                .title("Detailed Allocation"),
         )
         .style(Style::default().fg(Color::White))
         .alignment(Alignment::Left);
@@ -1596,7 +1702,7 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
         let purchases = position.get_purchases();
 
         let mut items = Vec::new();
-        
+
         // Add "Add New Purchase" option first
         let add_style = if app.selected_purchase == 0 {
             Style::default().bg(Color::Green).fg(Color::Black)
@@ -1604,9 +1710,10 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Green)
         };
         items.push(ListItem::new("+ Add New Purchase").style(add_style));
-        
+
         // Sort purchases by date (newest first)
-        let mut purchase_list: Vec<(usize, &crate::position::Purchase)> = purchases.iter().enumerate().collect();
+        let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
+            purchases.iter().enumerate().collect();
         purchase_list.sort_by(|a, b| {
             let date_a = a.1.date.as_deref().unwrap_or("");
             let date_b = b.1.date.as_deref().unwrap_or("");
@@ -1619,7 +1726,7 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
             let quantity = purchase.quantity;
             let price = purchase.price.unwrap_or(0.0);
             let total = quantity * price;
-            
+
             // selected_purchase: 0 = Add New, 1+ = existing purchases
             let style = if (display_index + 1) == app.selected_purchase {
                 Style::default().bg(Color::Blue).fg(Color::White)
@@ -1628,11 +1735,9 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
             };
 
             let item_text = if price > 0.0 {
-                format!("{} | Qty: {:.4} | Price: ${:.2} | Total: ${:.2}", 
-                       date, quantity, price, total)
+                format!("{date} | Qty: {quantity:.4} | Price: ${price:.2} | Total: ${total:.2}")
             } else {
-                format!("{} | Qty: {:.4} | Price: Auto-filled", 
-                       date, quantity)
+                format!("{date} | Qty: {quantity:.4} | Price: Auto-filled")
             };
 
             items.push(ListItem::new(item_text).style(style));
@@ -1642,7 +1747,7 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Purchase History - {}", position.get_name()))
+                    .title(format!("Purchase History - {}", position.get_name())),
             )
             .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -1654,10 +1759,11 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
             .constraints([Constraint::Min(0), Constraint::Length(3)])
             .split(area)[1];
 
-        let help_text = Paragraph::new("j/k: Navigate | Enter/a: Add New (first) or Edit (others) | Esc: Back")
-            .block(Block::default().borders(Borders::ALL).title("Help"))
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center);
+        let help_text =
+            Paragraph::new("j/k: Navigate | Enter/a: Add New (first) or Edit (others) | Esc: Back")
+                .block(Block::default().borders(Borders::ALL).title("Help"))
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
 
         f.render_widget(help_text, help_area);
     }
@@ -1676,7 +1782,7 @@ fn render_add_purchase_form(f: &mut Frame, area: Rect, app: &App) {
             .constraints([
                 Constraint::Length(3), // Title
                 Constraint::Length(3), // Date field
-                Constraint::Length(3), // Quantity field  
+                Constraint::Length(3), // Quantity field
                 Constraint::Length(3), // Price field
                 Constraint::Min(0),    // Spacer
                 Constraint::Length(3), // Help
@@ -1686,24 +1792,35 @@ fn render_add_purchase_form(f: &mut Frame, area: Rect, app: &App) {
         // Title
         let title = Paragraph::new(format!("Add Purchase - {}", position.get_name()))
             .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .alignment(Alignment::Center);
         f.render_widget(title, chunks[0]);
 
         // Date field
         let date_style = if app.edit_field == EditField::Date {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-        let date_field = Paragraph::new(format!("Date (type digits only): {}", app.purchase_date_input))
-            .block(Block::default().borders(Borders::ALL).title("Date"))
-            .style(date_style);
+        let date_field = Paragraph::new(format!(
+            "Date (type digits only): {}",
+            app.purchase_date_input
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Date"))
+        .style(date_style);
         f.render_widget(date_field, chunks[1]);
 
         // Quantity field
         let qty_style = if app.edit_field == EditField::Quantity {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -1714,7 +1831,9 @@ fn render_add_purchase_form(f: &mut Frame, area: Rect, app: &App) {
 
         // Price field
         let price_style = if app.edit_field == EditField::Price {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -1723,14 +1842,18 @@ fn render_add_purchase_form(f: &mut Frame, area: Rect, app: &App) {
         } else {
             ""
         };
-        let price_field = Paragraph::new(format!("Price (optional): {}{}", app.purchase_price_input, price_help))
-            .block(Block::default().borders(Borders::ALL).title("Price"))
-            .style(price_style);
+        let price_field = Paragraph::new(format!(
+            "Price (optional): {}{}",
+            app.purchase_price_input, price_help
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Price"))
+        .style(price_style);
         f.render_widget(price_field, chunks[3]);
 
         // Help
-        let help_text = Paragraph::new("Tab/↓: Next Field | ↑: Previous Field | Enter: Save | Esc: Cancel")
-            .block(Block::default().borders(Borders::ALL).title("Help"))
+        let help_text =
+            Paragraph::new("Tab/↓: Next Field | ↑: Previous Field | Enter: Save | Esc: Cancel")
+                .block(Block::default().borders(Borders::ALL).title("Help"))
                 .style(Style::default().fg(Color::Gray))
                 .alignment(Alignment::Center);
         f.render_widget(help_text, chunks[5]);
@@ -1750,7 +1873,7 @@ fn render_edit_purchase_form(f: &mut Frame, area: Rect, app: &App) {
             .constraints([
                 Constraint::Length(3), // Title
                 Constraint::Length(3), // Date field
-                Constraint::Length(3), // Quantity field  
+                Constraint::Length(3), // Quantity field
                 Constraint::Length(3), // Price field
                 Constraint::Min(0),    // Spacer
                 Constraint::Length(3), // Help
@@ -1760,24 +1883,35 @@ fn render_edit_purchase_form(f: &mut Frame, area: Rect, app: &App) {
         // Title
         let title = Paragraph::new(format!("Edit Purchase - {}", position.get_name()))
             .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .alignment(Alignment::Center);
         f.render_widget(title, chunks[0]);
 
         // Date field
         let date_style = if app.edit_field == EditField::Date {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-        let date_field = Paragraph::new(format!("Date (type digits only): {}", app.purchase_date_input))
-            .block(Block::default().borders(Borders::ALL).title("Date"))
-            .style(date_style);
+        let date_field = Paragraph::new(format!(
+            "Date (type digits only): {}",
+            app.purchase_date_input
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Date"))
+        .style(date_style);
         f.render_widget(date_field, chunks[1]);
 
         // Quantity field
         let qty_style = if app.edit_field == EditField::Quantity {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -1788,7 +1922,9 @@ fn render_edit_purchase_form(f: &mut Frame, area: Rect, app: &App) {
 
         // Price field
         let price_style = if app.edit_field == EditField::Price {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -1797,22 +1933,39 @@ fn render_edit_purchase_form(f: &mut Frame, area: Rect, app: &App) {
         } else {
             ""
         };
-        let price_field = Paragraph::new(format!("Price (optional): {}{}", app.purchase_price_input, price_help))
-            .block(Block::default().borders(Borders::ALL).title("Price"))
-            .style(price_style);
+        let price_field = Paragraph::new(format!(
+            "Price (optional): {}{}",
+            app.purchase_price_input, price_help
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Price"))
+        .style(price_style);
         f.render_widget(price_field, chunks[3]);
 
         // Help
-        let help_text = Paragraph::new("Tab/↓: Next Field | ↑: Previous Field | Enter: Save | Esc: Cancel")
-            .block(Block::default().borders(Borders::ALL).title("Help"))
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center);
+        let help_text =
+            Paragraph::new("Tab/↓: Next Field | ↑: Previous Field | Enter: Save | Esc: Cancel")
+                .block(Block::default().borders(Borders::ALL).title("Help"))
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
         f.render_widget(help_text, chunks[5]);
     }
 }
 
 fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
+        // Check which main content components are enabled
+        let portfolio_growth_enabled = !app
+            .disabled_components
+            .is_disabled(Component::PortfolioGrowth);
+        let asset_breakdown_enabled = !app
+            .disabled_components
+            .is_disabled(Component::AssetBreakdown);
+        let detailed_allocation_enabled = !app
+            .disabled_components
+            .is_disabled(Component::DetailedAllocation);
+        let any_main_content_enabled =
+            portfolio_growth_enabled || asset_breakdown_enabled || detailed_allocation_enabled;
+
         // New layout: Top section with total value, middle section with graph and pie chart, bottom with help
         let mut constraints = Vec::new();
 
@@ -1820,8 +1973,10 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             constraints.push(Constraint::Length(7)); // Total value display
         }
 
-        // Main content area for graph and pie chart
-        constraints.push(Constraint::Min(0));
+        // Main content area for graph and pie chart - only if at least one component is enabled
+        if any_main_content_enabled {
+            constraints.push(Constraint::Min(0));
+        }
 
         if !app.disabled_components.is_disabled(Component::Help) {
             constraints.push(Constraint::Length(3)); // Help
@@ -1843,19 +1998,27 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             for position in &portfolio.positions {
                 let is_cash = position.get_ticker().is_none()
                     && position.get_asset_class().to_lowercase() == "cash";
-                if is_cash { continue; }
+                if is_cash {
+                    continue;
+                }
                 let value = position.get_balance();
                 sec_value_sum += value;
                 let prev = position.daily_variation_percent().map(|dv| {
                     let ratio = dv / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON { value / (1.0 + ratio) } else { value }
+                    if (1.0 + ratio).abs() > f64::EPSILON {
+                        value / (1.0 + ratio)
+                    } else {
+                        value
+                    }
                 });
                 prev_sec_sum += prev.unwrap_or(value);
             }
             let day_pnl_abs = sec_value_sum - prev_sec_sum;
             let daily_percent = if prev_sec_sum > 0.0 {
                 (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let big_text_value = match app.currency.as_str() {
                 "USD" | "CAD" | "AUD" | "HKD" | "SGD" => {
                     format!("${}", format_with_commas(total_value))
@@ -1904,9 +2067,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .title(format!(
                     "Total Portfolio Value ({}) {} {}",
-                    app.currency,
-                    refresh_indicator,
-                    network_indicator
+                    app.currency, refresh_indicator, network_indicator
                 ))
                 .title_alignment(Alignment::Center);
 
@@ -1940,8 +2101,16 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 .split(inner);
             let right_area = thirds[1];
 
-            let pnl_color = if day_pnl_abs >= 0.0 { Color::Green } else { Color::Red };
-            let pct_color = if daily_percent >= 0.0 { Color::Green } else { Color::Red };
+            let pnl_color = if day_pnl_abs >= 0.0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            let pct_color = if daily_percent >= 0.0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
 
             let right_content = vec![
                 Line::from(vec![
@@ -1954,14 +2123,17 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 Line::from(vec![
                     Span::styled("%Day ", Style::default().fg(Color::Gray)),
                     Span::styled(
-                        format!("{:+.2}%", daily_percent),
+                        format!("{daily_percent:+.2}%"),
                         Style::default().fg(pct_color).add_modifier(Modifier::BOLD),
                     ),
                 ]),
             ];
             // Vertically center inside the right third, and horizontally center the block while left-aligning text
             let content_lines = 2u16; // two lines: Day PnL and %Day
-            let vpad = right_area.height.saturating_sub(content_lines).saturating_div(2);
+            let vpad = right_area
+                .height
+                .saturating_sub(content_lines)
+                .saturating_div(2);
             let vchunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -1973,10 +2145,13 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
             // Estimate content width to center the block horizontally
             let day_value_str = format_currency(day_pnl_abs, &app.currency);
-            let pct_value_str = format!("{:+.2}%", daily_percent);
+            let pct_value_str = format!("{daily_percent:+.2}%");
             let day_line_text = format!("Day PnL {day_value_str}");
             let pct_line_text = format!("%Day {pct_value_str}");
-            let max_w = day_line_text.chars().count().max(pct_line_text.chars().count()) as u16;
+            let max_w = day_line_text
+                .chars()
+                .count()
+                .max(pct_line_text.chars().count()) as u16;
             let hpad = vchunks[1].width.saturating_sub(max_w).saturating_div(2);
             let hchunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1992,26 +2167,58 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             chunk_index += 1;
         }
 
-        // Main content area: Historic graph on top, pie chart and allocation on bottom
-        let content_area = main_chunks[chunk_index];
-        let content_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(content_area);
+        // Main content area: Historic graph on top, detailed allocation and asset breakdown on bottom
+        // Only render if at least one main content component is enabled
+        if any_main_content_enabled {
+            let content_area = main_chunks[chunk_index];
 
-        // Historic graph
-        render_historic_graph(f, content_chunks[0], portfolio, app);
+            // Only create the vertical split if the portfolio growth is enabled
+            if portfolio_growth_enabled && (asset_breakdown_enabled || detailed_allocation_enabled)
+            {
+                let content_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .split(content_area);
 
-        // Bottom section: Pie chart on left, detailed allocation on right
-        let bottom_chunks = Layout::default()
+                render_historic_graph(f, content_chunks[0], portfolio, app);
+
+                // Bottom section: Detailed allocation on left, asset breakdown on right
+                if asset_breakdown_enabled && detailed_allocation_enabled {
+                    let bottom_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                        .split(content_chunks[1]);
+
+                    render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
+                    render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
+                } else if detailed_allocation_enabled {
+                    render_detailed_allocation_positions(f, content_chunks[1], portfolio);
+                } else if asset_breakdown_enabled {
+                    render_asset_breakdown_grouped(f, content_chunks[1], portfolio, app);
+                }
+            } else if portfolio_growth_enabled {
+                // Only portfolio growth enabled
+                render_historic_graph(f, content_area, portfolio, app);
+            } else if asset_breakdown_enabled && detailed_allocation_enabled {
+                // Only bottom components enabled
+                let bottom_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(content_chunks[1]);
+                    .split(content_area);
 
-        render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
-        render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
+                render_detailed_allocation_positions(f, bottom_chunks[0], portfolio);
+                render_asset_breakdown_grouped(f, bottom_chunks[1], portfolio, app);
+            } else if detailed_allocation_enabled {
+                // Only detailed allocation enabled
+                render_detailed_allocation_positions(f, content_area, portfolio);
+            } else if asset_breakdown_enabled {
+                // Only asset breakdown enabled
+                render_asset_breakdown_grouped(f, content_area, portfolio, app);
+            }
+            // If none are enabled, just leave the area empty
 
             chunk_index += 1;
+        }
 
         // Help text
         if !app.disabled_components.is_disabled(Component::Help) {
@@ -2073,7 +2280,6 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             header_names.push("%Day");
             constraints.push(Constraint::Length(7));
         }
-        
 
         // If all columns are disabled, show a placeholder
         if header_names.is_empty() {
@@ -2135,8 +2341,8 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             }
 
             // Check if this is a cash position (no ticker and cash asset class)
-            let is_cash = position.get_ticker().is_none() && 
-                         position.get_asset_class().to_lowercase() == "cash";
+            let is_cash = position.get_ticker().is_none()
+                && position.get_asset_class().to_lowercase() == "cash";
 
             if !app.disabled_components.is_disabled(Component::Price) {
                 if is_cash {
@@ -2277,29 +2483,57 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             // Securities-only PnL: exclude cash from value side
             let mut invested_sum = 0.0_f64;
             for p in &portfolio.positions {
-                if let Some(i) = p.total_invested() { invested_sum += i; }
+                if let Some(i) = p.total_invested() {
+                    invested_sum += i;
+                }
             }
-            let securities_value: f64 = portfolio.positions.iter().filter(|p| !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase()=="cash")).map(|p| p.get_balance()).sum();
+            let securities_value: f64 = portfolio
+                .positions
+                .iter()
+                .filter(|p| {
+                    !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase() == "cash")
+                })
+                .map(|p| p.get_balance())
+                .sum();
             let pnl_total = securities_value - invested_sum;
-            let color = if pnl_total >= 0.0 { Color::Green } else { Color::Red };
+            let color = if pnl_total >= 0.0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
             total_cells.push(
                 Cell::from(format!("{pnl_total:.2}"))
-                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
             );
         }
         if !app.disabled_components.is_disabled(Component::Hist) {
             let mut invested_sum = 0.0_f64;
             for p in &portfolio.positions {
-                if let Some(i) = p.total_invested() { invested_sum += i; }
+                if let Some(i) = p.total_invested() {
+                    invested_sum += i;
+                }
             }
-            let securities_value: f64 = portfolio.positions.iter().filter(|p| !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase()=="cash")).map(|p| p.get_balance()).sum();
+            let securities_value: f64 = portfolio
+                .positions
+                .iter()
+                .filter(|p| {
+                    !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase() == "cash")
+                })
+                .map(|p| p.get_balance())
+                .sum();
             let hist_pct = if invested_sum > 0.0 {
                 (securities_value - invested_sum) / invested_sum * 100.0
-            } else { 0.0 };
-            let color = if hist_pct >= 0.0 { Color::Green } else { Color::Red };
+            } else {
+                0.0
+            };
+            let color = if hist_pct >= 0.0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
             total_cells.push(
                 Cell::from(format!("{hist_pct:.2}%"))
-                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
             );
         }
         if !app.disabled_components.is_disabled(Component::Daily) {
@@ -2307,36 +2541,55 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             let mut prev_sec_sum = 0.0_f64;
             let mut sec_value_sum = 0.0_f64;
             for position in &portfolio.positions {
-                let is_cash = position.get_ticker().is_none() && position.get_asset_class().to_lowercase()=="cash";
-                if is_cash { continue; }
+                let is_cash = position.get_ticker().is_none()
+                    && position.get_asset_class().to_lowercase() == "cash";
+                if is_cash {
+                    continue;
+                }
                 let value = position.get_balance();
                 sec_value_sum += value;
                 let day_var = position.daily_variation_percent();
                 let prev_value_for_position = match day_var {
                     Some(dv) => {
                         let ratio = dv / 100.0;
-                        if (1.0 + ratio).abs() > f64::EPSILON { value / (1.0 + ratio) } else { value }
+                        if (1.0 + ratio).abs() > f64::EPSILON {
+                            value / (1.0 + ratio)
+                        } else {
+                            value
+                        }
                     }
                     None => value,
                 };
                 prev_sec_sum += prev_value_for_position;
             }
-            let total_day_var = if prev_sec_sum > 0.0 { (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0 } else { 0.0 };
-            let color = if total_day_var >= 0.0 { Color::Green } else { Color::Red };
+            let total_day_var = if prev_sec_sum > 0.0 {
+                (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0
+            } else {
+                0.0
+            };
+            let color = if total_day_var >= 0.0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
             total_cells.push(
                 Cell::from(format!("{total_day_var:.2}%"))
-                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+                    .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
             );
         }
 
         let total_row = Row::new(total_cells).height(1);
 
         let help_text = match app.mode {
-            AppMode::Normal => "Navigation: j/k (select) | e (edit) | h/l (tabs) | r (refresh) | q (quit)",
+            AppMode::Normal => {
+                "Navigation: j/k (select) | e (edit) | h/l (tabs) | r (refresh) | q (quit)"
+            }
             AppMode::Edit => "Edit Mode: Enter (save) | Esc (cancel)",
             AppMode::PurchaseList => "Purchase List: j/k (select) | Enter/a (add) | Esc (back)",
             AppMode::AddPurchase => "Add Purchase: Tab (next field) | Enter (save) | Esc (cancel)",
-            AppMode::EditPurchase => "Edit Purchase: Tab (next field) | Enter (save) | Esc (cancel)",
+            AppMode::EditPurchase => {
+                "Edit Purchase: Tab (next field) | Enter (save) | Esc (cancel)"
+            }
         };
 
         let table_title = format!("Portfolio Balances - {help_text}");
