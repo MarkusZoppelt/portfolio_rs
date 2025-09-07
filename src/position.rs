@@ -183,12 +183,19 @@ pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
 async fn get_quote_price(ticker: &str) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
     match yahoo::YahooConnector::new()?.get_latest_quotes(ticker, "1d").await {
         Ok(resp) => {
-            QUOTE_CACHE.lock().unwrap().insert(ticker.to_string(), Arc::new(resp));
-            Ok(Arc::clone(QUOTE_CACHE.lock().unwrap().get(ticker).unwrap()))
+            let response = Arc::new(resp);
+            if let Ok(mut cache) = QUOTE_CACHE.lock() {
+                cache.insert(ticker.to_string(), response.clone());
+            }
+            Ok(response)
         }
         Err(e) => {
-            if let Some(cached) = QUOTE_CACHE.lock().unwrap().get(ticker) {
-                Ok(Arc::clone(cached))
+            if let Ok(cache) = QUOTE_CACHE.lock() {
+                if let Some(cached) = cache.get(ticker) {
+                    Ok(Arc::clone(cached))
+                } else {
+                    Err(e)
+                }
             } else {
                 Err(e)
             }
@@ -210,12 +217,18 @@ async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
             } else {
                 return Err(yahoo::YahooError::NoResult);
             };
-            PREV_CLOSE_CACHE.lock().unwrap().insert(ticker.to_string(), prev_close);
+            if let Ok(mut cache) = PREV_CLOSE_CACHE.lock() {
+                cache.insert(ticker.to_string(), prev_close);
+            }
             Ok(prev_close)
         }
         Err(e) => {
-            if let Some(cached) = PREV_CLOSE_CACHE.lock().unwrap().get(ticker) {
-                Ok(*cached)
+            if let Ok(cache) = PREV_CLOSE_CACHE.lock() {
+                if let Some(&cached) = cache.get(ticker) {
+                    Ok(cached)
+                } else {
+                    Err(e)
+                }
             } else {
                 Err(e)
             }
@@ -247,12 +260,19 @@ pub async fn get_historic_price(
 
     match yahoo::YahooConnector::new()?.get_quote_history(ticker, start, end).await {
         Ok(resp) => {
-            HISTORIC_CACHE.lock().unwrap().insert(cache_key.clone(), Arc::new(resp));
-            Ok(Arc::clone(HISTORIC_CACHE.lock().unwrap().get(&cache_key).unwrap()))
+            let response = Arc::new(resp);
+            if let Ok(mut cache) = HISTORIC_CACHE.lock() {
+                cache.insert(cache_key.clone(), response.clone());
+            }
+            Ok(response)
         }
         Err(e) => {
-            if let Some(cached) = HISTORIC_CACHE.lock().unwrap().get(&cache_key) {
-                Ok(Arc::clone(cached))
+            if let Ok(cache) = HISTORIC_CACHE.lock() {
+                if let Some(cached) = cache.get(&cache_key) {
+                    Ok(Arc::clone(cached))
+                } else {
+                    Err(e)
+                }
             } else {
                 Err(e)
             }
@@ -265,15 +285,21 @@ async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
     match yahoo::YahooConnector::new()?.search_ticker(ticker).await {
         Ok(resp) => {
             if let Some(item) = resp.quotes.first() {
-                NAME_CACHE.lock().unwrap().insert(ticker.to_string(), item.short_name.clone());
+                if let Ok(mut cache) = NAME_CACHE.lock() {
+                    cache.insert(ticker.to_string(), item.short_name.clone());
+                }
                 Ok(item.short_name.clone())
             } else {
                 Err(yahoo::YahooError::NoResult)
             }
         }
         Err(e) => {
-            if let Some(cached) = NAME_CACHE.lock().unwrap().get(ticker) {
-                Ok(cached.clone())
+            if let Ok(cache) = NAME_CACHE.lock() {
+                if let Some(cached) = cache.get(ticker) {
+                    Ok(cached.clone())
+                } else {
+                    Err(e)
+                }
             } else {
                 Err(e)
             }
