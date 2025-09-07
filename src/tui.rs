@@ -765,18 +765,49 @@ impl App {
                         if let Ok(original_data) =
                             serde_json::from_str::<Vec<serde_json::Value>>(&self.positions_str)
                         {
-                            if self.selected_position < original_data.len() {
-                                if let Some(purchases_val) =
-                                    original_data[self.selected_position].get("Purchases")
-                                {
-                                    if let Some(arr) = purchases_val.as_array() {
-                                        if original_index < arr.len() {
-                                            if let Some(price_val) =
-                                                arr[original_index].get("Price")
-                                            {
-                                                if let Some(p) = price_val.as_f64() {
-                                                    price_from_json = Some(p.to_string());
+                            // Find position by identifier instead of index
+                            if let Some(portfolio) = &self.portfolio {
+                                if self.selected_position < portfolio.positions.len() {
+                                    let selected_pos = &portfolio.positions[self.selected_position];
+                                    
+                                    // Find the position in original data by matching identifiers
+                                    for pos_val in original_data.iter() {
+                                        if let Some(obj) = pos_val.as_object() {
+                                            let name_match = match (selected_pos.get_name_option(), obj.get("Name")) {
+                                                (Some(sel_name), Some(json_name)) => {
+                                                    json_name.as_str() == Some(sel_name)
                                                 }
+                                                (None, None) => true,
+                                                _ => false,
+                                            };
+                                            
+                                            let ticker_match = match (selected_pos.get_ticker(), obj.get("Ticker")) {
+                                                (Some(sel_ticker), Some(json_ticker)) => {
+                                                    json_ticker.as_str() == Some(sel_ticker)
+                                                }
+                                                (None, None) => true,
+                                                _ => false,
+                                            };
+                                            
+                                            let asset_class_match = obj.get("AssetClass")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s == selected_pos.get_asset_class())
+                                                .unwrap_or(false);
+                                            
+                                            if name_match && ticker_match && asset_class_match {
+                                                // Found the matching position, now get the purchase price
+                                                if let Some(purchases_val) = obj.get("Purchases") {
+                                                    if let Some(arr) = purchases_val.as_array() {
+                                                        if original_index < arr.len() {
+                                                            if let Some(price_val) = arr[original_index].get("Price") {
+                                                                if let Some(p) = price_val.as_f64() {
+                                                                    price_from_json = Some(p.to_string());
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                break;
                                             }
                                         }
                                     }
@@ -898,76 +929,127 @@ impl App {
 
     // Removed unused legacy amount edit functions (save_edit, save_to_file)
 
-    fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<(), String> {
-        // Parse the original file to preserve all data
-        let mut original_data: Vec<serde_json::Value> =
-            serde_json::from_str(&self.positions_str)
+    fn find_and_update_position_by_identifier<F>(&self, sorted_position_index: usize, updater: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
+    {
+        if let Some(portfolio) = &self.portfolio {
+            if sorted_position_index >= portfolio.positions.len() {
+                return Err("Invalid sorted position index".to_string());
+            }
+
+            let selected_position = &portfolio.positions[sorted_position_index];
+            
+            // Parse the original file to preserve all data
+            let mut original_data: Vec<serde_json::Value> = serde_json::from_str(&self.positions_str)
                 .map_err(|e| format!("Failed to parse original data: {e}"))?;
 
-        if self.selected_position >= original_data.len() {
-            return Err("Invalid position selected".to_string());
-        }
-
-        // Get the position object
-        let position_obj = original_data[self.selected_position]
-            .as_object_mut()
-            .ok_or("Invalid position data")?;
-
-        // Get or create the Purchases array
-        let purchases_array = position_obj
-            .entry("Purchases".to_string())
-            .or_insert_with(|| serde_json::Value::Array(vec![]));
-
-        let purchases = purchases_array
-            .as_array_mut()
-            .ok_or("Purchases field is not an array")?;
-
-        // Create new purchase object
-        let mut new_purchase = serde_json::Map::new();
-        new_purchase.insert(
-            "Date".to_string(),
-            serde_json::Value::String(date.to_string()),
-        );
-        new_purchase.insert(
-            "Quantity".to_string(),
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(quantity)
-                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
-            ),
-        );
-
-        // Only persist Price if the user explicitly provided it (>0). Otherwise, omit the field
-        if price > 0.0 {
-            if let Some(num) = serde_json::Number::from_f64(price) {
-                new_purchase.insert("Price".to_string(), serde_json::Value::Number(num));
+            // Find and update the position in original data by matching identifiers
+            let mut found = false;
+            for pos_val in original_data.iter_mut() {
+                if let Some(obj) = pos_val.as_object() {
+                    let name_match = match (selected_position.get_name_option(), obj.get("Name")) {
+                        (Some(sel_name), Some(json_name)) => {
+                            json_name.as_str() == Some(sel_name)
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    
+                    let ticker_match = match (selected_position.get_ticker(), obj.get("Ticker")) {
+                        (Some(sel_ticker), Some(json_ticker)) => {
+                            json_ticker.as_str() == Some(sel_ticker)
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    
+                    let asset_class_match = obj.get("AssetClass")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == selected_position.get_asset_class())
+                        .unwrap_or(false);
+                    
+                    if name_match && ticker_match && asset_class_match {
+                        // Apply the update function to this position
+                        updater(pos_val)?;
+                        found = true;
+                        break;
+                    }
+                }
             }
+            
+            if !found {
+                return Err(format!("Could not find position '{}' in original data", selected_position.get_name()));
+            }
+            
+            // Save the updated data
+            let json_string = serde_json::to_string_pretty(&original_data)
+                .map_err(|e| format!("Failed to serialize data: {e}"))?;
+            
+            std::fs::write(&self.data_file_path, json_string)
+                .map_err(|e| format!("Failed to write to file: {e}"))?;
+            
+            Ok(())
+        } else {
+            Err("No portfolio available".to_string())
         }
+    }
 
-        // Add the new purchase
-        purchases.push(serde_json::Value::Object(new_purchase));
+    fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<(), String> {
+        self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
+            // Get the position object
+            let position_obj = position_obj.as_object_mut()
+                .ok_or("Invalid position data")?;
 
-        // Update the Amount field to reflect total quantity
-        let total_quantity: f64 = purchases
-            .iter()
-            .filter_map(|p| p.get("Quantity")?.as_f64())
-            .sum();
+            // Get or create the Purchases array
+            let purchases_array = position_obj
+                .entry("Purchases".to_string())
+                .or_insert_with(|| serde_json::Value::Array(vec![]));
 
-        position_obj.insert(
-            "Amount".to_string(),
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(total_quantity)
-                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
-            ),
-        );
+            let purchases = purchases_array
+                .as_array_mut()
+                .ok_or("Purchases field is not an array")?;
 
-        // Save the updated data
-        let json_string = serde_json::to_string_pretty(&original_data)
-            .map_err(|e| format!("Failed to serialize data: {e}"))?;
+            // Create new purchase object
+            let mut new_purchase = serde_json::Map::new();
+            new_purchase.insert(
+                "Date".to_string(),
+                serde_json::Value::String(date.to_string()),
+            );
+            new_purchase.insert(
+                "Quantity".to_string(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(quantity)
+                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                ),
+            );
 
-        std::fs::write(&self.data_file_path, json_string)
-            .map_err(|e| format!("Failed to write to file: {e}"))?;
+            // Only persist Price if the user explicitly provided it (>0). Otherwise, omit the field
+            if price > 0.0 {
+                if let Some(num) = serde_json::Number::from_f64(price) {
+                    new_purchase.insert("Price".to_string(), serde_json::Value::Number(num));
+                }
+            }
 
-        Ok(())
+            // Add the new purchase
+            purchases.push(serde_json::Value::Object(new_purchase));
+
+            // Update the Amount field to reflect total quantity
+            let total_quantity: f64 = purchases
+                .iter()
+                .filter_map(|p| p.get("Quantity")?.as_f64())
+                .sum();
+
+            position_obj.insert(
+                "Amount".to_string(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(total_quantity)
+                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                ),
+            );
+
+            Ok(())
+        })
     }
 
     fn save_purchase_edit_to_file(
@@ -976,104 +1058,89 @@ impl App {
         quantity: f64,
         price: f64,
     ) -> Result<(), String> {
-        // Parse the original file to preserve all data
-        let mut original_data: Vec<serde_json::Value> =
-            serde_json::from_str(&self.positions_str)
-                .map_err(|e| format!("Failed to parse original data: {e}"))?;
+        self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
+            // Get the position object
+            let position_obj = position_obj.as_object_mut()
+                .ok_or("Invalid position data")?;
 
-        if self.selected_position >= original_data.len() {
-            return Err("Invalid position selected".to_string());
-        }
+            // Get the Purchases array
+            let purchases_array = position_obj
+                .get_mut("Purchases")
+                .ok_or("No purchases found")?;
 
-        // Get the position object
-        let position_obj = original_data[self.selected_position]
-            .as_object_mut()
-            .ok_or("Invalid position data")?;
+            let purchases = purchases_array
+                .as_array_mut()
+                .ok_or("Purchases field is not an array")?;
 
-        // Get the Purchases array
-        let purchases_array = position_obj
-            .get_mut("Purchases")
-            .ok_or("No purchases found")?;
+            // Find the purchase to edit by mapping from display order to original order
+            if let Some(portfolio) = &self.portfolio {
+                if self.selected_position < portfolio.positions.len() {
+                    let position = &portfolio.positions[self.selected_position];
+                    let portfolio_purchases = position.get_purchases();
 
-        let purchases = purchases_array
-            .as_array_mut()
-            .ok_or("Purchases field is not an array")?;
+                    // Create sorted list to find the actual purchase index
+                    let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
+                        portfolio_purchases.iter().enumerate().collect();
+                    purchase_list.sort_by(|a, b| {
+                        let date_a = a.1.date.as_deref().unwrap_or("");
+                        let date_b = b.1.date.as_deref().unwrap_or("");
+                        date_b.cmp(date_a) // Reverse order for newest first
+                    });
 
-        // Find the purchase to edit by mapping from display order to original order
-        if let Some(portfolio) = &self.portfolio {
-            if self.selected_position < portfolio.positions.len() {
-                let position = &portfolio.positions[self.selected_position];
-                let portfolio_purchases = position.get_purchases();
+                    let display_index = self.selected_purchase - 1; // Convert to 0-based for sorted list
+                    if display_index < purchase_list.len() {
+                        let original_index = purchase_list[display_index].0;
 
-                // Create sorted list to find the actual purchase index
-                let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
-                    portfolio_purchases.iter().enumerate().collect();
-                purchase_list.sort_by(|a, b| {
-                    let date_a = a.1.date.as_deref().unwrap_or("");
-                    let date_b = b.1.date.as_deref().unwrap_or("");
-                    date_b.cmp(date_a) // Reverse order for newest first
-                });
+                        if original_index < purchases.len() {
+                            // Update the purchase at the original index
+                            let purchase_obj = purchases[original_index]
+                                .as_object_mut()
+                                .ok_or("Invalid purchase data")?;
 
-                let display_index = self.selected_purchase - 1; // Convert to 0-based for sorted list
-                if display_index < purchase_list.len() {
-                    let original_index = purchase_list[display_index].0;
+                            purchase_obj.insert(
+                                "Date".to_string(),
+                                serde_json::Value::String(date.to_string()),
+                            );
+                            purchase_obj.insert(
+                                "Quantity".to_string(),
+                                serde_json::Value::Number(
+                                    serde_json::Number::from_f64(quantity)
+                                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                                ),
+                            );
 
-                    if original_index < purchases.len() {
-                        // Update the purchase at the original index
-                        let purchase_obj = purchases[original_index]
-                            .as_object_mut()
-                            .ok_or("Invalid purchase data")?;
-
-                        purchase_obj.insert(
-                            "Date".to_string(),
-                            serde_json::Value::String(date.to_string()),
-                        );
-                        purchase_obj.insert(
-                            "Quantity".to_string(),
-                            serde_json::Value::Number(
-                                serde_json::Number::from_f64(quantity)
-                                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
-                            ),
-                        );
-
-                        // Only persist Price if the user explicitly provided it (>0). Otherwise, remove the field
-                        if price > 0.0 {
-                            if let Some(num) = serde_json::Number::from_f64(price) {
-                                purchase_obj
-                                    .insert("Price".to_string(), serde_json::Value::Number(num));
+                            // Only persist Price if the user explicitly provided it (>0). Otherwise, remove the field
+                            if price > 0.0 {
+                                if let Some(num) = serde_json::Number::from_f64(price) {
+                                    purchase_obj
+                                        .insert("Price".to_string(), serde_json::Value::Number(num));
+                                }
+                            } else {
+                                purchase_obj.remove("Price");
                             }
-                        } else {
-                            purchase_obj.remove("Price");
+
+                            // Update the Amount field to reflect total quantity
+                            let total_quantity: f64 = purchases
+                                .iter()
+                                .filter_map(|p| p.get("Quantity")?.as_f64())
+                                .sum();
+
+                            position_obj.insert(
+                                "Amount".to_string(),
+                                serde_json::Value::Number(
+                                    serde_json::Number::from_f64(total_quantity)
+                                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+                                ),
+                            );
+
+                            return Ok(());
                         }
-
-                        // Update the Amount field to reflect total quantity
-                        let total_quantity: f64 = purchases
-                            .iter()
-                            .filter_map(|p| p.get("Quantity")?.as_f64())
-                            .sum();
-
-                        position_obj.insert(
-                            "Amount".to_string(),
-                            serde_json::Value::Number(
-                                serde_json::Number::from_f64(total_quantity)
-                                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
-                            ),
-                        );
-
-                        // Save the updated data
-                        let json_string = serde_json::to_string_pretty(&original_data)
-                            .map_err(|e| format!("Failed to serialize data: {e}"))?;
-
-                        std::fs::write(&self.data_file_path, json_string)
-                            .map_err(|e| format!("Failed to write to file: {e}"))?;
-
-                        return Ok(());
                     }
                 }
             }
-        }
 
-        Err("Could not find purchase to edit".to_string())
+            Err("Could not find purchase to edit".to_string())
+        })
     }
 }
 
