@@ -1277,6 +1277,7 @@ dependencies = [
  "confy",
  "crossterm 0.28.1",
  "futures",
+ "once_cell",
  "piechart",
  "ratatui",
  "serde",
