@@ -2083,17 +2083,14 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         // Total Portfolio Value with daily PnL
         if !app.disabled_components.is_disabled(Component::TotalValue) {
             let total_value = portfolio.get_total_value();
-            // Compute daily PnL and %Day on securities only (exclude cash)
-            let mut prev_sec_sum = 0.0_f64;
-            let mut sec_value_sum = 0.0_f64;
+            // Compute daily PnL and %Day including all positions (cash has no daily variation)
+            let mut prev_total = 0.0_f64;
+            let mut current_total = 0.0_f64;
             for position in &portfolio.positions {
-                let is_cash = position.get_ticker().is_none()
-                    && position.get_asset_class().to_lowercase() == "cash";
-                if is_cash {
-                    continue;
-                }
                 let value = position.get_balance();
-                sec_value_sum += value;
+                current_total += value;
+                // For positions with tickers, calculate previous value from daily variation
+                // For cash positions (no ticker), previous value equals current value (no fluctuation)
                 let prev = position.daily_variation_percent().map(|dv| {
                     let ratio = dv / 100.0;
                     if (1.0 + ratio).abs() > f64::EPSILON {
@@ -2102,11 +2099,11 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                         value
                     }
                 });
-                prev_sec_sum += prev.unwrap_or(value);
+                prev_total += prev.unwrap_or(value);
             }
-            let day_pnl_abs = sec_value_sum - prev_sec_sum;
-            let daily_percent = if prev_sec_sum > 0.0 {
-                (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0
+            let day_pnl_abs = current_total - prev_total;
+            let daily_percent = if prev_total > 0.0 {
+                (current_total - prev_total) / prev_total * 100.0
             } else {
                 0.0
             };
@@ -2468,14 +2465,10 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 }
             }
             if !app.disabled_components.is_disabled(Component::Balance) {
-                if is_cash {
-                    cells.push(Cell::from("-").style(Style::default().fg(balance_color)));
-                } else {
-                    cells.push(
-                        Cell::from(format_currency(position.get_balance(), &app.currency))
-                            .style(Style::default().fg(balance_color)),
-                    );
-                }
+                cells.push(
+                    Cell::from(format_currency(position.get_balance(), &app.currency))
+                        .style(Style::default().fg(balance_color)),
+                );
             }
             if !app.disabled_components.is_disabled(Component::PnL) {
                 if is_cash {
@@ -2628,17 +2621,12 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::Daily) {
-            // Calculate total daily variation for securities only
-            let mut prev_sec_sum = 0.0_f64;
-            let mut sec_value_sum = 0.0_f64;
+            // Calculate total daily variation including all positions (cash has no daily variation)
+            let mut prev_total = 0.0_f64;
+            let mut current_total = 0.0_f64;
             for position in &portfolio.positions {
-                let is_cash = position.get_ticker().is_none()
-                    && position.get_asset_class().to_lowercase() == "cash";
-                if is_cash {
-                    continue;
-                }
                 let value = position.get_balance();
-                sec_value_sum += value;
+                current_total += value;
                 let day_var = position.daily_variation_percent();
                 let prev_value_for_position = match day_var {
                     Some(dv) => {
@@ -2651,10 +2639,10 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                     }
                     None => value,
                 };
-                prev_sec_sum += prev_value_for_position;
+                prev_total += prev_value_for_position;
             }
-            let total_day_var = if prev_sec_sum > 0.0 {
-                (sec_value_sum - prev_sec_sum) / prev_sec_sum * 100.0
+            let total_day_var = if prev_total > 0.0 {
+                (current_total - prev_total) / prev_total * 100.0
             } else {
                 0.0
             };
