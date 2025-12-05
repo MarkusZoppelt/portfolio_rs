@@ -330,11 +330,7 @@ impl Portfolio {
             } else {
                 format!("{price:.2}")
             };
-            let value_str = if is_cash {
-                "-".to_string()
-            } else {
-                format!("{value:.2}")
-            };
+            let value_str = format!("{value:.2}");
 
             table.add_row(vec![
                 Cell::new(position.get_name()),
@@ -628,12 +624,9 @@ impl Portfolio {
             0.0
         };
 
-        // Daily aggregated change using previous close (exclude cash)
+        // Daily aggregated change using previous close (cash has no daily variation)
         let mut total_prev_value_for_day = 0.0_f64;
         for position in &self.positions {
-            if position.get_ticker().is_none() {
-                continue;
-            }
             let value = position.get_balance();
             let prev = position.daily_variation_percent().map(|dv| {
                 let ratio = dv / 100.0;
