@@ -25,15 +25,9 @@ jobs:
       - name: Update flake.lock
         id: update
         run: |
-          nix flake update --commit-lock-file
-          if git diff --quiet HEAD^; then
-            echo "updated=false" >> $GITHUB_OUTPUT
-          else
-            echo "updated=true" >> $GITHUB_OUTPUT
-          fi
+          nix flake update
 
       - name: Create Pull Request
-        if: steps.update.outputs.updated == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
