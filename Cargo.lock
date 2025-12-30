@@ -1604,7 +1604,7 @@ checksum = "f89776e4d69bb58bc6993e99ffa1d11f228b839984854c7daeb5d37f87cbe950"
 
 [[package]]
 name = "portfolio_rs"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "clap",
