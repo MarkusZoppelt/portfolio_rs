@@ -9,13 +9,11 @@ A command line tool with interactive TUI for managing financial investment portf
 
 ## Installation
 
-Install/run via [pkgx](https://pkgx.sh):
+Available in [nixpkgs](https://search.nixos.org/packages?query=portfolio_rs): `nix-shell -p portfolio_rs` or `nix run nixpkgs#portfolio_rs`
 
-    pkgx portfolio_rs
+Install via [pkgx](https://pkgx.sh): `pkgx portfolio_rs`
 
-You can install portfolio_rs directly from cargo (via crates.io):
-
-    cargo install portfolio_rs
+Install from cargo: `cargo install portfolio_rs`
 
 ## Usage
 
