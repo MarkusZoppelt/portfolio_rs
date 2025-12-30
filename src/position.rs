@@ -1,10 +1,13 @@
-use chrono::prelude::*;
-use once_cell::sync::Lazy;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use chrono::prelude::*;
+use eyre::{Result, WrapErr};
+use once_cell::sync::Lazy;
+use serde::Deserialize;
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
+
 // Type alias to reduce type complexity
 type HistoricCacheMap = HashMap<(String, i64), Arc<yahoo::YResponse>>;
 // Caches for Yahoo API requests
@@ -181,8 +184,9 @@ impl PortfolioPosition {
     }
 }
 
-pub fn from_string(data: &str) -> Vec<PortfolioPosition> {
-    serde_json::from_str::<Vec<PortfolioPosition>>(data).expect("JSON was not well-formatted")
+pub fn from_string(data: &str) -> Result<Vec<PortfolioPosition>> {
+    serde_json::from_str::<Vec<PortfolioPosition>>(data)
+        .wrap_err("failed to parse portfolio JSON - data is not well-formatted")
 }
 
 // Get the latest price for a ticker, cache on success, fallback to cache on failure
@@ -264,7 +268,9 @@ pub async fn get_historic_price(
     ticker: &str,
     date: DateTime<Utc>,
 ) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
-    let start = OffsetDateTime::from_unix_timestamp(date.timestamp()).unwrap();
+    // SAFETY: Valid chrono timestamps are always valid OffsetDateTime timestamps
+    let start = OffsetDateTime::from_unix_timestamp(date.timestamp())
+        .expect("valid chrono timestamp should convert to OffsetDateTime");
 
     // get a range of 3 days in case the market is closed on the given date
     let end = start + time::Duration::days(3);
@@ -446,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn test_from_file() {
         let positions_str = fs::read_to_string("example_data.json").unwrap();
-        let positions = from_string(&positions_str);
+        let positions = from_string(&positions_str).unwrap();
         assert_eq!(positions.len(), 6);
     }
 }

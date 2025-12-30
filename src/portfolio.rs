@@ -1,8 +1,14 @@
+use std::collections::HashMap;
+
 use crate::position::get_historic_price;
 use crate::position::PortfolioPosition;
+
 use chrono::prelude::*;
+use eyre::Result;
+use eyre::WrapErr;
+use eyre::bail;
+use eyre::eyre;
 use piechart::{Chart, Color};
-use std::collections::HashMap;
 
 pub struct Portfolio {
     pub positions: Vec<PortfolioPosition>,
@@ -44,7 +50,7 @@ impl Portfolio {
 
     // Get the total value of the portfolio at a specific date
     // TODO: this function is not working as intended and the y_response is often an error
-    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> Result<f64, String> {
+    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> Result<f64> {
         let mut sum = 0.0;
         let mut errors = Vec::new();
 
@@ -101,14 +107,14 @@ impl Portfolio {
         // Return partial aggregates even if some tickers failed
         // Only error if nothing contributed and there were errors
         if sum <= 0.0 && !errors.is_empty() {
-            return Err(errors.join("; "));
+            bail!("failed to get historic total value: {}", errors.join("; "));
         }
 
         Ok(sum)
     }
 
     // Get the total value of all non-cash (securities) positions at a specific date
-    pub async fn get_historic_securities_value(&self, date: DateTime<Utc>) -> Result<f64, String> {
+    pub async fn get_historic_securities_value(&self, date: DateTime<Utc>) -> Result<f64> {
         let mut sum = 0.0;
         let mut errors = Vec::new();
 
@@ -156,7 +162,10 @@ impl Portfolio {
         }
 
         if sum <= 0.0 && !errors.is_empty() {
-            return Err(errors.join("; "));
+            bail!(
+                "failed to get historic securities value: {}",
+                errors.join("; ")
+            );
         }
 
         Ok(sum)
@@ -524,16 +533,19 @@ impl Portfolio {
             .draw(&data);
     }
 
-    pub async fn get_performance_data(&self) -> Result<(f64, f64, f64), String> {
-        let db = sled::open("database").map_err(|e| format!("Database error: {e}"))?;
+    pub async fn get_performance_data(&self) -> Result<(f64, f64, f64)> {
+        let db = sled::open("database").wrap_err("failed to open database for performance data")?;
 
         // Yahoo first of the year is YYYY-01-03
+        // SAFETY: These dates are hardcoded and always valid
         let first_of_the_year = Utc
             .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
-            .unwrap();
+            .single()
+            .ok_or_else(|| eyre!("failed to create first of year date"))?;
         let first_of_the_month = Utc
             .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
-            .unwrap();
+            .single()
+            .ok_or_else(|| eyre!("failed to create first of month date"))?;
 
         let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await?;
         let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await?;
@@ -884,7 +896,7 @@ mod tests {
     async fn test_get_historic_total_value() {
         use crate::position::from_string;
         let positions_str = std::fs::read_to_string("example_data.json").unwrap();
-        let positions = from_string(&positions_str);
+        let positions = from_string(&positions_str).unwrap();
         let mut portfolio = Portfolio::new();
         for p in positions {
             portfolio.add_position(p);

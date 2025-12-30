@@ -3,11 +3,18 @@ use std::fs::read_to_string;
 use crate::portfolio::Portfolio;
 use crate::position::from_string;
 use crate::position::handle_position;
+use crate::tui::NetworkStatus;
+use crate::tui::Tab;
 
 use clap::{arg, Command};
+use eyre::bail;
+use eyre::eyre;
+use eyre::Result;
+use eyre::WrapErr;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod error;
 mod portfolio;
 mod position;
 mod tui;
@@ -86,9 +93,7 @@ fn cli() -> Command {
 }
 
 // returns a porfolio with the latest quotes from json data
-pub async fn create_live_portfolio(
-    positions_str: String,
-) -> (Portfolio, crate::tui::NetworkStatus) {
+pub async fn create_live_portfolio(positions_str: String) -> (Portfolio, NetworkStatus) {
     create_live_portfolio_with_logging(positions_str, false).await
 }
 
@@ -96,8 +101,16 @@ pub async fn create_live_portfolio(
 pub async fn create_live_portfolio_with_logging(
     positions_str: String,
     log_errors: bool,
-) -> (Portfolio, crate::tui::NetworkStatus) {
-    let positions = from_string(&positions_str);
+) -> (Portfolio, NetworkStatus) {
+    let positions = match from_string(&positions_str) {
+        Ok(p) => p,
+        Err(e) => {
+            if log_errors {
+                eprintln!("Error parsing positions: {:#}", e);
+            }
+            return (Portfolio::new(), NetworkStatus::Disconnected);
+        }
+    };
     let mut portfolio = Portfolio::new();
     let _total_positions = positions.len();
     let mut successful_positions = 0;
@@ -136,39 +149,42 @@ pub async fn create_live_portfolio_with_logging(
     }
 
     let network_status = if failed_positions == 0 {
-        crate::tui::NetworkStatus::Connected
+        NetworkStatus::Connected
     } else if successful_positions == 0 {
-        crate::tui::NetworkStatus::Disconnected
+        NetworkStatus::Disconnected
     } else {
-        crate::tui::NetworkStatus::Partial
+        NetworkStatus::Partial
     };
 
     (portfolio, network_status)
 }
 
 // TODO: change this to store entire portfolio in DB
-fn store_balance_in_db(portfolio: &Portfolio) {
-    let db = sled::open("database").unwrap();
+fn store_balance_in_db(portfolio: &Portfolio) -> Result<()> {
+    let db = sled::open("database").wrap_err("failed to open database")?;
     let curr_value = portfolio.get_total_value();
     let curr_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    db.insert(curr_time, curr_value.to_string().as_bytes())
-        .unwrap();
+    db.insert(&curr_time, curr_value.to_string().as_bytes())
+        .wrap_err_with(|| format!("failed to insert balance into database at {}", curr_time))?;
 
     // block until all operations are stable on disk
-    db.flush().unwrap();
+    db.flush().wrap_err("failed to flush database to disk")?;
+
+    Ok(())
 }
 
-fn open_encrpted_file(filename: String) -> String {
+fn open_encrpted_file(filename: String) -> Result<String> {
     if filename.ends_with(".gpg") {
         let output = std::process::Command::new("gpg")
             .arg("-d")
-            .arg(filename)
+            .arg(&filename)
             .output()
-            .expect("failed to execute gpg process");
-        String::from_utf8(output.stdout).unwrap()
+            .wrap_err_with(|| format!("failed to execute gpg to decrypt {}", filename))?;
+
+        String::from_utf8(output.stdout).wrap_err("gpg output is not valid UTF-8")
     } else {
-        read_to_string(filename).unwrap()
+        read_to_string(&filename).wrap_err_with(|| format!("failed to read file: {}", filename))
     }
 }
 
@@ -176,16 +192,17 @@ fn get_arg_value(matches: Option<&clap::ArgMatches>, arg_name: &str) -> Option<S
     matches.and_then(|m| m.get_one::<String>(arg_name).map(|s| s.to_string()))
 }
 
-fn parse_tab(tab_str: Option<String>) -> Option<crate::tui::Tab> {
+fn parse_tab(tab_str: Option<String>) -> Option<Tab> {
     match tab_str {
-        Some(s) => crate::tui::Tab::from_str(&s).or(Some(crate::tui::Tab::Overview)),
-        None => Some(crate::tui::Tab::Overview), // Default to overview
+        Some(s) => Tab::from_str(&s).or(Some(Tab::Overview)),
+        None => Some(Tab::Overview), // Default to overview
     }
 }
 
 #[tokio::main]
-async fn main() {
-    let cfg: Config = confy::load("portfolio", "config").unwrap();
+async fn main() -> Result<()> {
+    let cfg: Config =
+        confy::load("portfolio", "config").wrap_err("failed to load configuration")?;
 
     let matches = cli().get_matches();
 
@@ -197,14 +214,13 @@ async fn main() {
 
     // Handle config subcommand
     if let Some(_matches) = matches.subcommand_matches("config") {
-        println!(
-            "Your config file is located here: \n{}",
-            confy::get_configuration_file_path("portfolio", "config")
-                .unwrap()
-                .to_str()
-                .unwrap()
-        );
-        return;
+        let config_path = confy::get_configuration_file_path("portfolio", "config")
+            .wrap_err("failed to get configuration file path")?;
+        let config_path_str = config_path
+            .to_str()
+            .ok_or_else(|| eyre!("configuration path contains invalid UTF-8"))?;
+        println!("Your config file is located here: \n{}", config_path_str);
+        return Ok(());
     }
 
     // Handle components subcommand
@@ -230,7 +246,7 @@ async fn main() {
         println!("\nExample usage:");
         println!("  portfolio_rs --disable tab_bar,help");
         println!("  portfolio_rs example_data.json --disable tab_bar,help");
-        return;
+        return Ok(());
     }
 
     // Get filename from arguments or config
@@ -251,19 +267,16 @@ async fn main() {
     };
 
     // Load portfolio data
-    let load_portfolio = |filename: String| -> Result<String, String> {
+    let load_portfolio = |filename: String| -> Result<String> {
         if filename.is_empty() {
-            return Err(
-                "No portfolio file specified. Use --help for usage information.".to_string(),
-            );
+            bail!("No portfolio file specified. Use --help for usage information.");
         }
 
         let positions_str = if filename.ends_with(".gpg") {
-            open_encrpted_file(filename.to_string())
-        } else if let Ok(s) = read_to_string(&filename) {
-            s
+            open_encrpted_file(filename)?
         } else {
-            return Err(format!("Error reading file: {filename}"));
+            read_to_string(&filename)
+                .wrap_err_with(|| format!("failed to read portfolio file: {}", filename))?
         };
 
         Ok(positions_str)
@@ -280,9 +293,11 @@ async fn main() {
                     // Sort in memory for display only
                     portfolio.sort_positions_by_value_desc();
                     portfolio.print(true);
-                    store_balance_in_db(&portfolio);
+                    if let Err(e) = store_balance_in_db(&portfolio) {
+                        eprintln!("Warning: failed to store balance in database: {:#}", e);
+                    }
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => eprintln!("{:#}", e),
             }
         }
         Some(("allocation", sub_matches)) => {
@@ -296,7 +311,7 @@ async fn main() {
                     portfolio.draw_pie_chart();
                     portfolio.print_allocation();
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => eprintln!("{:#}", e),
             }
         }
         Some(("performance", sub_matches)) => {
@@ -309,7 +324,7 @@ async fn main() {
                     portfolio.sort_positions_by_value_desc();
                     portfolio.print_performance().await;
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => eprintln!("{:#}", e),
             }
         }
         Some(("sort", sub_matches)) => {
@@ -323,7 +338,7 @@ async fn main() {
                     println!("Positions sorted by current value (display only, file unchanged):");
                     portfolio.print(true);
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => eprintln!("{:#}", e),
             }
         }
         _ => {
@@ -347,16 +362,20 @@ async fn main() {
                     )
                     .await
                     {
-                        eprintln!("Error running TUI: {e}");
+                        eprintln!("Error running TUI: {:#}", e);
                     }
                 }
                 Err(e) => {
-                    eprintln!("{e}");
-                    cli().print_help().unwrap();
+                    eprintln!("{:#}", e);
+                    cli()
+                        .print_help()
+                        .wrap_err("failed to print help message")?;
                 }
             }
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,9 +1,17 @@
+use crate::error::ValidationError;
 use crate::portfolio::Portfolio;
+
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::str::FromStr;
+use std::time::{Duration, Instant};
+
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use eyre::{bail, eyre, Result, WrapErr};
 use futures::future::join_all;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -16,10 +24,6 @@ use ratatui::{
     },
     Frame, Terminal,
 };
-use std::collections::{HashMap, HashSet};
-use std::io;
-use std::str::FromStr;
-use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tui_big_text::{BigText, PixelSize};
@@ -368,8 +372,11 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
         }
     }
 
-    let start = OffsetDateTime::from_unix_timestamp(earliest.timestamp()).unwrap();
-    let end = OffsetDateTime::from_unix_timestamp(now.timestamp()).unwrap();
+    // SAFETY: Valid chrono timestamps always convert to OffsetDateTime
+    let start = OffsetDateTime::from_unix_timestamp(earliest.timestamp())
+        .expect("valid chrono timestamp should convert");
+    let end = OffsetDateTime::from_unix_timestamp(now.timestamp())
+        .expect("valid chrono timestamp should convert");
 
     let fetches = ticker_amounts.iter().map(|(t, _)| {
         let t2 = t.clone();
@@ -864,22 +871,22 @@ impl App {
         }
     }
 
-    pub fn save_edited_purchase(&mut self) -> Result<(), String> {
+    pub fn save_edited_purchase(&mut self) -> Result<(), ValidationError> {
         // Validate inputs
         if self.purchase_date_input.trim().is_empty() {
-            return Err("Date is required".to_string());
+            return Err(ValidationError::DateRequired);
         }
         if self.purchase_quantity_input.trim().is_empty() {
-            return Err("Quantity is required".to_string());
+            return Err(ValidationError::QuantityRequired);
         }
 
         let quantity: f64 = self
             .purchase_quantity_input
             .parse()
-            .map_err(|_| "Invalid quantity format".to_string())?;
+            .map_err(|_| ValidationError::InvalidQuantity(self.purchase_quantity_input.clone()))?;
 
         if quantity <= 0.0 {
-            return Err("Quantity must be positive".to_string());
+            return Err(ValidationError::NonPositiveQuantity(quantity));
         }
 
         let price: f64 = if self.purchase_price_input.trim().is_empty() {
@@ -887,36 +894,40 @@ impl App {
         } else {
             self.purchase_price_input
                 .parse()
-                .map_err(|_| "Invalid price format".to_string())?
+                .map_err(|_| ValidationError::InvalidPrice(self.purchase_price_input.clone()))?
         };
 
         if price < 0.0 {
-            return Err("Price cannot be negative".to_string());
+            return Err(ValidationError::NegativePrice(price));
         }
 
         // Save to file
-        self.save_purchase_edit_to_file(&self.purchase_date_input, quantity, price)?;
+        if let Err(e) = self.save_purchase_edit_to_file(&self.purchase_date_input, quantity, price)
+        {
+            // Convert eyre error to string for display - file I/O errors aren't validation errors
+            self.error_message = Some(format!("Failed to save: {:#}", e));
+        }
 
         self.exit_edit_mode();
         Ok(())
     }
 
-    pub fn save_new_purchase(&mut self) -> Result<(), String> {
+    pub fn save_new_purchase(&mut self) -> Result<(), ValidationError> {
         // Validate inputs
         if self.purchase_date_input.trim().is_empty() {
-            return Err("Date is required".to_string());
+            return Err(ValidationError::DateRequired);
         }
         if self.purchase_quantity_input.trim().is_empty() {
-            return Err("Quantity is required".to_string());
+            return Err(ValidationError::QuantityRequired);
         }
 
         let quantity: f64 = self
             .purchase_quantity_input
             .parse()
-            .map_err(|_| "Invalid quantity format".to_string())?;
+            .map_err(|_| ValidationError::InvalidQuantity(self.purchase_quantity_input.clone()))?;
 
         if quantity <= 0.0 {
-            return Err("Quantity must be positive".to_string());
+            return Err(ValidationError::NonPositiveQuantity(quantity));
         }
 
         let price: f64 = if self.purchase_price_input.trim().is_empty() {
@@ -924,15 +935,18 @@ impl App {
         } else {
             self.purchase_price_input
                 .parse()
-                .map_err(|_| "Invalid price format".to_string())?
+                .map_err(|_| ValidationError::InvalidPrice(self.purchase_price_input.clone()))?
         };
 
         if price < 0.0 {
-            return Err("Price cannot be negative".to_string());
+            return Err(ValidationError::NegativePrice(price));
         }
 
         // Save to file
-        self.save_purchase_to_file(&self.purchase_date_input, quantity, price)?;
+        if let Err(e) = self.save_purchase_to_file(&self.purchase_date_input, quantity, price) {
+            // Convert eyre error to string for display - file I/O errors aren't validation errors
+            self.error_message = Some(format!("Failed to save: {:#}", e));
+        }
 
         self.exit_edit_mode();
         Ok(())
@@ -944,13 +958,13 @@ impl App {
         &self,
         sorted_position_index: usize,
         updater: F,
-    ) -> Result<(), String>
+    ) -> Result<()>
     where
-        F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
+        F: FnOnce(&mut serde_json::Value) -> Result<()>,
     {
         if let Some(portfolio) = &self.portfolio {
             if sorted_position_index >= portfolio.positions.len() {
-                return Err("Invalid sorted position index".to_string());
+                bail!("Invalid sorted position index: {}", sorted_position_index);
             }
 
             let selected_position = &portfolio.positions[sorted_position_index];
@@ -958,7 +972,7 @@ impl App {
             // Parse the original file to preserve all data
             let mut original_data: Vec<serde_json::Value> =
                 serde_json::from_str(&self.positions_str)
-                    .map_err(|e| format!("Failed to parse original data: {e}"))?;
+                    .wrap_err("failed to parse original portfolio data")?;
 
             // Find and update the position in original data by matching identifiers
             let mut found = false;
@@ -994,31 +1008,31 @@ impl App {
             }
 
             if !found {
-                return Err(format!(
+                bail!(
                     "Could not find position '{}' in original data",
                     selected_position.get_name()
-                ));
+                );
             }
 
             // Save the updated data
             let json_string = serde_json::to_string_pretty(&original_data)
-                .map_err(|e| format!("Failed to serialize data: {e}"))?;
+                .wrap_err("failed to serialize portfolio data to JSON")?;
 
-            std::fs::write(&self.data_file_path, json_string)
-                .map_err(|e| format!("Failed to write to file: {e}"))?;
+            std::fs::write(&self.data_file_path, &json_string)
+                .wrap_err_with(|| format!("failed to write to file: {}", self.data_file_path))?;
 
             Ok(())
         } else {
-            Err("No portfolio available".to_string())
+            bail!("No portfolio available")
         }
     }
 
-    fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<(), String> {
+    fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<()> {
         self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
             // Get the position object
             let position_obj = position_obj
                 .as_object_mut()
-                .ok_or("Invalid position data")?;
+                .ok_or_else(|| eyre!("Invalid position data - not an object"))?;
 
             // Get or create the Purchases array
             let purchases_array = position_obj
@@ -1027,7 +1041,7 @@ impl App {
 
             let purchases = purchases_array
                 .as_array_mut()
-                .ok_or("Purchases field is not an array")?;
+                .ok_or_else(|| eyre!("Purchases field is not an array"))?;
 
             // Create new purchase object
             let mut new_purchase = serde_json::Map::new();
@@ -1038,6 +1052,7 @@ impl App {
             new_purchase.insert(
                 "Quantity".to_string(),
                 serde_json::Value::Number(
+                    // SAFETY: Valid f64 should always convert to JSON Number; fallback to 0.0
                     serde_json::Number::from_f64(quantity)
                         .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
                 ),
@@ -1071,26 +1086,21 @@ impl App {
         })
     }
 
-    fn save_purchase_edit_to_file(
-        &self,
-        date: &str,
-        quantity: f64,
-        price: f64,
-    ) -> Result<(), String> {
+    fn save_purchase_edit_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<()> {
         self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
             // Get the position object
             let position_obj = position_obj
                 .as_object_mut()
-                .ok_or("Invalid position data")?;
+                .ok_or_else(|| eyre!("Invalid position data - not an object"))?;
 
             // Get the Purchases array
             let purchases_array = position_obj
                 .get_mut("Purchases")
-                .ok_or("No purchases found")?;
+                .ok_or_else(|| eyre!("No purchases found for this position"))?;
 
             let purchases = purchases_array
                 .as_array_mut()
-                .ok_or("Purchases field is not an array")?;
+                .ok_or_else(|| eyre!("Purchases field is not an array"))?;
 
             // Find the purchase to edit by mapping from display order to original order
             if let Some(portfolio) = &self.portfolio {
@@ -1115,7 +1125,7 @@ impl App {
                             // Update the purchase at the original index
                             let purchase_obj = purchases[original_index]
                                 .as_object_mut()
-                                .ok_or("Invalid purchase data")?;
+                                .ok_or_else(|| eyre!("Invalid purchase data - not an object"))?;
 
                             purchase_obj.insert(
                                 "Date".to_string(),
@@ -1163,7 +1173,7 @@ impl App {
                 }
             }
 
-            Err("Could not find purchase to edit".to_string())
+            bail!("Could not find purchase to edit")
         })
     }
 }
@@ -1175,7 +1185,7 @@ pub async fn run_tui(
     data_file_path: String,
     tab: Option<Tab>,
     disabled_components: Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // Pre-compute historic series so graph shows on launch (<=5s)
     let initial_series = tokio::time::timeout(
         Duration::from_secs(5),
@@ -1193,7 +1203,7 @@ pub async fn run_tui(
     let disabled = match DisabledComponents::new(disabled_components) {
         Ok(disabled) => disabled,
         Err(errors) => {
-            return Err(format!("Invalid disabled components - {}", errors.join(", ")).into());
+            bail!("Invalid disabled components: {}", errors.join(", "));
         }
     };
     let mut app = App::new(currency, positions_str.clone(), data_file_path, disabled);
@@ -1271,9 +1281,11 @@ pub async fn run_tui(
     Ok(())
 }
 
-async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        terminal
+            .draw(|f| ui(f, app))
+            .map_err(|e| eyre!("failed to draw terminal frame: {:?}", e))?;
 
         // Check for portfolio updates from background task (non-blocking)
         app.try_receive_portfolio_update();
@@ -1401,7 +1413,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                             app.mark_refreshed();
                                         }
                                         Err(e) => {
-                                            app.error_message = Some(e);
+                                            app.error_message = Some(e.to_string());
                                         }
                                     }
                                 }
@@ -1483,7 +1495,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::R
                                             app.mark_refreshed();
                                         }
                                         Err(e) => {
-                                            app.error_message = Some(e);
+                                            app.error_message = Some(e.to_string());
                                         }
                                     }
                                 }
