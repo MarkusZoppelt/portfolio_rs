@@ -21,7 +21,7 @@ piechart = "1.0.0"
 time = "0.3.44"
 chrono = "0.4.43"
 sled = "0.34.7"
-colored = "3.0.0"
+colored = "3.1.1"
 confy = { version = "2.0.0", features = ["yaml_conf"], default-features = false }
 ratatui = "0.30.0"
 crossterm = "0.28.1"
