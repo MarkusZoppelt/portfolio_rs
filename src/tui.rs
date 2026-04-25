@@ -289,7 +289,7 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
     }
 
     // Sort by date
-    purchase_events.sort_by(|a, b| a.0.cmp(&b.0));
+    purchase_events.sort_by_key(|a| a.0);
 
     // Create weekly data points by building cumulative portfolio value over time
     let mut weekly_data = Vec::new();
@@ -1308,20 +1308,18 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Resul
                                 KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
                                     app.next_tab();
                                 }
-                                KeyCode::Char('j') | KeyCode::Down => {
-                                    if app.current_tab == Tab::Balances {
-                                        app.select_next();
-                                    }
+                                KeyCode::Char('j') | KeyCode::Down
+                                    if app.current_tab == Tab::Balances =>
+                                {
+                                    app.select_next();
                                 }
-                                KeyCode::Char('k') | KeyCode::Up => {
-                                    if app.current_tab == Tab::Balances {
-                                        app.select_previous();
-                                    }
+                                KeyCode::Char('k') | KeyCode::Up
+                                    if app.current_tab == Tab::Balances =>
+                                {
+                                    app.select_previous();
                                 }
-                                KeyCode::Char('e') => {
-                                    if app.current_tab == Tab::Balances {
-                                        app.enter_edit_mode();
-                                    }
+                                KeyCode::Char('e') if app.current_tab == Tab::Balances => {
+                                    app.enter_edit_mode();
                                 }
                                 KeyCode::Char('r') => {
                                     // Manual refresh: read latest file and rebuild portfolio immediately
