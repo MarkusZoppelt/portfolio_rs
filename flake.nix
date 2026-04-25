@@ -80,24 +80,25 @@
 
         # Development shell
         devShells.default = craneLib.devShell {
-          packages = with pkgs; [
-            # Rust tooling
-            rust-analyzer
-            rustfmt
-            clippy
-            cargo-watch
-            cargo-audit
+          packages = with pkgs;
+            [
+              # Rust tooling
+              rust-analyzer
+              rustfmt
+              clippy
+              cargo-watch
+              cargo-audit
 
-            # Formatters
-            alejandra # Nix formatter
+              # Formatters
+              alejandra # Nix formatter
 
-            # Build dependencies
-            pkg-config
-            openssl
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            libiconv
-          ];
+              # Build dependencies
+              pkg-config
+              openssl
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              libiconv
+            ];
         };
 
         # Checks for `nix flake check`
