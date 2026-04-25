@@ -1,6 +1,15 @@
 {
   description = "A command line tool with interactive TUI for managing financial investment portfolios written in Rust";
 
+  nixConfig = {
+    extra-substituters = [
+      "https://nix-community.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
@@ -19,7 +28,12 @@
         craneLib = crane.mkLib pkgs;
 
         commonArgs = {
-          src = craneLib.cleanCargoSource ./.;
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              (craneLib.filterCargoSources path type)
+              || (pkgs.lib.hasSuffix ".json" path);
+          };
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [
@@ -43,7 +57,7 @@
           // {
             inherit cargoArtifacts;
 
-            doCheck = false; # Skip tests during build (they require network access)
+            doCheck = false; # Tests are run via the separate portfolio_rs-test check
 
             meta = with pkgs.lib; {
               description = "Command line tool for managing financial investment portfolios";
@@ -80,6 +94,8 @@
             # Build dependencies
             pkg-config
             openssl
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             libiconv
           ];
         };
@@ -97,6 +113,11 @@
           portfolio_rs-fmt = craneLib.cargoFmt {
             inherit (commonArgs) src;
           };
+
+          portfolio_rs-test = craneLib.cargoTest (commonArgs
+            // {
+              inherit cargoArtifacts;
+            });
         };
 
         # Nix formatter for `nix fmt`
