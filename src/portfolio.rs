@@ -4,10 +4,10 @@ use crate::position::get_historic_price;
 use crate::position::PortfolioPosition;
 
 use chrono::prelude::*;
-use eyre::Result;
-use eyre::WrapErr;
 use eyre::bail;
 use eyre::eyre;
+use eyre::Result;
+use eyre::WrapErr;
 use piechart::{Chart, Color};
 
 pub struct Portfolio {
