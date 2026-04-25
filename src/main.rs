@@ -174,7 +174,7 @@ fn store_balance_in_db(portfolio: &Portfolio) -> Result<()> {
     Ok(())
 }
 
-fn open_encrpted_file(filename: String) -> Result<String> {
+fn open_encrypted_file(filename: String) -> Result<String> {
     if filename.ends_with(".gpg") {
         let output = std::process::Command::new("gpg")
             .arg("-d")
@@ -273,7 +273,7 @@ async fn main() -> Result<()> {
         }
 
         let positions_str = if filename.ends_with(".gpg") {
-            open_encrpted_file(filename)?
+            open_encrypted_file(filename)?
         } else {
             read_to_string(&filename)
                 .wrap_err_with(|| format!("failed to read portfolio file: {}", filename))?
@@ -381,7 +381,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::string::ParseError;
 
     #[test]
     fn test_cli() {
@@ -586,8 +585,7 @@ mod tests {
     async fn test_create_live_portfolio() {
         let positions_str = std::fs::read_to_string("example_data.json").unwrap();
         let (portfolio, _network_status) = create_live_portfolio(positions_str).await;
-        let x: Result<Portfolio, ParseError> = Ok(portfolio);
-        assert!(x.is_ok());
+        assert!(!portfolio.positions.is_empty());
     }
 
     #[test]
