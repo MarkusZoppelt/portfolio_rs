@@ -1,4 +1,6 @@
+*.gpg
+.DS_Store
+.direnv/
 /target
 database/
 positions.json
-*.gpg
