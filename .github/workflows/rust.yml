@@ -45,7 +45,7 @@ jobs:
       - name: Check Nix formatting
         run: nix fmt -- --check .
       - name: Check flake
-        run: nix flake check --all-systems --no-build
+        run: nix flake check
       - name: Build with Nix
         run: nix build .#
       - name: Test the binary
