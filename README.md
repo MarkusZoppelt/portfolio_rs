@@ -3,7 +3,13 @@
     <img src="https://github.com/markuszoppelt/portfolio_rs/actions/workflows/rust.yml/badge.svg" alt="build status badge">
 </p>
 
-A command line tool with interactive TUI for managing financial investment portfolios written in Rust.
+Local-first portfolio management for humans and AI agents — written in Rust.
+
+`portfolio_rs` is a CLI + interactive TUI for tracking financial investment
+portfolios, and a toolkit for the AI era: machine-readable investment
+policies, policy-aware reviews, rebalancing simulations, durable financial
+memory (diary, decisions, reports), a portable agent skill, and a local HTTP
+API. It is also a Rust library that GUIs (e.g. a desktop app) can embed.
 
 > _This project is the modern successor of [finance](https://github.com/MarkusZoppelt/finance)._
 
@@ -15,37 +21,139 @@ Install via [pkgx](https://pkgx.sh): `pkgx portfolio_rs`
 
 Install from cargo: `cargo install portfolio_rs`
 
-## Usage
+## Quick Start
 
-### 1. Create your portfolio file
+### Simple mode: a single positions file
 
-Create a JSON file with your portfolio positions.
+Create a JSON file with your portfolio positions (see
+[example data](example_data.json) for the schema), then launch the TUI:
 
-Look at the [example data](example_data.json) for the format and data scheme.
+    portfolio_rs my_positions.json
 
-### 2. Launch the portfolio tool:
+### Workspace mode: a durable finance workspace
 
-**Default: Customizable Interactive TUI** (recommended):
+For the full experience — policies, diary, decisions, and reports — create a
+workspace:
 
-    portfolio_rs [JSON_FILE] [--tab TAB] [--disable COMPONENTS]
+    portfolio_rs init-workspace my-portfolio
+    portfolio_rs policy init --strategy balanced-growth my-portfolio
+    portfolio_rs context my-portfolio/positions.json
 
-You may _optionally_ specify which tab to open at start-up:
+This creates a directory with an `INVESTMENT_POLICY.md` (your financial
+constitution), a machine-readable `portfolio/policy.toml`, folders for diary
+entries, decision records, theses, and reports, agent instruction files
+(`AGENTS.md`, `CLAUDE.md`), and a `.gitignore` that protects your private
+data.
 
-    portfolio_rs [JSON_FILE] --tab overview     # Start on Overview & Allocation tab (default)
-    portfolio_rs [JSON_FILE] --tab balances     # Start on Balances tab
+## Commands
 
-**CLI Commands** (optional):
+| Command | Description |
+|---|---|
+| `portfolio_rs [FILE]` | Interactive TUI (default) |
+| `balances [FILE]` | Balances table with PnL |
+| `allocation [FILE]` | Allocation pie chart and breakdown |
+| `performance [FILE]` | Performance metrics (YTD, total return) |
+| `sort [FILE]` | Positions sorted by value (display only) |
+| `context [FILE]` | Agent-friendly portfolio briefing (Markdown/JSON) |
+| `review [FILE]` | Policy-aware review: drift, violations, actions |
+| `simulate [FILE]` | Rebalancing what-if scenarios (never trades) |
+| `validate [FILE]` | Validate a portfolio JSON file |
+| `policy init/validate` | Create/check a machine-readable `policy.toml` |
+| `decision draft` | Draft a structured decision record |
+| `report weekly` | Generate a weekly Markdown report |
+| `doctor [DIR]` | Workspace health check |
+| `init-workspace [DIR]` | Create a new finance workspace |
+| `agent init/skill` | Agent instructions + portable skill management |
+| `api` | Local HTTP API server |
+| `mcp` | MCP server for agents (experimental preview) |
+| `config` | Show config file location |
+| `components` | List TUI components for `--disable` |
 
-    portfolio_rs balances [JSON_FILE]     # Show balances table
-    portfolio_rs allocation [JSON_FILE]   # Show allocation chart
-    portfolio_rs performance [JSON_FILE]  # Show performance metrics
+If no file is specified, commands use the portfolio file (or workspace) from
+your config. Run `portfolio_rs <COMMAND> --help` for details.
 
-**Configuration:**
+## AI & Agent Integration
 
-    portfolio_rs config                   # Show config file location
-    portfolio_rs components               # Show available components
+`portfolio_rs` is designed to be operated by coding agents and LLMs, locally:
 
-If no file is specified, the tool uses the file from your config. If you need help, try `portfolio_rs --help` for usage information.
+- **Structured output**: `context`, `review`, and `simulate` support
+  `--format json` (camelCase) for scripts and agents, and Markdown for
+  humans and LLM prompts.
+
+      portfolio_rs context positions.json --format json
+      portfolio_rs review positions.json --policy portfolio/policy.toml --format json
+
+- **Machine-readable policy**: `portfolio/policy.toml` encodes your goals,
+  risk profile, target allocations, and constraints. Strategy templates:
+  `balanced-growth`, `capital-preservation`, `aggressive-growth`, `custom`.
+
+- **Portable agent skill**: install the built-in `portfolio-rs`
+  skill into any agent harness that supports skill files (opencode, Claude
+  Code, Cursor, ...):
+
+      portfolio_rs agent skill export ~/.config/opencode/skills
+
+- **Workspace instructions**: `portfolio_rs agent init` creates `AGENTS.md`
+  and `CLAUDE.md` with local paths and safety rules (no trades, no broker
+  interaction, private data stays local).
+
+- **Durable memory**: decisions and reports are plain Markdown files in your
+  workspace — reviewable in six months, greppable forever. Use `--dry-run`
+  to preview any file mutation.
+
+- **MCP server (experimental)**: `portfolio_rs mcp` starts a JSON-RPC-over-
+  stdio preview. Tools are advertised via `tools/list` but currently return
+  pointers to the equivalent CLI commands; a protocol-complete
+  implementation is planned.
+
+## HTTP API
+
+Serve your portfolio to local scripts, agents, and GUIs:
+
+    portfolio_rs api positions.json [--policy portfolio/policy.toml] [--host 127.0.0.1] [--port 3000]
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness check |
+| `GET /api/portfolio` | Full portfolio summary |
+| `GET/POST /api/positions` | List / create positions |
+| `GET/PUT/DELETE /api/positions/:id` | Read / update / delete a position |
+| `GET /api/allocation` | Allocation breakdown |
+| `GET /api/performance` | Performance metrics |
+| `GET /api/context` | Agent briefing (JSON) |
+| `GET /api/review` | Policy review (requires `--policy`) |
+| `GET /api/simulate` | Rebalance simulation (requires `--policy`) |
+| `GET /api/validate` | Portfolio file validation |
+| `GET /api/doctor?dir=DIR` | Workspace health check |
+| `POST /api/refresh` | Force a live quote refresh |
+
+Notes:
+
+- The API has **no authentication** and is intended for **local use only**;
+  binding to a non-loopback host prints a loud warning.
+- Position mutations are persisted back to the portfolio file — except for
+  `.gpg` files, which are never rewritten.
+- Live quotes are cached for a short TTL; `POST /api/refresh` bypasses the
+  cache.
+
+## Library Usage
+
+The crate is also a library: `state::AppState` is an embedding-friendly
+facade used by the HTTP API and external GUIs (e.g. a Tauri desktop app).
+It loads portfolios/workspaces/policies, does position CRUD, and runs every
+analysis (context, review, simulate, doctor, validate, reports) with
+camelCase-serializable DTOs.
+
+```rust
+use portfolio_rs::AppState;
+
+async fn total_value() -> eyre::Result<f64> {
+    let state = AppState::new("EUR".to_string());
+    state.load_file("positions.json").await?;
+    let summary = state.get_portfolio_summary().await;
+    Ok(summary.total_value)
+}
+```
 
 ## TUI Features
 
@@ -55,6 +163,11 @@ The interactive Terminal User Interface (default mode) provides:
 - **Balances Tab**: Detailed table of all positions with amounts, current values, and **edit functionality**
 
 ### TUI Customization
+
+You may optionally specify which tab to open at start-up:
+
+    portfolio_rs [JSON_FILE] --tab overview     # Start on Overview & Allocation tab (default)
+    portfolio_rs [JSON_FILE] --tab balances     # Start on Balances tab
 
 You can disable specific UI components using the `--disable` flag with comma-separated component names:
 
@@ -122,7 +235,10 @@ portfolio_rs --disable asset_class,amount example_data.json
 Upon first run, `portfolio_rs` will create a default config file.
 Use `portfolio_rs config` to show the config file location.
 
-The most useful config entry is `portfolio_file` where you can set the **absolute** path to your data file. This will be used when no file is specified as an argument.
+The most useful config entry is `portfolio_file` where you can set the
+**absolute** path to your data file. This will be used when no file is
+specified as an argument. Workspace users can point `workspace_dir` at their
+workspace instead; the workspace's `positions.json` then takes precedence.
 
 ## Bonus: GPG Encryption
 

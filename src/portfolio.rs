@@ -5,11 +5,10 @@ use crate::position::PortfolioPosition;
 
 use chrono::prelude::*;
 use eyre::bail;
-use eyre::eyre;
 use eyre::Result;
-use eyre::WrapErr;
 use piechart::{Chart, Color};
 
+#[derive(Debug, Clone)]
 pub struct Portfolio {
     pub positions: Vec<PortfolioPosition>,
 }
@@ -46,71 +45,6 @@ impl Portfolio {
             sum += position.get_balance();
         }
         sum
-    }
-
-    // Get the total value of the portfolio at a specific date
-    // TODO: this function is not working as intended and the y_response is often an error
-    pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> Result<f64> {
-        let mut sum = 0.0;
-        let mut errors = Vec::new();
-
-        use futures::future::join_all;
-        let mut cash_sum = 0.0;
-        let mut tasks = Vec::new();
-        let mut positions_with_ticker = Vec::new();
-
-        for position in &self.positions {
-            if let Some(ticker) = position.get_ticker() {
-                positions_with_ticker.push((
-                    ticker,
-                    position.get_amount(),
-                    position
-                        .get_ticker()
-                        .unwrap_or(position.get_name())
-                        .to_string(),
-                ));
-                tasks.push(get_historic_price(ticker, date));
-            } else {
-                cash_sum += position.get_amount();
-            }
-        }
-
-        let results = join_all(tasks).await;
-        for ((_, amount, label), y_response) in positions_with_ticker.into_iter().zip(results) {
-            match y_response {
-                Ok(response) => match response.last_quote() {
-                    Ok(quote) => {
-                        sum += quote.close * amount;
-                    }
-                    Err(e) => {
-                        errors.push(format!("Error getting last quote for {label}: {e}"));
-                        // tolerate partial failure; continue without this ticker
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    let err_str = format!("{e}");
-                    if err_str.contains("Bad Request") {
-                        // Silently skip bad requests to avoid log spam
-                        continue;
-                    }
-                    errors.push(format!(
-                        "Error getting historic price data for {label}: {err_str}"
-                    ));
-                    // tolerate partial failure; continue without this ticker
-                    continue;
-                }
-            }
-        }
-        sum += cash_sum;
-
-        // Return partial aggregates even if some tickers failed
-        // Only error if nothing contributed and there were errors
-        if sum <= 0.0 && !errors.is_empty() {
-            bail!("failed to get historic total value: {}", errors.join("; "));
-        }
-
-        Ok(sum)
     }
 
     // Get the total value of all non-cash (securities) positions at a specific date
@@ -489,7 +423,7 @@ impl Portfolio {
 
         // create a vector and sort it by the %-value of the allocation in descending order
         let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
-        allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         println!("====================================");
         for (asset_class, percentage) in allocation_vec {
@@ -533,47 +467,6 @@ impl Portfolio {
             .draw(&data);
     }
 
-    pub async fn get_performance_data(&self) -> Result<(f64, f64, f64)> {
-        let db = sled::open("database").wrap_err("failed to open database for performance data")?;
-
-        // Yahoo first of the year is YYYY-01-03
-        // SAFETY: These dates are hardcoded and always valid
-        let first_of_the_year = Utc
-            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
-            .single()
-            .ok_or_else(|| eyre!("failed to create first of year date"))?;
-        let first_of_the_month = Utc
-            .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 3, 0, 0, 0)
-            .single()
-            .ok_or_else(|| eyre!("failed to create first of month date"))?;
-
-        let value_at_beginning_of_year = self.get_historic_total_value(first_of_the_year).await?;
-        let value_at_beginning_of_month = self.get_historic_total_value(first_of_the_month).await?;
-
-        let last: f64 = match &db.iter().last() {
-            Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
-            _ => 0.0,
-        };
-
-        let current_value = {
-            let mut securities = 0.0_f64;
-            for p in &self.positions {
-                if p.get_ticker().is_some() {
-                    securities += p.get_balance();
-                }
-            }
-            securities
-        };
-
-        let ytd_performance =
-            (last - value_at_beginning_of_year) / value_at_beginning_of_year * 100.0;
-        let monthly_performance =
-            (last - value_at_beginning_of_month) / value_at_beginning_of_month * 100.0;
-        let recent_performance = (last - current_value) / current_value * 100.0;
-
-        Ok((ytd_performance, monthly_performance, recent_performance))
-    }
-
     fn flow_metrics_since(&self, start: DateTime<Utc>) -> (f64, f64, f64, f64) {
         use crate::position::parse_purchase_date;
         let mut invested = 0.0_f64;
@@ -610,9 +503,15 @@ impl Portfolio {
             ContentArrangement, Table,
         };
 
-        let db = sled::open("database").unwrap();
+        let db = match sled::open("database") {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("Warning: failed to open performance database: {e}");
+                return;
+            }
+        };
 
-        // Reference points
+        // Reference points — Jan 1 and first of month are never ambiguous
         let start_year = Utc
             .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
             .unwrap();
@@ -884,29 +783,6 @@ impl Portfolio {
         }
         if !losers.is_empty() {
             println!("{top_losers}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_get_historic_total_value() {
-        use crate::position::from_string;
-        let positions_str = std::fs::read_to_string("example_data.json").unwrap();
-        let positions = from_string(&positions_str).unwrap();
-        let mut portfolio = Portfolio::new();
-        for p in positions {
-            portfolio.add_position(p);
-        }
-        let date = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        let value = portfolio.get_historic_total_value(date).await;
-        // Should include cash amount directly, and use tickers for others
-        match value {
-            Ok(v) => assert!(v > 0.0),
-            Err(e) => panic!("Error occurred in performance command: {e}"),
         }
     }
 }
