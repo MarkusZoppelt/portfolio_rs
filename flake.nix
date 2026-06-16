@@ -32,7 +32,8 @@
             src = ./.;
             filter = path: type:
               (craneLib.filterCargoSources path type)
-              || (pkgs.lib.hasSuffix ".json" path);
+              || (pkgs.lib.hasSuffix ".json" path)
+              || (pkgs.lib.hasSuffix ".md" path);
           };
           strictDeps = true;
 
@@ -118,6 +119,15 @@
           portfolio_rs-test = craneLib.cargoTest (commonArgs
             // {
               inherit cargoArtifacts;
+              # assert_cmd::cargo_bin resolves the binary via this env var,
+              # which `cargo test` sets but crane's cargoTest does not.
+              # Point it at the Nix-built binary so e2e_offline tests pass.
+              preCheck = ''
+                export CARGO_BIN_EXE_portfolio_rs="${portfolio_rs}/bin/portfolio_rs"
+                # confy writes config to $HOME/.config on startup; give it a
+                # writable home so the sandbox doesn't break every e2e test.
+                export HOME=$(mktemp -d)
+              '';
             });
         };
 

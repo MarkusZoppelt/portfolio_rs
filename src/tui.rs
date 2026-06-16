@@ -1,7 +1,11 @@
+use crate::create_live_portfolio;
 use crate::error::ValidationError;
 use crate::portfolio::Portfolio;
+use crate::position::Purchase;
+use crate::services::portfolio_loader::create_live_portfolio_with_logging;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
 use std::io;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -146,8 +150,8 @@ impl FromStr for Component {
     }
 }
 
-impl std::fmt::Display for Component {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Component {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
 }
@@ -178,7 +182,6 @@ impl DisabledComponents {
         }
     }
 
-    #[cfg(test)]
     pub fn disable_component(&mut self, component: Component) {
         self.disabled.insert(component);
     }
@@ -485,6 +488,7 @@ impl Tab {
         &[Tab::Overview, Tab::Balances]
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "overview" => Some(Tab::Overview),
@@ -750,7 +754,7 @@ impl App {
                 // We need to map from display order (sorted by date) to original order
                 if self.selected_purchase > 0 && self.selected_purchase <= purchases.len() {
                     // Create sorted list to find the actual purchase
-                    let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
+                    let mut purchase_list: Vec<(usize, &Purchase)> =
                         purchases.iter().enumerate().collect();
                     purchase_list.sort_by(|a, b| {
                         let date_a = a.1.date.as_deref().unwrap_or("");
@@ -1109,7 +1113,7 @@ impl App {
                     let portfolio_purchases = position.get_purchases();
 
                     // Create sorted list to find the actual purchase index
-                    let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
+                    let mut purchase_list: Vec<(usize, &Purchase)> =
                         portfolio_purchases.iter().enumerate().collect();
                     purchase_list.sort_by(|a, b| {
                         let date_a = a.1.date.as_deref().unwrap_or("");
@@ -1232,7 +1236,7 @@ pub async fn run_tui(
             let positions_str_current = std::fs::read_to_string(&data_file_path_bg)
                 .unwrap_or_else(|_| positions_str_bg.clone());
             let (mut portfolio, network_status) =
-                crate::create_live_portfolio(positions_str_current).await;
+                create_live_portfolio(positions_str_current).await;
             // Sort in memory for display only
             portfolio.sort_positions_by_value_desc();
             if portfolio_sender.send((portfolio, network_status)).is_err() {
@@ -1253,7 +1257,7 @@ pub async fn run_tui(
                 Err(_) => continue,
             };
             let (mut portfolio, _status) =
-                crate::create_live_portfolio_with_logging(positions_str_current, false).await;
+                create_live_portfolio_with_logging(positions_str_current, false).await;
             // Sort in memory for consistency
             portfolio.sort_positions_by_value_desc();
             // Batch method is much faster (single fetch per ticker)
@@ -1329,8 +1333,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Resul
                                         app.positions_str = new_positions_str.clone();
                                     }
                                     let (mut portfolio, network_status) =
-                                        crate::create_live_portfolio(app.positions_str.clone())
-                                            .await;
+                                        create_live_portfolio(app.positions_str.clone()).await;
                                     // Sort in memory for display only
                                     portfolio.sort_positions_by_value_desc();
                                     // Also recompute weekly historic series immediately (fast batch)
@@ -1396,10 +1399,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Resul
                                                 app.positions_str = new_positions_str;
                                             }
                                             let (mut portfolio, network_status) =
-                                                crate::create_live_portfolio(
-                                                    app.positions_str.clone(),
-                                                )
-                                                .await;
+                                                create_live_portfolio(app.positions_str.clone())
+                                                    .await;
                                             // Sort in memory for display only
                                             portfolio.sort_positions_by_value_desc();
                                             let hist_series =
@@ -1478,10 +1479,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Resul
                                                 app.positions_str = new_positions_str;
                                             }
                                             let (mut portfolio, network_status) =
-                                                crate::create_live_portfolio(
-                                                    app.positions_str.clone(),
-                                                )
-                                                .await;
+                                                create_live_portfolio(app.positions_str.clone())
+                                                    .await;
                                             // Sort in memory for display only
                                             portfolio.sort_positions_by_value_desc();
                                             let hist_series =
@@ -1813,8 +1812,7 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
         items.push(ListItem::new("+ Add New Purchase").style(add_style));
 
         // Sort purchases by date (newest first)
-        let mut purchase_list: Vec<(usize, &crate::position::Purchase)> =
-            purchases.iter().enumerate().collect();
+        let mut purchase_list: Vec<(usize, &Purchase)> = purchases.iter().enumerate().collect();
         purchase_list.sort_by(|a, b| {
             let date_a = a.1.date.as_deref().unwrap_or("");
             let date_b = b.1.date.as_deref().unwrap_or("");
@@ -2922,7 +2920,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfolio, app: &App) {
     let allocation = portfolio.get_allocation();
     let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
-    allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+    allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Detailed allocation list
     let detailed_list: Vec<ListItem> = allocation_vec

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use chrono::prelude::*;
 use eyre::{Result, WrapErr};
 use once_cell::sync::Lazy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
@@ -18,7 +18,7 @@ static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> =
 static HISTORIC_CACHE: Lazy<Mutex<HistoricCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct Purchase {
     // Optional ISO date string (e.g., 2024-01-15)
@@ -29,24 +29,24 @@ pub struct Purchase {
     pub fees: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortfolioPosition {
-    name: Option<String>,
-    ticker: Option<String>,
-    asset_class: String,
-    amount: f64,
+    pub(crate) name: Option<String>,
+    pub(crate) ticker: Option<String>,
+    pub(crate) asset_class: String,
+    pub(crate) amount: f64,
 
-    #[serde(skip_deserializing)]
-    last_spot: f64,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) last_spot: f64,
 
     // Optional list of historical purchases to compute cost basis and PnL
     #[serde(default)]
-    purchases: Vec<Purchase>,
+    pub(crate) purchases: Vec<Purchase>,
 
     // Previous close used to compute daily variation
-    #[serde(skip_deserializing)]
-    previous_close: Option<f64>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) previous_close: Option<f64>,
 }
 
 impl PortfolioPosition {
