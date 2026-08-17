@@ -3820,9 +3820,9 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "yahoo_finance_api"
-version = "4.1.1"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758b66c5f810999dd56d43675a7d6e6c9eea25311aaf79aa4ab6db8cc06ddfef"
+checksum = "60ce7426ec68c09de6668c627c4d535da983a59dbe6ce3feb3eb96bcd2c32baa"
 dependencies = [
  "reqwest",
  "serde",
