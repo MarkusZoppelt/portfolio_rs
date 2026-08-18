@@ -117,7 +117,7 @@ Serve your portfolio to local scripts, agents, and GUIs:
 | `GET /health` | Liveness check |
 | `GET /api/portfolio` | Full portfolio summary |
 | `GET/POST /api/positions` | List / create positions |
-| `GET/PUT/DELETE /api/positions/:id` | Read / update / delete a position |
+| `GET/PUT/DELETE /api/positions/{id}` | Read / update / delete a position |
 | `GET /api/allocation` | Allocation breakdown |
 | `GET /api/performance` | Performance metrics |
 | `GET /api/context` | Agent briefing (JSON) |
