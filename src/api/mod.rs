@@ -125,7 +125,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/portfolio", get(get_portfolio))
         .route("/api/positions", get(get_positions).post(create_position))
         .route(
-            "/api/positions/:id",
+            "/api/positions/{id}",
             get(get_position)
                 .put(update_position)
                 .delete(delete_position),

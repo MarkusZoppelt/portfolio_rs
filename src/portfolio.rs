@@ -133,7 +133,7 @@ impl Portfolio {
 
         let mut table = Table::new();
         table
-            .load_preset(UTF8_FULL)
+            .load_style(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_width(120);
 
@@ -309,7 +309,7 @@ impl Portfolio {
 
             let mut overview = Table::new();
             overview
-                .load_preset(UTF8_FULL)
+                .load_style(UTF8_FULL)
                 .set_content_arrangement(ContentArrangement::Dynamic)
                 .set_width(120)
                 .set_header(vec![
@@ -647,7 +647,7 @@ impl Portfolio {
         let day_pnl_abs = current_value - total_prev_value_for_day;
         let mut overview = Table::new();
         overview
-            .load_preset(UTF8_FULL)
+            .load_style(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_width(120)
             .set_header(vec![
@@ -679,7 +679,7 @@ impl Portfolio {
         // Period returns (market-based)
         let mut periods = Table::new();
         periods
-            .load_preset(UTF8_FULL)
+            .load_style(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_width(120)
             .set_header(vec![
@@ -727,7 +727,7 @@ impl Portfolio {
 
         let mut top_gainers = Table::new();
         top_gainers
-            .load_preset(UTF8_FULL)
+            .load_style(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_width(64)
             .set_header(vec![
@@ -752,7 +752,7 @@ impl Portfolio {
 
         let mut top_losers = Table::new();
         top_losers
-            .load_preset(UTF8_FULL)
+            .load_style(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_width(64)
             .set_header(vec![
