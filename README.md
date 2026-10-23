@@ -72,6 +72,13 @@ data.
 If no file is specified, commands use the portfolio file (or workspace) from
 your config. Run `portfolio_rs <COMMAND> --help` for details.
 
+`performance` period returns (1W, 1M, 3M, 6M, YTD, 1Y) are the market return
+of the ticker positions you hold now, at current quantities, compared like for
+like: cash, ticker-less holdings, unpriced positions, and positions without a
+price at the period start are left out of both sides. Deposits, withdrawals,
+and trades during the period are not accounted for. 1D and "Since" compare
+total portfolio values (including cash).
+
 ## AI & Agent Integration
 
 `portfolio_rs` is designed to be operated by coding agents and LLMs, locally:
