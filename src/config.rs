@@ -207,6 +207,12 @@ impl AppConfig {
         };
     }
 
+    /// Set the LLM API key.
+    ///
+    /// An empty or whitespace-only string is the explicit clear: the stored
+    /// key becomes `None`. A missing or null `llmApiKey` on
+    /// [`crate::state::AppConfigDto`] is not a clear — see
+    /// [`crate::state::AppConfigDto::apply_to`].
     pub fn set_llm_api_key(&mut self, key: impl Into<String>) {
         let key = key.into();
         self.llm_api_key = if key.trim().is_empty() {
