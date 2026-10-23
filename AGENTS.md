@@ -38,6 +38,8 @@ cargo fmt --check          # rustfmt.toml: max_width = 100
   (`src/services/persistence.rs`) — a side effect of running `balances`/TUI locally.
 - `.gpg` portfolio files are decrypted by shelling out to `gpg`; decrypted content must
   never be written to disk.
+- Portfolio writes go through the atomic helper (`src/services/atomic_write.rs`) and keep
+  a single `.bak`.
 - User config is loaded via confy (YAML) from the user config dir; `create_live_portfolio`
   degrades gracefully offline (returns `NetworkStatus`), so most code paths must not
   assume live quotes.

@@ -7,7 +7,6 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -15,6 +14,7 @@ use eyre::{bail, eyre, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::services::atomic_write::write_atomic_with_backup;
 use crate::{
     context::PortfolioContext,
     create_live_portfolio,
@@ -238,7 +238,8 @@ impl AppState {
     /// Persist the current positions back to the original file.
     ///
     /// Refuses to write `.gpg`-backed portfolios: decrypted content must
-    /// never be written to disk.
+    /// never be written to disk. The write is atomic and keeps a single
+    /// `.bak` beside the file.
     pub async fn save(&self) -> Result<()> {
         let path = self
             .file_path
@@ -254,14 +255,10 @@ impl AppState {
             );
         }
         let json = self.positions_json.read().await.clone();
-        // Explicit fsync: this is financial data, so a crash between write
-        // and flush must not leave positions.json truncated or empty.
-        let mut file = std::fs::File::create(&path)
-            .wrap_err_with(|| format!("failed to open portfolio file for writing: {}", path))?;
-        file.write_all(json.as_bytes())
+        // Atomic replace + one backup: a crash must not leave the portfolio
+        // file truncated or empty.
+        write_atomic_with_backup(Path::new(&path), json.as_bytes())
             .wrap_err_with(|| format!("failed to write portfolio file: {}", path))?;
-        file.sync_all()
-            .wrap_err_with(|| format!("failed to flush portfolio file to disk: {}", path))?;
         Ok(())
     }
 
@@ -1040,6 +1037,24 @@ mod tests {
         let err = state.save().await.unwrap_err();
         assert!(err.to_string().contains("encrypted"));
         assert!(!state.can_save().await);
+    }
+
+    #[tokio::test]
+    async fn test_save_writes_atomically_with_one_backup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("positions.json");
+        std::fs::write(&path, b"old").unwrap();
+
+        let state = AppState::new("EUR".to_string());
+        *state.file_path.write().await = Some(path.to_str().unwrap().to_string());
+        *state.positions_json.write().await = "new".to_string();
+        state.save().await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(tmp.path().join("positions.json.bak")).unwrap(),
+            b"old"
+        );
     }
 
     #[tokio::test]

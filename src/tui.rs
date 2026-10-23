@@ -2,11 +2,13 @@ use crate::create_live_portfolio;
 use crate::error::ValidationError;
 use crate::portfolio::Portfolio;
 use crate::position::Purchase;
+use crate::services::atomic_write::write_atomic_with_backup;
 use crate::services::portfolio_loader::create_live_portfolio_with_logging;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::io;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -966,6 +968,15 @@ impl App {
     where
         F: FnOnce(&mut serde_json::Value) -> Result<()>,
     {
+        // Decrypted .gpg portfolios must never be written back to disk.
+        if self.data_file_path.ends_with(".gpg") {
+            bail!(
+                "refusing to overwrite encrypted portfolio file {}: \
+                 writing decrypted data to disk is not supported",
+                self.data_file_path
+            );
+        }
+
         if let Some(portfolio) = &self.portfolio {
             if sorted_position_index >= portfolio.positions.len() {
                 bail!("Invalid sorted position index: {}", sorted_position_index);
@@ -1022,7 +1033,7 @@ impl App {
             let json_string = serde_json::to_string_pretty(&original_data)
                 .wrap_err("failed to serialize portfolio data to JSON")?;
 
-            std::fs::write(&self.data_file_path, &json_string)
+            write_atomic_with_backup(Path::new(&self.data_file_path), json_string.as_bytes())
                 .wrap_err_with(|| format!("failed to write to file: {}", self.data_file_path))?;
 
             Ok(())
