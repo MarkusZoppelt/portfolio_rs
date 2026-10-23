@@ -250,6 +250,15 @@ workspace instead; the workspace's `positions.json` then takes precedence.
 exposes `hasLlmApiKey` instead. To clear a stored key, set it to an empty
 string. A null or omitted key on an update does not wipe it.
 
+`currency` (default `EUR`) is the base currency for totals. Quotes in another
+currency (as reported by Yahoo) are converted with one FX quote per currency,
+e.g. `EURUSD=X`; only the ticker symbol is sent. Prices and average cost are
+shown in the quote currency (e.g. `512.30 USD`); values, invested amounts, and
+totals are in the base currency. Purchase prices are treated as quote-currency
+prices and converted at the current FX rate, so cost basis ignores past FX
+moves. If an FX quote is unavailable, the affected positions are flagged and
+excluded from totals rather than mixed in unconverted.
+
 ## Bonus: GPG Encryption
 
 This tool supports (gpg) encrypted json files.

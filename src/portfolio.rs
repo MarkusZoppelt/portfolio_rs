@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::position::get_historic_price;
-use crate::position::PortfolioPosition;
+use crate::position::{PortfolioPosition, PriceStatus};
 
 use chrono::prelude::*;
 use eyre::bail;
@@ -57,10 +57,18 @@ impl Portfolio {
         let mut positions_with_ticker = Vec::new();
 
         for position in &self.positions {
+            // Unpriced positions are excluded from current totals, so leave
+            // them out of the historic side too.
+            if !position.has_market_price() {
+                continue;
+            }
             if let Some(ticker) = position.get_ticker() {
+                // Historic prices are in the quote currency; convert at the
+                // current FX rate (same approximation as cost basis).
+                let fx = position.fx_rate().unwrap_or(1.0);
                 positions_with_ticker.push((
                     ticker,
-                    position.get_amount(),
+                    position.get_amount() * fx,
                     position
                         .get_ticker()
                         .unwrap_or(position.get_name())
@@ -284,10 +292,20 @@ impl Portfolio {
                 }
             };
 
+            // Show the quote currency whenever it is converted (or cannot be).
+            let price_ccy = match position.price_status() {
+                PriceStatus::FxUnavailable => position.price_currency(),
+                _ if position.fx_rate().is_some() => position.price_currency(),
+                _ => None,
+            };
             let price_str = if is_cash {
                 "-".to_string()
+            } else if position.price_status() == PriceStatus::FxUnavailable && price > 0.0 {
+                format!("{price:.2} {}", price_ccy.unwrap_or_default())
             } else if !position.has_market_price() {
                 "n/a".to_string()
+            } else if let Some(ccy) = price_ccy {
+                format!("{price:.2} {ccy}")
             } else {
                 format!("{price:.2}")
             };
@@ -438,16 +456,29 @@ impl Portfolio {
 
         println!("{table}");
 
-        let missing = self.positions_without_price();
-        if !missing.is_empty() {
-            let labels = missing
-                .iter()
-                .map(|position| position.get_ticker().unwrap_or_else(|| position.get_name()))
-                .collect::<Vec<_>>()
-                .join(", ");
+        let (no_fx, no_price): (Vec<_>, Vec<_>) = self
+            .positions_without_price()
+            .into_iter()
+            .partition(|position| position.price_status() == PriceStatus::FxUnavailable);
+        let label = |position: &&PortfolioPosition| {
+            position
+                .get_ticker()
+                .unwrap_or_else(|| position.get_name())
+                .to_string()
+        };
+        if !no_price.is_empty() {
+            let labels = no_price.iter().map(label).collect::<Vec<_>>().join(", ");
             println!(
                 "Warning: {} position(s) without market price excluded from totals: {}",
-                missing.len(),
+                no_price.len(),
+                labels
+            );
+        }
+        if !no_fx.is_empty() {
+            let labels = no_fx.iter().map(label).collect::<Vec<_>>().join(", ");
+            println!(
+                "Warning: {} position(s) without FX rate to the base currency excluded from totals: {}",
+                no_fx.len(),
                 labels
             );
         }

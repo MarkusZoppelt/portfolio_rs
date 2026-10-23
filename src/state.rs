@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::{
     context::PortfolioContext,
-    create_live_portfolio,
+    create_live_portfolio_in,
     decision::generate_decision_draft,
     doctor::{check_workspace, WorkspaceHealth},
     document::write_dated_document,
@@ -208,7 +208,8 @@ impl AppState {
     /// Fetch live quotes, update the network status, and refill the cache.
     async fn fetch_portfolio(&self) -> Portfolio {
         let json = self.positions_json.read().await.clone();
-        let (portfolio, status) = create_live_portfolio(json).await;
+        let currency = self.currency().await;
+        let (portfolio, status) = create_live_portfolio_in(json, &currency, false).await;
         *self.network_status.write().await = status;
         *self.portfolio_cache.write().await = Some(CachedPortfolio {
             portfolio: portfolio.clone(),
@@ -231,8 +232,12 @@ impl AppState {
     }
 
     pub async fn set_currency(&self, currency: String) {
-        let mut cur = self.currency.write().await;
-        *cur = currency;
+        {
+            let mut cur = self.currency.write().await;
+            *cur = currency;
+        }
+        // Cached totals were converted to the old base currency.
+        self.invalidate_portfolio_cache().await;
     }
 
     /// Persist the current positions back to the original file.
@@ -489,6 +494,8 @@ impl AppState {
             amount: req.amount,
             last_spot: 0.0,
             price_status: crate::position::PriceStatus::Live,
+            price_currency: None,
+            fx_rate: None,
             purchases: req
                 .purchases
                 .into_iter()

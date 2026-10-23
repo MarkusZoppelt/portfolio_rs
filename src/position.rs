@@ -40,6 +40,43 @@ pub enum PriceStatus {
     #[default]
     Live,
     Unavailable,
+    /// A quote exists, but it is in a foreign currency and no FX rate to the
+    /// base currency could be loaded. Excluded from totals, never mixed in.
+    FxUnavailable,
+}
+
+/// Yahoo FX symbol and scale needed to convert `quote_ccy` into `base`.
+///
+/// An empty symbol with a scale (e.g. base GBP, quote `GBp`) means "no FX
+/// request, multiply by the scale".
+///
+/// Returns `None` when no conversion is needed (same currency, compared
+/// case-insensitively after normalising minor units, or empty input). Otherwise
+/// returns `("{BASE}{QUOTE}=X", scale)`; that symbol's price is QUOTE per 1 BASE,
+/// so the position's rate is `scale / fx_price` base units per quote unit.
+/// Yahoo minor units are normalised: `GBp`/`GBX` -> GBP, `ZAc` -> ZAR,
+/// `ILA` -> ILS, each with scale 0.01.
+pub fn fx_symbol(base: &str, quote_ccy: &str) -> Option<(String, f64)> {
+    let base = base.trim().to_uppercase();
+    let quote_ccy = quote_ccy.trim();
+    if base.is_empty() || quote_ccy.is_empty() {
+        return None;
+    }
+    let (major, scale) = match quote_ccy {
+        "GBp" | "GBX" | "GBx" => ("GBP".to_string(), 0.01),
+        "ZAc" | "ZAC" => ("ZAR".to_string(), 0.01),
+        "ILA" => ("ILS".to_string(), 0.01),
+        other => (other.to_uppercase(), 1.0),
+    };
+    if major == base {
+        if scale == 1.0 {
+            return None;
+        }
+        // Same currency in minor units: empty symbol means no FX request,
+        // the rate is just the scale.
+        return Some((String::new(), scale));
+    }
+    Some((format!("{base}{major}=X"), scale))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +93,16 @@ pub struct PortfolioPosition {
     // Not persisted. Defaults to Live; ticker positions are unpriced until a quote lands.
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) price_status: PriceStatus,
+
+    // Not persisted. Currency of `last_spot` as reported by Yahoo (None = unknown,
+    // treated as the base currency).
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) price_currency: Option<String>,
+
+    // Not persisted. Base-currency units per 1 unit of `price_currency`.
+    // None means no conversion (same currency or unknown).
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) fx_rate: Option<f64>,
 
     // Optional list of historical purchases to compute cost basis and PnL
     #[serde(default)]
@@ -87,8 +134,8 @@ impl PortfolioPosition {
 
     pub fn get_balance(&self) -> f64 {
         if let Some(_ticker) = &self.ticker {
-            // An unavailable quote is not a real zero-value holding. Never guess.
-            if self.price_status == PriceStatus::Unavailable {
+            // An unavailable quote or FX rate is not a real zero-value holding. Never guess.
+            if self.price_status != PriceStatus::Live {
                 return 0.0;
             }
             // Use purchased quantity if available, otherwise fall back to amount
@@ -97,7 +144,7 @@ impl PortfolioPosition {
             } else {
                 self.amount
             };
-            self.last_spot * quantity
+            self.last_spot * quantity * self.fx_factor()
         } else {
             self.amount
         }
@@ -123,8 +170,23 @@ impl PortfolioPosition {
         self.amount = amount;
     }
 
+    /// Latest price in the quote currency ([`Self::price_currency`]), not converted.
     pub fn market_price(&self) -> f64 {
         self.last_spot
+    }
+
+    /// Currency of [`Self::market_price`] as reported by the quote, if known.
+    pub fn price_currency(&self) -> Option<&str> {
+        self.price_currency.as_deref()
+    }
+
+    /// Base-currency units per 1 unit of the quote currency, if a conversion applies.
+    pub fn fx_rate(&self) -> Option<f64> {
+        self.fx_rate
+    }
+
+    fn fx_factor(&self) -> f64 {
+        self.fx_rate.unwrap_or(1.0)
     }
 
     pub fn price_status(&self) -> PriceStatus {
@@ -140,10 +202,13 @@ impl PortfolioPosition {
         self.price_status == PriceStatus::Live && self.last_spot > 0.0
     }
 
+    /// Market value in the base currency.
     pub fn market_value(&self) -> f64 {
         self.get_balance()
     }
 
+    /// Average purchase cost per unit in the quote currency (shown next to
+    /// [`Self::market_price`]).
     pub fn average_cost(&self) -> Option<f64> {
         if self.purchases.is_empty() {
             return None;
@@ -168,6 +233,11 @@ impl PortfolioPosition {
         }
     }
 
+    /// Total invested amount in the base currency.
+    ///
+    /// Purchase prices are interpreted as quote-currency prices (as filled from
+    /// Yahoo history) and converted at the CURRENT FX rate. This is an
+    /// approximation: it ignores FX moves since purchase.
     pub fn total_invested(&self) -> Option<f64> {
         if self.purchases.is_empty() {
             return None;
@@ -179,7 +249,8 @@ impl PortfolioPosition {
             .filter_map(|p| p.price.map(|price| (price, p)))
             .filter(|(price, _)| *price > 0.0)
             .map(|(price, p)| p.quantity * price + p.fees.unwrap_or(0.0))
-            .sum::<f64>();
+            .sum::<f64>()
+            * self.fx_factor();
 
         if invested > 0.0 {
             Some(invested)
@@ -243,6 +314,8 @@ impl PortfolioPosition {
             purchases: Vec::new(),
             previous_close: None,
             price_status,
+            price_currency: None,
+            fx_rate: None,
         }
     }
 }
@@ -409,6 +482,14 @@ fn usable_close(quote: &yahoo::YResponse) -> Option<f64> {
     None
 }
 
+/// Latest positive close for `symbol` (cached quote lookup; only the symbol is sent).
+pub(crate) async fn latest_close(symbol: &str) -> Option<f64> {
+    get_quote_price(symbol)
+        .await
+        .ok()
+        .and_then(|quote| usable_close(&quote))
+}
+
 /// Apply a quote lookup to `position` without dropping it.
 ///
 /// `Some(close)` with `close > 0` marks the position [`PriceStatus::Live`].
@@ -438,10 +519,14 @@ pub async fn handle_position(
 ) -> Result<PortfolioPosition, yahoo::YahooError> {
     if let Some(ticker_owned) = position.ticker.clone() {
         let ticker = ticker_owned.as_str();
-        let close = match get_quote_price(ticker).await {
-            Ok(quote) => usable_close(&quote),
-            Err(_) => None,
+        let (close, currency) = match get_quote_price(ticker).await {
+            Ok(quote) => (
+                usable_close(&quote),
+                quote.metadata().ok().and_then(|m| m.currency),
+            ),
+            Err(_) => (None, None),
         };
+        position.price_currency = currency;
         apply_quote_result(position, close);
 
         // Quote-dependent enrichment is useless without a live price, and a
@@ -529,6 +614,8 @@ mod tests {
             amount: 1.0,
             last_spot: 0.0,
             price_status: PriceStatus::Live,
+            price_currency: None,
+            fx_rate: None,
             purchases: vec![],
             previous_close: None,
         };
@@ -562,6 +649,8 @@ mod tests {
             amount: 4.0,
             last_spot: 500.0,
             price_status: PriceStatus::Live,
+            price_currency: None,
+            fx_rate: None,
             purchases: vec![Purchase {
                 date: Some("2024-01-15".to_string()),
                 quantity: 4.0,
@@ -642,5 +731,65 @@ mod tests {
         assert_eq!(parsed.price_status(), PriceStatus::Live);
         assert_eq!(parsed.get_ticker(), Some("SPY"));
         assert_eq!(parsed.last_spot, 0.0);
+    }
+
+    #[test]
+    fn test_fx_symbol_cases() {
+        assert_eq!(fx_symbol("EUR", "EUR"), None);
+        assert_eq!(fx_symbol("eur", "EUR"), None);
+        assert_eq!(fx_symbol("EUR", ""), None);
+        assert_eq!(fx_symbol("EUR", "USD"), Some(("EURUSD=X".to_string(), 1.0)));
+        assert_eq!(
+            fx_symbol("EUR", "GBp"),
+            Some(("EURGBP=X".to_string(), 0.01))
+        );
+        assert_eq!(
+            fx_symbol("EUR", "GBX"),
+            Some(("EURGBP=X".to_string(), 0.01))
+        );
+        assert_eq!(
+            fx_symbol("USD", "ZAc"),
+            Some(("USDZAR=X".to_string(), 0.01))
+        );
+        assert_eq!(
+            fx_symbol("USD", "ILA"),
+            Some(("USDILS=X".to_string(), 0.01))
+        );
+        // Same currency in minor units: no FX request, only the scale.
+        assert_eq!(fx_symbol("GBP", "GBp"), Some((String::new(), 0.01)));
+    }
+
+    #[test]
+    fn test_fx_rate_converts_balance_and_invested_not_price() {
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 3.0, 100.0, PriceStatus::Live);
+        position.price_currency = Some("USD".to_string());
+        position.fx_rate = Some(0.5);
+        position.purchases = vec![Purchase {
+            date: None,
+            quantity: 3.0,
+            price: Some(80.0),
+            fees: None,
+        }];
+        assert_eq!(position.market_price(), 100.0);
+        assert_eq!(position.get_balance(), 150.0);
+        assert_eq!(position.average_cost(), Some(80.0));
+        assert_eq!(position.total_invested(), Some(120.0));
+        assert_eq!(position.pnl(), Some(30.0));
+    }
+
+    #[test]
+    fn test_fx_unavailable_has_no_market_value() {
+        let mut position = PortfolioPosition::for_test(
+            Some("FAKEUS"),
+            "Stocks",
+            3.0,
+            100.0,
+            PriceStatus::FxUnavailable,
+        );
+        position.price_currency = Some("USD".to_string());
+        assert!(!position.has_market_price());
+        assert_eq!(position.get_balance(), 0.0);
+        assert_eq!(position.pnl(), None);
     }
 }

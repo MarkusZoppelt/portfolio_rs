@@ -48,7 +48,9 @@ pub use policy::Policy;
 pub use portfolio::Portfolio;
 pub use position::{from_string, PortfolioPosition, Purchase};
 pub use review::Review;
-pub use services::portfolio_loader::{create_live_portfolio, load_portfolio_file};
+pub use services::portfolio_loader::{
+    create_live_portfolio, create_live_portfolio_in, load_portfolio_file,
+};
 pub use simulate::{simulate_rebalance, RebalanceSimulation};
 pub use state::AppState;
 pub use tui::NetworkStatus;
