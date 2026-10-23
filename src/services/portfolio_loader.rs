@@ -2,7 +2,13 @@ use eyre::{bail, Result, WrapErr};
 use std::fs::read_to_string;
 
 use crate::portfolio::Portfolio;
-use crate::position::{apply_quote_result, from_string, handle_position, PriceStatus};
+use std::collections::{HashMap, HashSet};
+
+use crate::config::configured_base_currency;
+use crate::position::{
+    apply_quote_result, from_string, fx_symbol, handle_position, latest_close, PortfolioPosition,
+    PriceStatus,
+};
 use crate::tui::NetworkStatus;
 
 /// Read a plaintext file or decrypt a `.gpg` file.
@@ -41,13 +47,35 @@ pub fn load_portfolio_file(filename: &str) -> Result<String> {
 }
 
 /// Returns a portfolio with the latest quotes from JSON data.
+///
+/// Values are converted to the configured base currency (read-only; see
+/// [`configured_base_currency`]).
 pub async fn create_live_portfolio(positions_str: String) -> (Portfolio, NetworkStatus) {
     create_live_portfolio_with_logging(positions_str, false).await
 }
 
 /// Returns a portfolio with the latest quotes, with optional per-position error logging.
+///
+/// Values are converted to the configured base currency (read-only; see
+/// [`configured_base_currency`]).
 pub async fn create_live_portfolio_with_logging(
     positions_str: String,
+    log_errors: bool,
+) -> (Portfolio, NetworkStatus) {
+    let base_currency = configured_base_currency();
+    create_live_portfolio_in(positions_str, &base_currency, log_errors).await
+}
+
+/// Returns a portfolio with the latest quotes, with values converted to
+/// `base_currency`.
+///
+/// Positions quoted in another currency are converted with one Yahoo FX quote
+/// per currency (e.g. `EURUSD=X`; only the ticker symbol is sent). If that FX
+/// quote fails, those positions become [`PriceStatus::FxUnavailable`]: kept,
+/// flagged, and excluded from totals. Currencies are never mixed silently.
+pub async fn create_live_portfolio_in(
+    positions_str: String,
+    base_currency: &str,
     log_errors: bool,
 ) -> (Portfolio, NetworkStatus) {
     let positions = match from_string(&positions_str) {
@@ -101,15 +129,70 @@ pub async fn create_live_portfolio_with_logging(
         NetworkStatus::Partial
     };
 
+    // FX after network status: a missing FX rate is reported separately.
+    let symbols: HashSet<String> = portfolio
+        .positions
+        .iter()
+        .filter(|p| p.price_status() == PriceStatus::Live)
+        .filter_map(|p| p.price_currency())
+        .filter_map(|ccy| fx_symbol(base_currency, ccy))
+        .map(|(symbol, _)| symbol)
+        .filter(|symbol| !symbol.is_empty())
+        .collect();
+    let mut fx_prices = HashMap::new();
+    for symbol in symbols {
+        let price = latest_close(&symbol).await;
+        if price.is_none() && log_errors {
+            eprintln!("Warning: no FX rate {symbol}; affected positions excluded from totals");
+        }
+        fx_prices.insert(symbol, price);
+    }
+    for position in &mut portfolio.positions {
+        apply_fx(position, base_currency, &fx_prices);
+    }
+
     if log_errors {
         for position in portfolio.positions_without_price() {
             if let Some(ticker) = position.get_ticker() {
-                eprintln!("Warning: no market price for {ticker}; position excluded from totals");
+                if position.price_status() == PriceStatus::Unavailable {
+                    eprintln!(
+                        "Warning: no market price for {ticker}; position excluded from totals"
+                    );
+                }
             }
         }
     }
 
     (portfolio, network_status)
+}
+
+/// Set `fx_rate` (or [`PriceStatus::FxUnavailable`]) from pre-fetched FX prices.
+///
+/// `fx_prices` maps Yahoo FX symbols to their latest price (QUOTE per 1 BASE),
+/// `None` when the lookup failed. Pure, so it is testable offline.
+pub(crate) fn apply_fx(
+    position: &mut PortfolioPosition,
+    base_currency: &str,
+    fx_prices: &HashMap<String, Option<f64>>,
+) {
+    position.fx_rate = None;
+    if position.price_status != PriceStatus::Live {
+        return;
+    }
+    let Some(ccy) = position.price_currency.as_deref() else {
+        return;
+    };
+    let Some((symbol, scale)) = fx_symbol(base_currency, ccy) else {
+        return;
+    };
+    if symbol.is_empty() {
+        position.fx_rate = Some(scale);
+        return;
+    }
+    match fx_prices.get(&symbol).copied().flatten() {
+        Some(price) if price > 0.0 && price.is_finite() => position.fx_rate = Some(scale / price),
+        _ => position.price_status = PriceStatus::FxUnavailable,
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +206,81 @@ mod tests {
         let positions_str = read_to_string("example_data.json").unwrap();
         let (portfolio, _network_status) = create_live_portfolio(positions_str).await;
         assert!(!portfolio.positions.is_empty());
+    }
+
+    fn usd_position() -> PortfolioPosition {
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 2.0, 100.0, PriceStatus::Live);
+        position.price_currency = Some("USD".to_string());
+        position
+    }
+
+    #[test]
+    fn test_apply_fx_converts_foreign_position_and_total() {
+        let mut fx = HashMap::new();
+        fx.insert("EURUSD=X".to_string(), Some(2.0));
+        let mut position = usd_position();
+        apply_fx(&mut position, "EUR", &fx);
+        assert_eq!(position.fx_rate(), Some(0.5));
+        assert_eq!(position.price_status(), PriceStatus::Live);
+
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(position);
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            50.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        // 2 * 100 USD * 0.5 EUR/USD + 50 EUR cash
+        assert_eq!(portfolio.get_total_value(), 150.0);
+    }
+
+    #[test]
+    fn test_apply_fx_missing_rate_flags_and_excludes() {
+        let mut fx = HashMap::new();
+        fx.insert("EURUSD=X".to_string(), None);
+        let mut failed = usd_position();
+        apply_fx(&mut failed, "EUR", &fx);
+        assert_eq!(failed.price_status(), PriceStatus::FxUnavailable);
+
+        let mut not_fetched = usd_position();
+        apply_fx(&mut not_fetched, "EUR", &HashMap::new());
+        assert_eq!(not_fetched.price_status(), PriceStatus::FxUnavailable);
+
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(failed);
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            50.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        assert_eq!(portfolio.get_total_value(), 50.0);
+        assert_eq!(portfolio.positions_without_price().len(), 1);
+    }
+
+    #[test]
+    fn test_apply_fx_same_or_unknown_currency_is_unchanged() {
+        let fx = HashMap::new();
+        let mut same = usd_position();
+        same.price_currency = Some("EUR".to_string());
+        apply_fx(&mut same, "EUR", &fx);
+        assert_eq!(same.fx_rate(), None);
+        assert_eq!(same.get_balance(), 200.0);
+
+        let mut unknown = usd_position();
+        unknown.price_currency = None;
+        apply_fx(&mut unknown, "EUR", &fx);
+        assert_eq!(unknown.price_status(), PriceStatus::Live);
+        assert_eq!(unknown.get_balance(), 200.0);
+
+        let mut pence = usd_position();
+        pence.price_currency = Some("GBp".to_string());
+        apply_fx(&mut pence, "GBP", &fx);
+        assert_eq!(pence.fx_rate(), Some(0.01));
+        assert_eq!(pence.get_balance(), 2.0);
     }
 }

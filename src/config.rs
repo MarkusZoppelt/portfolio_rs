@@ -82,6 +82,24 @@ impl Default for AppConfig {
     }
 }
 
+/// Configured base currency, read without side effects.
+///
+/// Unlike [`AppConfig::load`], this never creates, migrates, or writes the
+/// config file. Returns `"EUR"` when no config file exists or it cannot be read.
+pub fn configured_base_currency() -> String {
+    const DEFAULT: &str = "EUR";
+    let Ok(path) = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME) else {
+        return DEFAULT.to_string();
+    };
+    if !path.is_file() {
+        return DEFAULT.to_string();
+    }
+    match confy::load_path::<AppConfig>(&path) {
+        Ok(cfg) if !cfg.currency.trim().is_empty() => cfg.currency,
+        _ => DEFAULT.to_string(),
+    }
+}
+
 impl AppConfig {
     /// Load the config from disk, migrating from older formats if needed.
     pub fn load() -> Result<Self> {

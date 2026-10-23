@@ -5,6 +5,7 @@ use eyre::{eyre, Result};
 use serde::Serialize;
 
 use crate::portfolio::Portfolio;
+use crate::position::PriceStatus;
 
 const SINGLE_POSITION_CONCENTRATION_THRESHOLD: f64 = 25.0;
 const ASSET_CLASS_CONCENTRATION_THRESHOLD: f64 = 60.0;
@@ -119,7 +120,13 @@ impl PortfolioContext {
                 ));
             }
 
-            if !position.has_market_price() {
+            if position.price_status() == PriceStatus::FxUnavailable {
+                data_quality_flags.push(format!(
+                    "No FX rate from {} to the base currency for {}; position excluded from totals.",
+                    position.price_currency().unwrap_or("?"),
+                    position.get_name()
+                ));
+            } else if !position.has_market_price() {
                 data_quality_flags.push(format!(
                     "No current market price for {}; position excluded from totals.",
                     position.get_name()

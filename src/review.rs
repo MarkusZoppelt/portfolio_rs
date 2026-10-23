@@ -1,5 +1,6 @@
 use crate::policy::Policy;
 use crate::portfolio::Portfolio;
+use crate::position::PriceStatus;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -158,7 +159,7 @@ impl Review {
             }
         }
 
-        let data_quality = check_data_quality(portfolio);
+        let data_quality = check_data_quality(portfolio, currency);
         for issue in &data_quality {
             findings.push(Finding {
                 severity: issue.severity.clone(),
@@ -355,7 +356,7 @@ fn check_constraints(
     checks
 }
 
-fn check_data_quality(portfolio: &Portfolio) -> Vec<DataQualityIssue> {
+fn check_data_quality(portfolio: &Portfolio, base_currency: &str) -> Vec<DataQualityIssue> {
     let mut issues = Vec::new();
 
     for position in &portfolio.positions {
@@ -379,8 +380,18 @@ fn check_data_quality(portfolio: &Portfolio) -> Vec<DataQualityIssue> {
             });
         }
 
-        // Missing market price (excluded from totals; never guessed)
-        if !position.has_market_price() {
+        // Missing market price or FX rate (excluded from totals; never guessed)
+        if position.price_status() == PriceStatus::FxUnavailable {
+            issues.push(DataQualityIssue {
+                severity: Severity::Warning,
+                position: position.get_name().to_string(),
+                issue: format!(
+                    "No FX rate for {} -> {} — excluded from totals",
+                    position.price_currency().unwrap_or("?"),
+                    base_currency
+                ),
+            });
+        } else if !position.has_market_price() {
             issues.push(DataQualityIssue {
                 severity: Severity::Warning,
                 position: position.get_name().to_string(),
@@ -497,5 +508,29 @@ mod tests {
         assert_eq!(price_issues.len(), 1);
         assert_eq!(price_issues[0].position, "SPY");
         assert!(price_issues[0].issue.contains("excluded from totals"));
+    }
+
+    #[test]
+    fn test_data_quality_reports_missing_fx_rate() {
+        let mut position = PortfolioPosition::for_test(
+            Some("FAKEUS"),
+            "Stocks",
+            1.0,
+            100.0,
+            PriceStatus::FxUnavailable,
+        );
+        position.price_currency = Some("USD".to_string());
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(position);
+
+        let review = Review::from_portfolio_and_policy(&portfolio, &create_test_policy(), "EUR");
+        let issues: Vec<_> = review
+            .data_quality
+            .iter()
+            .map(|issue| issue.issue.as_str())
+            .collect();
+        assert!(issues.contains(&"No FX rate for USD -> EUR — excluded from totals"));
+        assert!(!issues.iter().any(|issue| issue.contains("No market price")));
+        assert_eq!(review.portfolio_value, 0.0);
     }
 }
