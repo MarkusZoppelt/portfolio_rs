@@ -47,70 +47,77 @@ impl Portfolio {
         sum
     }
 
-    // Get the total value of all non-cash (securities) positions at a specific date
+    /// Positions that count towards market (period) returns: ticker holdings
+    /// with a current market price. Cash and ticker-less holdings are excluded.
+    fn market_priced_securities(&self) -> impl Iterator<Item = &PortfolioPosition> {
+        self.positions
+            .iter()
+            .filter(|position| position.get_ticker().is_some() && position.has_market_price())
+    }
+
+    /// Current base-currency value of [`Self::market_priced_securities`].
+    pub fn current_securities_value(&self) -> f64 {
+        self.market_priced_securities()
+            .map(PortfolioPosition::get_balance)
+            .sum()
+    }
+
+    /// Value of the currently held, priced ticker positions at `date`, at
+    /// current quantities and the current FX rate.
     pub async fn get_historic_securities_value(&self, date: DateTime<Utc>) -> Result<f64> {
-        let mut sum = 0.0;
-        let mut errors = Vec::new();
+        Ok(self.historic_and_current_securities_value(date).await?.0)
+    }
 
+    /// `(historic, current)` value of the same set of positions: only
+    /// positions that have both a current market price and a historic close
+    /// at `date` are included on either side, so the two are like for like.
+    pub async fn historic_and_current_securities_value(
+        &self,
+        date: DateTime<Utc>,
+    ) -> Result<(f64, f64)> {
         use futures::future::join_all;
-        let mut tasks = Vec::new();
-        let mut positions_with_ticker = Vec::new();
 
-        for position in &self.positions {
-            // Unpriced positions are excluded from current totals, so leave
-            // them out of the historic side too.
-            if !position.has_market_price() {
-                continue;
-            }
-            if let Some(ticker) = position.get_ticker() {
-                // Historic prices are in the quote currency; convert at the
-                // current FX rate (same approximation as cost basis).
-                let fx = position.fx_rate().unwrap_or(1.0);
-                positions_with_ticker.push((
-                    ticker,
-                    position.get_amount() * fx,
-                    position
-                        .get_ticker()
-                        .unwrap_or(position.get_name())
-                        .to_string(),
-                ));
-                tasks.push(get_historic_price(ticker, date));
-            }
-        }
-
+        let positions: Vec<&PortfolioPosition> = self.market_priced_securities().collect();
+        let tasks = positions
+            .iter()
+            .filter_map(|position| position.get_ticker())
+            .map(|ticker| get_historic_price(ticker, date));
         let results = join_all(tasks).await;
-        for ((_, amount, label), y_response) in positions_with_ticker.into_iter().zip(results) {
-            match y_response {
+
+        let mut errors = Vec::new();
+        let mut closes = Vec::with_capacity(positions.len());
+        for (position, y_response) in positions.iter().zip(results) {
+            let label = position.get_ticker().unwrap_or(position.get_name());
+            let close = match y_response {
                 Ok(response) => match response.last_quote() {
-                    Ok(quote) => {
-                        sum += quote.close * amount;
-                    }
+                    Ok(quote) => Some(quote.close),
                     Err(e) => {
                         errors.push(format!("Error getting last quote for {label}: {e}"));
-                        continue;
+                        None
                     }
                 },
                 Err(e) => {
                     let err_str = format!("{e}");
-                    if err_str.contains("Bad Request") {
-                        continue;
+                    // Typically: not listed yet at `date`.
+                    if !err_str.contains("Bad Request") {
+                        errors.push(format!(
+                            "Error getting historic price data for {label}: {err_str}"
+                        ));
                     }
-                    errors.push(format!(
-                        "Error getting historic price data for {label}: {err_str}"
-                    ));
-                    continue;
+                    None
                 }
-            }
+            };
+            closes.push(close);
         }
 
-        if sum <= 0.0 && !errors.is_empty() {
+        let (historic, current) = like_for_like_values(positions.into_iter().zip(closes));
+        if historic <= 0.0 && !errors.is_empty() {
             bail!(
                 "failed to get historic securities value: {}",
                 errors.join("; ")
             );
         }
-
-        Ok(sum)
+        Ok((historic, current))
     }
 
     pub fn positions_without_price(&self) -> Vec<&PortfolioPosition> {
@@ -602,7 +609,8 @@ impl Portfolio {
             0.0
         };
 
-        // Daily aggregated change using previous close (cash has no daily variation)
+        // 1D: whole priced portfolio (incl. cash) vs. its previous-close value;
+        // both sides contain the same positions, cash at an unchanged value.
         let mut total_prev_value_for_day = 0.0_f64;
         for position in &self.positions {
             let value = position.get_balance();
@@ -622,15 +630,10 @@ impl Portfolio {
             0.0
         };
 
-        // Market-based returns computed on securities only (exclude cash)
-        let ytd_market = match self.get_historic_securities_value(start_year).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
-        };
-        let _mtd_market = match self.get_historic_securities_value(start_month).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
-        };
+        // Period returns (1W..1Y, YTD): market return of the currently held,
+        // priced ticker positions at current quantities and FX. Cash and
+        // ticker-less holdings are excluded on both sides, and deposits,
+        // withdrawals and trades during the period are not accounted for.
         let now = Utc::now();
         let start_week = now - chrono::Duration::days(7);
         let start_1m_roll = now - chrono::Duration::days(30);
@@ -638,25 +641,26 @@ impl Portfolio {
         let start_6m_roll = now - chrono::Duration::days(182);
         let start_1y_roll = now - chrono::Duration::days(365);
 
-        let w1_market = match self.get_historic_securities_value(start_week).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
-        };
-        let m1_market = match self.get_historic_securities_value(start_1m_roll).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
-        };
-        let m3_market = match self.get_historic_securities_value(start_3m_roll).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
-        };
-        let m6_market = match self.get_historic_securities_value(start_6m_roll).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
-        };
-        let y1_market = match self.get_historic_securities_value(start_1y_roll).await {
-            Ok(v) if v > 0.0 => Some((current_value - v) / v * 100.0),
-            _ => None,
+        let mut market_returns = Vec::new();
+        for start in [
+            start_week,
+            start_1m_roll,
+            start_3m_roll,
+            start_6m_roll,
+            start_year,
+            start_1y_roll,
+        ] {
+            market_returns.push(
+                match self.historic_and_current_securities_value(start).await {
+                    Ok((historic, current)) => period_return_percent(current, historic),
+                    Err(_) => None,
+                },
+            );
+        }
+        let [w1_market, m1_market, m3_market, m6_market, ytd_market, y1_market] =
+            market_returns[..]
+        else {
+            unreachable!("six periods requested")
         };
 
         // Flow-based (our data) YTD / MTD and rolling periods
@@ -667,7 +671,8 @@ impl Portfolio {
         let (_m6_invested, _m6_value, _m6_pnl, _m6_pct) = self.flow_metrics_since(start_6m_roll);
         let (_y1_invested, _y1_value, _y1_pnl, _y1_pct) = self.flow_metrics_since(start_1y_roll);
 
-        // Since last balance check from DB
+        // "Since": total (incl. cash) vs. the last stored total balance; both
+        // are totals, but deposits and withdrawals in between are not accounted for.
         let last_db: f64 = match &db.iter().last() {
             Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
             _ => 0.0,
@@ -854,6 +859,34 @@ impl Portfolio {
     }
 }
 
+/// Sum `(historic, current)` base-currency values over positions paired with
+/// their historic close (quote currency). Positions without a positive close
+/// are left out of BOTH sums. Historic closes use current quantity and the
+/// current FX rate.
+fn like_for_like_values<'a>(
+    pairs: impl IntoIterator<Item = (&'a PortfolioPosition, Option<f64>)>,
+) -> (f64, f64) {
+    let mut historic = 0.0;
+    let mut current = 0.0;
+    for (position, close) in pairs {
+        let Some(close) = close.filter(|c| *c > 0.0) else {
+            continue;
+        };
+        historic += close * position.get_amount() * position.fx_rate().unwrap_or(1.0);
+        current += position.get_balance();
+    }
+    (historic, current)
+}
+
+/// Percentage return from `historic` to `current`; `None` if `historic <= 0`.
+pub fn period_return_percent(current: f64, historic: f64) -> Option<f64> {
+    if historic > 0.0 && historic.is_finite() && current.is_finite() {
+        Some((current - historic) / historic * 100.0)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +932,55 @@ mod tests {
         ));
         assert_eq!(only_missing.get_total_value(), 0.0);
         assert!(only_missing.get_allocation().is_empty());
+    }
+
+    #[test]
+    fn period_return_compares_like_with_like() {
+        // Fake data: 1000 cash + 10 units of a ticker now at 110 (was 100).
+        let security =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 10.0, 110.0, PriceStatus::Live);
+        let cash = PortfolioPosition::for_test(None, "Cash", 1000.0, 0.0, PriceStatus::Live);
+        let unpriced =
+            PortfolioPosition::for_test(Some("GONE"), "Stocks", 5.0, 0.0, PriceStatus::Unavailable);
+        let unlisted =
+            PortfolioPosition::for_test(Some("NEW"), "Stocks", 1.0, 500.0, PriceStatus::Live);
+        let mut portfolio = Portfolio::new();
+        for p in [security, cash, unpriced, unlisted] {
+            portfolio.add_position(p);
+        }
+
+        // Cash and unpriced positions are not market-return candidates.
+        let candidates: Vec<_> = portfolio
+            .market_priced_securities()
+            .map(|p| p.get_ticker().unwrap())
+            .collect();
+        assert_eq!(candidates, vec!["FAKE", "NEW"]);
+        assert_eq!(portfolio.current_securities_value(), 1600.0);
+
+        // NEW has no historic close at the start date: excluded on both sides.
+        let positions: Vec<_> = portfolio.market_priced_securities().collect();
+        let (historic, current) =
+            like_for_like_values(positions.into_iter().zip([Some(100.0), None]));
+        assert_eq!((historic, current), (1000.0, 1100.0));
+        assert_eq!(period_return_percent(current, historic), Some(10.0));
+
+        // The old basis (total incl. cash vs. securities-only historic) was wrong.
+        assert_ne!(
+            period_return_percent(portfolio.get_total_value(), historic),
+            Some(10.0)
+        );
+    }
+
+    #[test]
+    fn period_return_handles_fx_and_empty_history() {
+        let mut security =
+            PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 2.0, 120.0, PriceStatus::Live);
+        security.fx_rate = Some(0.5);
+        let (historic, current) = like_for_like_values([(&security, Some(100.0))]);
+        assert_eq!((historic, current), (100.0, 120.0));
+        assert_eq!(period_return_percent(current, historic), Some(20.0));
+
+        assert_eq!(period_return_percent(100.0, 0.0), None);
+        assert_eq!(like_for_like_values([(&security, Some(0.0))]), (0.0, 0.0));
     }
 }
