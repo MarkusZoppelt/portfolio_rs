@@ -491,6 +491,7 @@ impl AppState {
             asset_class: req.asset_class,
             amount: req.amount,
             last_spot: 0.0,
+            price_status: crate::position::PriceStatus::Live,
             purchases: req
                 .purchases
                 .into_iter()

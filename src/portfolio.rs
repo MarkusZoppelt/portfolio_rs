@@ -105,14 +105,26 @@ impl Portfolio {
         Ok(sum)
     }
 
+    pub fn positions_without_price(&self) -> Vec<&PortfolioPosition> {
+        self.positions
+            .iter()
+            .filter(|position| !position.has_market_price())
+            .collect()
+    }
+
     pub fn get_allocation(&self) -> HashMap<String, f64> {
         let mut allocation: HashMap<String, f64> = HashMap::new();
+        let total_value = self.get_total_value();
+        if total_value == 0.0 {
+            return allocation;
+        }
 
         for position in &self.positions {
+            if !position.has_market_price() {
+                continue;
+            }
             let asset_class = position.get_asset_class();
             let balance = position.get_balance();
-            let total_value = self.get_total_value();
-
             let percentage = balance / total_value * 100.0;
 
             if let Some(value) = allocation.get_mut(asset_class) {
@@ -173,11 +185,15 @@ impl Portfolio {
                 && position.get_asset_class().to_lowercase() == "cash";
 
             total_value += value;
-            if let Some(i) = invested {
-                total_invested += i;
-            }
-            if let Some(p) = pnl {
-                total_pnl += p;
+            // Unpriced holdings are excluded from totals; do not treat a missing
+            // quote as a full loss against cost basis.
+            if position.has_market_price() {
+                if let Some(i) = invested {
+                    total_invested += i;
+                }
+                if let Some(p) = pnl {
+                    total_pnl += p;
+                }
             }
 
             // Estimate previous value from daily % to compute portfolio daily change
@@ -270,10 +286,16 @@ impl Portfolio {
 
             let price_str = if is_cash {
                 "-".to_string()
+            } else if !position.has_market_price() {
+                "n/a".to_string()
             } else {
                 format!("{price:.2}")
             };
-            let value_str = format!("{value:.2}");
+            let value_str = if position.has_market_price() {
+                format!("{value:.2}")
+            } else {
+                "n/a".to_string()
+            };
 
             table.add_row(vec![
                 Cell::new(position.get_name()),
@@ -415,6 +437,20 @@ impl Portfolio {
         }
 
         println!("{table}");
+
+        let missing = self.positions_without_price();
+        if !missing.is_empty() {
+            let labels = missing
+                .iter()
+                .map(|position| position.get_ticker().unwrap_or_else(|| position.get_name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "Warning: {} position(s) without market price excluded from totals: {}",
+                missing.len(),
+                labels
+            );
+        }
     }
 
     // Print the allocation in descending order %-wise
@@ -784,5 +820,53 @@ impl Portfolio {
         if !losers.is_empty() {
             println!("{top_losers}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::position::{PortfolioPosition, PriceStatus};
+
+    #[test]
+    fn unavailable_position_excluded_from_totals_and_allocation() {
+        let unavailable = PortfolioPosition::for_test(
+            Some("SPY"),
+            "Stocks",
+            10.0,
+            999.0,
+            PriceStatus::Unavailable,
+        );
+        let bond = PortfolioPosition::for_test(Some("TLT"), "Bonds", 2.0, 50.0, PriceStatus::Live);
+        let cash = PortfolioPosition::for_test(None, "Cash", 25.0, 0.0, PriceStatus::Live);
+
+        assert_eq!(unavailable.get_balance(), 0.0);
+
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(unavailable);
+        portfolio.add_position(bond);
+        portfolio.add_position(cash);
+
+        assert_eq!(portfolio.get_total_value(), 125.0);
+
+        let missing = portfolio.positions_without_price();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].get_ticker(), Some("SPY"));
+
+        let allocation = portfolio.get_allocation();
+        assert!(!allocation.contains_key("Stocks"));
+        assert!((allocation["Bonds"] - 80.0).abs() < 1e-9);
+        assert!((allocation["Cash"] - 20.0).abs() < 1e-9);
+
+        let mut only_missing = Portfolio::new();
+        only_missing.add_position(PortfolioPosition::for_test(
+            Some("BTC-USD"),
+            "Crypto",
+            1.0,
+            50_000.0,
+            PriceStatus::Unavailable,
+        ));
+        assert_eq!(only_missing.get_total_value(), 0.0);
+        assert!(only_missing.get_allocation().is_empty());
     }
 }

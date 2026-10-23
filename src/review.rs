@@ -379,12 +379,12 @@ fn check_data_quality(portfolio: &Portfolio) -> Vec<DataQualityIssue> {
             });
         }
 
-        // Missing market price
-        if position.get_ticker().is_some() && position.market_price() <= 0.0 {
+        // Missing market price (excluded from totals; never guessed)
+        if !position.has_market_price() {
             issues.push(DataQualityIssue {
                 severity: Severity::Warning,
                 position: position.get_name().to_string(),
-                issue: "No market price — quote lookup may have failed".to_string(),
+                issue: "No market price — position excluded from totals".to_string(),
             });
         }
     }
@@ -397,6 +397,7 @@ mod tests {
     use super::*;
     use crate::policy::{AllocationTarget, Constraints, Policy, RiskProfile};
     use crate::portfolio::Portfolio;
+    use crate::position::{PortfolioPosition, PriceStatus};
 
     fn create_test_policy() -> Policy {
         Policy {
@@ -460,5 +461,41 @@ mod tests {
         assert!(json.contains("portfolioValue"));
         assert!(json.contains("findings"));
         assert!(json.contains("allocations"));
+    }
+
+    #[test]
+    fn test_data_quality_reports_missing_market_price() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("SPY"),
+            "Stocks",
+            10.0,
+            999.0,
+            PriceStatus::Unavailable,
+        ));
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("AAPL"),
+            "Stocks",
+            1.0,
+            100.0,
+            PriceStatus::Live,
+        ));
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            50.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+
+        let review = Review::from_portfolio_and_policy(&portfolio, &create_test_policy(), "EUR");
+        let price_issues: Vec<_> = review
+            .data_quality
+            .iter()
+            .filter(|issue| issue.issue.contains("No market price"))
+            .collect();
+        assert_eq!(price_issues.len(), 1);
+        assert_eq!(price_issues[0].position, "SPY");
+        assert!(price_issues[0].issue.contains("excluded from totals"));
     }
 }

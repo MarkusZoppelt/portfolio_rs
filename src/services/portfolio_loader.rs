@@ -2,7 +2,7 @@ use eyre::{bail, Result, WrapErr};
 use std::fs::read_to_string;
 
 use crate::portfolio::Portfolio;
-use crate::position::{from_string, handle_position};
+use crate::position::{apply_quote_result, from_string, handle_position, PriceStatus};
 use crate::tui::NetworkStatus;
 
 /// Read a plaintext file or decrypt a `.gpg` file.
@@ -60,45 +60,54 @@ pub async fn create_live_portfolio_with_logging(
         }
     };
     let mut portfolio = Portfolio::new();
-    let mut successful_positions = 0;
-    let mut failed_positions = 0;
 
+    // Keep a clone so a panicked task (JoinError) can still be added as Unavailable.
     let tasks: Vec<_> = positions
         .into_iter()
-        .map(move |mut position| tokio::spawn(async move { handle_position(&mut position).await }))
+        .map(|mut position| {
+            let fallback = position.clone();
+            let task = tokio::spawn(async move { handle_position(&mut position).await });
+            (fallback, task)
+        })
         .collect();
 
-    for task in tasks {
-        let p = task.await;
-        match p {
-            Ok(p) => match p {
-                Ok(p) => {
-                    portfolio.add_position(p);
-                    successful_positions += 1;
-                }
-                Err(e) => {
-                    if log_errors {
-                        eprintln!("Error handling position: {e:?}");
-                    }
-                    failed_positions += 1;
-                }
-            },
-            Err(e) => {
-                if log_errors {
-                    eprintln!("Error handling position: {e:?}");
-                }
-                failed_positions += 1;
+    for (mut fallback, task) in tasks {
+        match task.await {
+            Ok(Ok(position)) => portfolio.add_position(position),
+            Ok(Err(_)) | Err(_) => {
+                apply_quote_result(&mut fallback, None);
+                portfolio.add_position(fallback);
             }
         }
     }
 
-    let network_status = if failed_positions == 0 {
+    // Ticker-less holdings are not quote-dependent and do not affect status.
+    let mut ticker_positions = 0usize;
+    let mut live_ticker_positions = 0usize;
+    for position in &portfolio.positions {
+        if position.get_ticker().is_none() {
+            continue;
+        }
+        ticker_positions += 1;
+        if position.price_status() == PriceStatus::Live {
+            live_ticker_positions += 1;
+        }
+    }
+    let network_status = if ticker_positions == 0 || live_ticker_positions == ticker_positions {
         NetworkStatus::Connected
-    } else if successful_positions == 0 {
+    } else if live_ticker_positions == 0 {
         NetworkStatus::Disconnected
     } else {
         NetworkStatus::Partial
     };
+
+    if log_errors {
+        for position in portfolio.positions_without_price() {
+            if let Some(ticker) = position.get_ticker() {
+                eprintln!("Warning: no market price for {ticker}; position excluded from totals");
+            }
+        }
+    }
 
     (portfolio, network_status)
 }

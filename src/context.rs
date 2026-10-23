@@ -119,9 +119,9 @@ impl PortfolioContext {
                 ));
             }
 
-            if position.get_ticker().is_some() && position.market_price() <= 0.0 {
+            if !position.has_market_price() {
                 data_quality_flags.push(format!(
-                    "No current market price for {}; quote lookup may have failed.",
+                    "No current market price for {}; position excluded from totals.",
                     position.get_name()
                 ));
             }
