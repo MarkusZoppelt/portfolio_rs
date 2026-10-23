@@ -403,6 +403,7 @@ mod tests {
     use std::fs;
 
     #[tokio::test]
+    #[ignore = "requires network access to Yahoo Finance"]
     async fn test_get_quote_name() {
         let name = get_quote_name("AAPL").await.unwrap();
         assert_eq!(name, "Apple Inc.");
@@ -412,12 +413,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to Yahoo Finance"]
     async fn test_get_quote_price() {
         let quote = get_quote_price("AAPL").await.unwrap();
         assert!(quote.last_quote().unwrap().close > 0.0);
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to Yahoo Finance"]
     async fn test_get_historic_price() {
         let date = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         let quote = get_historic_price("AAPL", date).await.unwrap();
@@ -428,6 +431,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to Yahoo Finance"]
     async fn test_handle_position() {
         let mut position = PortfolioPosition {
             name: None,
