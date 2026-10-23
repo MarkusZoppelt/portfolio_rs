@@ -861,6 +861,9 @@ pub struct GeneratedDocument {
 }
 
 /// Serializable view of [`AppConfig`] for GUI/API consumers.
+///
+/// The LLM API key is a write-only secret and is never included in this view.
+/// See [`AppConfigDto::llm_api_key`].
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfigDto {
@@ -871,8 +874,53 @@ pub struct AppConfigDto {
     pub portfolio_file: Option<String>,
     pub workspace_dir: Option<String>,
     pub llm_provider_url: Option<String>,
+    /// Write-only LLM API key. Never returned: [`From<&AppConfig>`] always
+    /// sets this to `None`, so serialization emits `"llmApiKey": null` and
+    /// the secret never appears in API or GUI payloads. Use
+    /// [`Self::has_llm_api_key`] to tell whether a non-empty key is stored.
+    ///
+    /// On an incoming update, `null` or a missing `llmApiKey` must not clear
+    /// a stored key — only an explicit non-empty string replaces it. Apply
+    /// updates with [`Self::apply_to`], which implements that rule. The
+    /// explicit clear is [`AppConfig::set_llm_api_key`] with an empty or
+    /// whitespace-only string (stores `None`); `apply_to` forwards such a
+    /// string to that setter. This crate has no config-update HTTP endpoint.
+    #[serde(default)]
     pub llm_api_key: Option<String>,
+    /// Whether a non-empty LLM API key is configured (`hasLlmApiKey`).
+    ///
+    /// Additive field. `#[serde(default)]` so JSON written before this field
+    /// existed still deserializes; a missing value becomes `false`.
+    #[serde(default)]
+    pub has_llm_api_key: bool,
     pub llm_model: Option<String>,
+}
+
+impl AppConfigDto {
+    /// Copy this view onto an existing [`AppConfig`].
+    ///
+    /// Every field except the API key is replaced. `llm_api_key` of `None`
+    /// (JSON `null`, or a missing field) leaves the stored key unchanged.
+    /// `Some(key)` is forwarded to [`AppConfig::set_llm_api_key`]: a non-empty
+    /// string replaces the stored key; an empty or whitespace-only string
+    /// clears it.
+    pub fn apply_to(&self, cfg: &mut AppConfig) {
+        cfg.version = self.version;
+        cfg.currency = self.currency.clone();
+        cfg.theme = self.theme;
+        cfg.last_mode = self.last_mode;
+        cfg.portfolio_file = self.portfolio_file.clone();
+        cfg.workspace_dir = self.workspace_dir.clone();
+        cfg.llm_provider_url = self.llm_provider_url.clone();
+        cfg.llm_model = self.llm_model.clone();
+        if let Some(key) = &self.llm_api_key {
+            cfg.set_llm_api_key(key.clone());
+        }
+    }
+}
+
+fn llm_api_key_configured(key: &Option<String>) -> bool {
+    key.as_ref().is_some_and(|value| !value.trim().is_empty())
 }
 
 impl From<&AppConfig> for AppConfigDto {
@@ -885,7 +933,8 @@ impl From<&AppConfig> for AppConfigDto {
             portfolio_file: cfg.portfolio_file.clone(),
             workspace_dir: cfg.workspace_dir.clone(),
             llm_provider_url: cfg.llm_provider_url.clone(),
-            llm_api_key: cfg.llm_api_key.clone(),
+            llm_api_key: None,
+            has_llm_api_key: llm_api_key_configured(&cfg.llm_api_key),
             llm_model: cfg.llm_model.clone(),
         }
     }
@@ -1015,6 +1064,76 @@ mod tests {
         assert!(json.get("llmProviderUrl").is_some());
         assert!(json.get("llmApiKey").is_some());
         assert!(json.get("llmModel").is_some());
+        assert_eq!(json["hasLlmApiKey"], false);
+    }
+
+    #[test]
+    fn test_app_config_dto_redacts_llm_api_key() {
+        let mut cfg = AppConfig::default();
+        cfg.set_llm_api_key("sk-test-FAKE-123");
+        let dto = AppConfigDto::from(&cfg);
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(
+            json.contains("\"llmApiKey\":null"),
+            "expected redacted key, got {json}"
+        );
+        assert!(
+            json.contains("\"hasLlmApiKey\":true"),
+            "expected hasLlmApiKey, got {json}"
+        );
+        assert!(
+            !json.contains("sk-test-FAKE-123"),
+            "secret leaked into JSON: {json}"
+        );
+        assert!(dto.llm_api_key.is_none());
+        assert!(dto.has_llm_api_key);
+
+        let blank = AppConfig {
+            llm_api_key: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(!AppConfigDto::from(&blank).has_llm_api_key);
+    }
+
+    #[test]
+    fn test_app_config_dto_old_json_without_has_llm_api_key_deserializes() {
+        let dto = AppConfigDto::from(&AppConfig::default());
+        let mut json = serde_json::to_value(&dto).unwrap();
+        json.as_object_mut().unwrap().remove("hasLlmApiKey");
+        let parsed: AppConfigDto = serde_json::from_value(json).unwrap();
+        assert!(!parsed.has_llm_api_key);
+        assert!(parsed.llm_api_key.is_none());
+    }
+
+    #[test]
+    fn test_app_config_dto_apply_does_not_wipe_key_on_null() {
+        let mut cfg = AppConfig::default();
+        cfg.set_llm_api_key("sk-test-FAKE-123");
+        cfg.set_currency("USD");
+
+        let mut incoming = AppConfigDto::from(&cfg);
+        incoming.currency = "EUR".to_string();
+        assert!(incoming.llm_api_key.is_none());
+        incoming.apply_to(&mut cfg);
+        assert_eq!(cfg.llm_api_key.as_deref(), Some("sk-test-FAKE-123"));
+        assert_eq!(cfg.currency, "EUR");
+
+        // Missing llmApiKey deserializes as None and must not clear either.
+        let mut json = serde_json::to_value(&incoming).unwrap();
+        json.as_object_mut().unwrap().remove("llmApiKey");
+        let missing: AppConfigDto = serde_json::from_value(json).unwrap();
+        assert!(missing.llm_api_key.is_none());
+        missing.apply_to(&mut cfg);
+        assert_eq!(cfg.llm_api_key.as_deref(), Some("sk-test-FAKE-123"));
+
+        incoming.llm_api_key = Some("sk-replaced".to_string());
+        incoming.apply_to(&mut cfg);
+        assert_eq!(cfg.llm_api_key.as_deref(), Some("sk-replaced"));
+
+        // Explicit clear: empty / whitespace, same as AppConfig::set_llm_api_key.
+        incoming.llm_api_key = Some("   ".to_string());
+        incoming.apply_to(&mut cfg);
+        assert!(cfg.llm_api_key.is_none());
     }
 
     #[test]

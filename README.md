@@ -135,6 +135,11 @@ Notes:
   `.gpg` files, which are never rewritten.
 - Live quotes are cached for a short TTL; `POST /api/refresh` bypasses the
   cache.
+- Application config is not an API payload. Embedding clients that read
+  `AppConfigDto` still never receive the LLM API key: `llmApiKey` is always
+  `null`, and `hasLlmApiKey` reports whether a non-empty key is configured.
+  A null or missing `llmApiKey` does not clear a stored key; an empty string
+  passed to `AppConfig::set_llm_api_key` (or `AppConfigDto::apply_to`) does.
 
 ## Library Usage
 
@@ -239,6 +244,11 @@ The most useful config entry is `portfolio_file` where you can set the
 **absolute** path to your data file. This will be used when no file is
 specified as an argument. Workspace users can point `workspace_dir` at their
 workspace instead; the workspace's `positions.json` then takes precedence.
+
+`llm_api_key` lives in the same file but is a write-only secret. The
+`AppConfigDto` JSON view used by GUIs always serializes it as `null` and
+exposes `hasLlmApiKey` instead. To clear a stored key, set it to an empty
+string. A null or omitted key on an update does not wipe it.
 
 ## Bonus: GPG Encryption
 
