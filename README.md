@@ -157,6 +157,10 @@ measured from `asOf`): the position gets `priceSource: "cache"`,
 count toward `complete`; every response adds `hasStale`, `stalePositions` and
 `priceAsOf` (the oldest price used).
 
+Without an FX rate for its quote currency a position keeps its native `price`,
+`priceCurrency`, `priceAsOf` and day change (`priceStatus: "fx_unavailable"`);
+only base-currency values (`valueBase`, `weightPercent`, ...) are null.
+
     portfolio_rs mcp --cache-max-age 3 example_data.json   # days, 0 disables fallback
     portfolio_rs mcp --no-cache example_data.json          # neither read nor write
     portfolio_rs mcp --offline example_data.json           # read the cache, never fetch
