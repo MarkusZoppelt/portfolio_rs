@@ -355,6 +355,23 @@ impl PortfolioPosition {
         self.fx_rate.map(to_f64)
     }
 
+    /// True when purchase costs can be expressed in the base currency: no
+    /// ticker (entered in base), or a known quote currency with a usable FX
+    /// rate (a live quote without a currency counts as base). Without it
+    /// [`Self::total_invested`] is `None` rather than a
+    /// foreign amount labelled as base currency.
+    pub fn invested_fx_known(&self) -> bool {
+        self.ticker.is_none()
+            || (self.price_status != PriceStatus::FxUnavailable
+                && (self.price_currency.is_some() || self.has_market_price()))
+    }
+
+    /// True when the cost basis is converted with today's FX rate (a foreign
+    /// quote currency), not the rate on the purchase date.
+    pub fn cost_basis_at_current_fx(&self) -> bool {
+        self.fx_rate.is_some() && self.total_invested_dec().is_some()
+    }
+
     /// [`Self::fx_rate`], or 1 when no conversion applies.
     pub fn fx_factor_dec(&self) -> Decimal {
         self.fx_rate.unwrap_or(Decimal::ONE)
@@ -433,6 +450,9 @@ impl PortfolioPosition {
     /// quantity, with sells taken out at average cost. `None` when any buy
     /// lacks a price (see [`Self::has_complete_cost_basis`]).
     pub fn total_invested_dec(&self) -> Option<Decimal> {
+        if !self.invested_fx_known() {
+            return None;
+        }
         let invested = self.average_cost_dec()? * self.quantity_dec() * self.fx_factor_dec();
         (invested > Decimal::ZERO).then_some(invested)
     }

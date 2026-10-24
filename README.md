@@ -357,8 +357,10 @@ e.g. `EURUSD=X`; only the ticker symbol is sent. Prices and average cost are
 shown in the quote currency (e.g. `512.30 USD`); values, invested amounts, and
 totals are in the base currency. Purchase prices are treated as quote-currency
 prices and converted at the current FX rate, so cost basis ignores past FX
-moves. If an FX quote is unavailable, the affected positions are flagged and
-excluded from totals rather than mixed in unconverted.
+moves (MCP responses flag this as `cost_basis_current_fx`). If an FX quote, or
+the quote currency itself, is unknown, the affected positions are flagged, their
+invested amount is null, and they are excluded from totals rather than mixed in
+unconverted.
 
 ## Bonus: GPG Encryption
 
