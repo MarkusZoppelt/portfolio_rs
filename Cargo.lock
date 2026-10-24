@@ -1974,6 +1974,7 @@ dependencies = [
  "toml",
  "tower",
  "tui-big-text",
+ "uuid",
  "yahoo_finance_api",
 ]
 

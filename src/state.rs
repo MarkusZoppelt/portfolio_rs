@@ -259,7 +259,16 @@ impl AppState {
                 path
             );
         }
-        let json = self.positions_json.read().await.clone();
+        let json = {
+            let mut guard = self.positions_json.write().await;
+            // Give legacy positions stable ids on first write.
+            if let Ok(mut positions) = serde_json::from_str::<Vec<PortfolioPosition>>(&guard) {
+                if crate::position::ensure_position_ids(&mut positions) {
+                    *guard = positions_to_string(&positions)?;
+                }
+            }
+            guard.clone()
+        };
         // Atomic replace + one backup: a crash must not leave the portfolio
         // file truncated or empty.
         write_atomic_with_backup(Path::new(&path), json.as_bytes())
@@ -482,6 +491,7 @@ impl AppState {
 
     pub async fn add_position(&self, req: CreatePositionRequest) -> Result<PositionDto> {
         let position = PortfolioPosition {
+            id: Some(crate::position::new_position_id()),
             name: req.name,
             ticker: req.ticker,
             asset_class: req.asset_class,
@@ -510,6 +520,7 @@ impl AppState {
             let mut positions: Vec<PortfolioPosition> = serde_json::from_str(&json)
                 .wrap_err("failed to parse current positions for update")?;
             positions.push(position);
+            crate::position::ensure_position_ids(&mut positions);
             *json = positions_to_string(&positions)?;
             idx = positions.len() - 1;
             dto = position_to_dto(idx, &positions[idx]);
@@ -558,6 +569,7 @@ impl AppState {
                     .collect();
             }
 
+            crate::position::ensure_position_ids(&mut positions);
             *json = positions_to_string(&positions)?;
             dto = position_to_dto(id, &positions[id]);
         }
@@ -576,6 +588,7 @@ impl AppState {
             }
 
             positions.remove(id);
+            crate::position::ensure_position_ids(&mut positions);
             *json = positions_to_string(&positions)?;
         }
         self.invalidate_portfolio_cache().await;
@@ -1175,6 +1188,33 @@ mod tests {
             std::fs::read(tmp.path().join("positions.json.bak")).unwrap(),
             b"old"
         );
+    }
+
+    #[tokio::test]
+    async fn test_save_assigns_stable_position_ids() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("positions.json");
+        let legacy = r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 100}]"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let state = AppState::new("EUR".to_string());
+        *state.file_path.write().await = Some(path.to_str().unwrap().to_string());
+        *state.positions_json.write().await = legacy.to_string();
+        state.save().await.unwrap();
+
+        let read_ids = || {
+            let saved: Vec<PortfolioPosition> =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            saved
+                .iter()
+                .map(|p| p.id().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let first = read_ids();
+        assert!(first[0].starts_with("pos_"));
+
+        state.save().await.unwrap();
+        assert_eq!(read_ids(), first, "ids must not change on later writes");
     }
 
     #[tokio::test]
