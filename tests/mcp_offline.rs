@@ -1592,3 +1592,28 @@ async fn unknown_filters_are_errors_not_empty_results() {
     assert!(t["transactions"].is_array());
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn cash_buffer_in_check_policy_and_get_context() {
+    let (_tmp, client) = connect_partial("quotes_example.json").await;
+    let expected = json!({"minimum": 30000.0, "actual": 50000.0, "surplus": 20000.0});
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert_eq!(v["cashBuffer"], expected);
+    let c = ok(&client, "get_context", json!({"format": "json"})).await;
+    assert_eq!(c["context"]["cashBuffer"], expected);
+    let m = ok(&client, "get_context", json!({})).await;
+    assert!(m["markdown"]
+        .as_str()
+        .unwrap()
+        .contains("Cash Buffer: minimum"));
+    client.cancel().await.unwrap();
+
+    // Without a policy there is no minimum, so no surplus either.
+    let client = connect(opts()).await;
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert_eq!(
+        v["cashBuffer"],
+        json!({"minimum": null, "actual": 50000.0, "surplus": null})
+    );
+    client.cancel().await.unwrap();
+}

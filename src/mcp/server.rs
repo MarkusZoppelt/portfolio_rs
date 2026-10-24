@@ -269,6 +269,7 @@ impl PortfolioServer {
                 warnings.push(f.clone());
             }
         }
+        let cash_buffer = crate::context::CashBuffer::new(&portfolio, policy.as_ref());
         Ok(Json(PolicyCheckOutput {
             meta: self.meta(&portfolio, warnings).await,
             policy_name: policy.map(|p| p.name),
@@ -277,6 +278,7 @@ impl PortfolioServer {
             findings,
             constraint_checks: checks,
             counts,
+            cash_buffer,
         }))
     }
 

@@ -485,6 +485,8 @@ pub struct PolicyCheckOutput {
     pub findings: Vec<Finding>,
     pub constraint_checks: Vec<ConstraintCheckRow>,
     pub counts: SeverityCounts,
+    /// Cash vs. the policy's minimum cash amount (base currency).
+    pub cash_buffer: crate::context::CashBuffer,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
