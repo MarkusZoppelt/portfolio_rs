@@ -419,4 +419,103 @@ mod tests {
         assert!((historic - 100.0).abs() < 1e-9);
         assert!((current - 120.0).abs() < 1e-9);
     }
+
+    /// FAKEUS in USD, FAKEEU in EUR, base EUR, FX via EURUSD=X.
+    fn eur_base_map(with_fx: bool) -> serde_json::Map<String, serde_json::Value> {
+        let fx = if with_fx {
+            r#", "EURUSD=X": {"price": 1.25, "currency": "USD"}"#
+        } else {
+            ""
+        };
+        let value = serde_json::from_str::<serde_json::Value>(&format!(
+            r#"{{"latest": {{"FAKEUS": {{"price": 100.0, "currency": "USD"}},
+                "FAKEEU": {{"price": 40.0, "currency": "EUR"}}{fx}}},
+               "previous_close": {{"FAKEUS": 90.0}},
+               "close_on": {{"FAKEUS": 80.0}},
+               "names": {{"FAKEEU": "Fake Europe"}}}}"#
+        ))
+        .unwrap();
+        value.as_object().unwrap().clone()
+    }
+
+    const EUR_BASE_POSITIONS: &str = r#"[
+        {"Ticker": "FAKEUS", "AssetClass": "Stocks", "Amount": 2,
+         "Purchases": [{"Date": "2024-01-15", "Quantity": 2}]},
+        {"Ticker": "FAKEEU", "AssetClass": "Stocks", "Amount": 5},
+        {"Ticker": "MISSING", "AssetClass": "Stocks", "Amount": 1, "Name": "Missing Co"},
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 50}
+    ]"#;
+
+    #[tokio::test]
+    async fn fixture_eur_base_converts_fx_keeps_missing_and_unnamed() {
+        let provider = FixtureProvider::try_from(eur_base_map(true)).unwrap();
+        let (portfolio, status) = create_live_portfolio_with(
+            Arc::new(provider),
+            EUR_BASE_POSITIONS.to_string(),
+            "EUR",
+            false,
+        )
+        .await;
+
+        assert_eq!(portfolio.positions.len(), 4);
+        assert_eq!(status, NetworkStatus::Partial);
+
+        let us = by_ticker(&portfolio, "FAKEUS");
+        assert_eq!(us.price_status(), PriceStatus::Live);
+        assert_eq!(us.price_currency(), Some("USD"));
+        assert!((us.fx_rate().unwrap() - 0.8).abs() < 1e-9);
+        // 2 * 100 USD * 0.8 EUR/USD
+        assert!((us.get_balance() - 160.0).abs() < 1e-9);
+        // Purchase without a price is filled from close_on (80), not persisted.
+        assert!(us.get_purchases()[0].price.is_none());
+        assert!(
+            (crate::money::to_f64(us.get_purchases()[0].effective_price().unwrap()) - 80.0).abs()
+                < 1e-9
+        );
+        // Name lookup missed; the position is kept and the ticker is the fallback.
+        assert_eq!(us.get_name_option(), None);
+        assert_eq!(us.get_name(), "FAKEUS");
+
+        let eu = by_ticker(&portfolio, "FAKEEU");
+        assert_eq!(eu.price_status(), PriceStatus::Live);
+        assert_eq!(eu.fx_rate(), None);
+        assert!((eu.get_balance() - 200.0).abs() < 1e-9);
+        assert_eq!(eu.get_name(), "Fake Europe");
+
+        let missing = by_ticker(&portfolio, "MISSING");
+        assert_eq!(missing.price_status(), PriceStatus::Unavailable);
+        assert_eq!(missing.get_balance(), 0.0);
+        assert_eq!(missing.get_name(), "Missing Co");
+
+        // 160 + 200 + 50 cash; MISSING excluded.
+        assert!((portfolio.get_total_value() - 410.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn fixture_missing_eurusd_fx_is_unavailable() {
+        let provider = FixtureProvider::try_from(eur_base_map(false)).unwrap();
+        let (portfolio, _) = create_live_portfolio_with(
+            Arc::new(provider),
+            EUR_BASE_POSITIONS.to_string(),
+            "EUR",
+            false,
+        )
+        .await;
+
+        assert_eq!(portfolio.positions.len(), 4);
+        assert_eq!(
+            by_ticker(&portfolio, "FAKEUS").price_status(),
+            PriceStatus::FxUnavailable
+        );
+        assert_eq!(
+            by_ticker(&portfolio, "FAKEEU").price_status(),
+            PriceStatus::Live
+        );
+        assert_eq!(
+            by_ticker(&portfolio, "MISSING").price_status(),
+            PriceStatus::Unavailable
+        );
+        // FAKEEU 200 + cash 50; FAKEUS excluded, not mixed in.
+        assert!((portfolio.get_total_value() - 250.0).abs() < 1e-9);
+    }
 }

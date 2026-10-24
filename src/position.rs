@@ -675,7 +675,7 @@ pub async fn handle_position_with<P: QuoteProvider>(
                     let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
                     if needs_price && p.quantity > Decimal::ZERO {
                         if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
-                            if let Ok(close) = provider.close_on_or_after(ticker, date).await {
+                            if let Ok(close) = provider.close_on(ticker, date).await {
                                 p.estimated_price = Some(dec(close.max(0.0)));
                             }
                         }
