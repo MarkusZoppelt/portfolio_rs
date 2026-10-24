@@ -3,7 +3,7 @@
 //! In-process tests run the real rmcp server and client over a duplex pipe;
 //! the stdio tests spawn the binary with an isolated HOME. No network.
 
-use portfolio_rs::mcp::{load, McpOptions, PortfolioServer};
+use portfolio_rs::mcp::{load, CacheMode, McpOptions, PortfolioServer};
 use portfolio_rs::services::quotes::{AnyProvider, FixtureProvider};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ReadResourceRequestParams};
 use rmcp::service::RunningService;
@@ -1212,13 +1212,19 @@ async fn missing_quote_is_visible_everywhere() {
     // the others are judged on the priced part.
     assert!(["unknown", "untargeted"].contains(&commodities["status"].as_str().unwrap()));
     assert!(commodities["driftPoints"].is_null());
-    assert!(class(&v, "Bonds")["driftPoints"].is_number());
-    assert_ne!(class(&v, "Bonds")["status"], "unknown");
+    // Finance retest B1/B3: no percentages or drift against a partial
+    // total, only a possible range.
+    let bonds = class(&v, "Bonds");
+    assert!(bonds["actualPercent"].is_null());
+    assert!(bonds["driftPoints"].is_null());
+    assert!(bonds["amountToTarget"].is_null());
+    assert!(
+        bonds["actualPercentMin"].as_f64().unwrap() <= bonds["actualPercentMax"].as_f64().unwrap()
+    );
     assert_eq!(v["excludedPositions"].as_array().unwrap().len(), 1);
-    // Null when the excluded position has no base cost basis either.
-    if let Some(share) = v["excludedValueShare"].as_f64() {
-        assert!(share > 0.0 && share < 100.0, "{share}");
-    }
+    // GSG has no price, no cache and no known currency: no estimate.
+    assert!(v["excludedValueShare"].is_null());
+    assert!(v["excludedValueBasis"].is_null());
 
     let v = ok(&client, "check_policy", json!({})).await;
     let found = codes(&v["findings"]);
@@ -1248,12 +1254,30 @@ async fn missing_fx_is_visible_everywhere() {
     // Finance item 1: drift on the priced part; only classes holding an
     // unpriced position are unknown.
     assert_eq!(class(&v, "Stocks")["status"], "unknown");
-    assert_eq!(class(&v, "Cash")["status"], "above_band");
-    assert!(class(&v, "Cash")["amountToTarget"].is_number());
+    // Finance retest B1: Cash is 100% of the priced part, but the unpriced
+    // USD positions could be worth anything: no breach, no amountToTarget.
+    let cash = class(&v, "Cash");
+    assert_eq!(cash["status"], "unknown");
+    assert!(cash["amountToTarget"].is_null());
+    assert!(cash["driftPoints"].is_null());
+    assert!(cash["actualPercent"].is_null());
+    assert_eq!(cash["actualPercentMin"], 0.0);
+    assert_eq!(cash["actualPercentMax"], 100.0);
     assert!(!v["excludedPositions"].as_array().unwrap().is_empty());
     let v = ok(&client, "check_policy", json!({})).await;
-    // The constraint check against a partial total stays skipped.
     assert!(!codes(&v["breaches"]).contains(&"asset_class_limit".to_string()));
+    assert!(!codes(&v["breaches"]).contains(&"allocation_out_of_band".to_string()));
+    let possible: Vec<_> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "possible_breach")
+        .collect();
+    assert!(
+        possible.iter().any(|f| f["assetClass"] == "Cash"),
+        "{possible:?}"
+    );
+    assert!(possible.iter().all(|f| f["severity"] == "warning"));
     client.cancel().await.unwrap();
 }
 
@@ -2125,4 +2149,99 @@ async fn check_policy_counts_match_lists() {
             assert_eq!(v["status"], expected);
         }
     }
+}
+
+/// Finance retest L5: copy example_data.json into a temp dir and fill its
+/// quote cache from a fixture (CacheMode::On forces the cache for fixtures).
+/// Returns the temp dir, the data file and a policy file.
+async fn seeded_cache(seed_fixture: &str) -> (TempDir, String, String) {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("positions.json");
+    std::fs::copy(example_data(), &data).unwrap();
+    let policy = tmp.path().join("policy_lower.toml");
+    std::fs::write(&policy, POLICY_LOWER).unwrap();
+    let data = data.to_string_lossy().into_owned();
+    let seed = McpOptions {
+        file: Some(data.clone()),
+        quotes: Some(fixture_named(seed_fixture)),
+        cache: CacheMode::On,
+        ..opts()
+    };
+    let _ = load(&seed).await.expect("seed load");
+    let cache = tmp.path().join(".positions.json.quotes-cache.json");
+    assert!(cache.is_file(), "cache seeded");
+    (tmp, data, policy.to_string_lossy().into_owned())
+}
+
+/// A fixture without the given symbols' latest quotes.
+fn fixture_without(symbols: &[&str]) -> AnyProvider {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/quotes_example.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for s in symbols {
+        v["latest"].as_object_mut().unwrap().remove(*s);
+    }
+    AnyProvider::Fixture(Box::new(
+        FixtureProvider::from_json(&v.to_string()).unwrap(),
+    ))
+}
+
+/// Finance retest B1/B2/A4/A5: with only BTC unpriced (its cached price is
+/// past the max age), the excluded share comes from the last cached price,
+/// statuses hold for the whole possible range and no amountToTarget is given.
+#[tokio::test]
+async fn partial_allocation_uses_last_price_and_certain_breaches_only() {
+    let (_tmp, data, policy) = seeded_cache("quotes_example.json").await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["BTC-USD"])),
+        cache: CacheMode::On,
+        cache_max_age_days: Some(0),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_allocation", json!({})).await;
+    assert_eq!(v["complete"], false);
+    assert_eq!(v["excludedValueBasis"], "last_price", "{v}");
+    let share = v["excludedValueShare"].as_f64().unwrap();
+    assert!(share > 0.0 && share < 100.0, "{share}");
+    for c in v["classes"].as_array().unwrap() {
+        assert!(c["actualPercent"].is_null(), "{c}");
+        assert!(c["amountToTarget"].is_null(), "{c}");
+        assert!(c["driftPoints"].is_null(), "{c}");
+        let (min, max) = (
+            c["actualPercentMin"].as_f64().unwrap(),
+            c["actualPercentMax"].as_f64().unwrap(),
+        );
+        assert!(min <= max, "{c}");
+        if c["targetPercent"].is_null() {
+            continue;
+        }
+        let (low, high) = (
+            c["bandLow"].as_f64().unwrap(),
+            c["bandHigh"].as_f64().unwrap(),
+        );
+        match c["status"].as_str().unwrap() {
+            "above_band" => assert!(min > high, "{c}"),
+            "below_band" => assert!(max < low, "{c}"),
+            "within_band" => assert!(min >= low && max <= high, "{c}"),
+            "unknown" => {}
+            s => panic!("unexpected status {s}"),
+        }
+    }
+    let v = ok(&client, "check_policy", json!({})).await;
+    for b in v["breaches"].as_array().unwrap() {
+        if b["code"] == "allocation_out_of_band" {
+            assert_eq!(b["detail"]["basis"], "partial", "{b}");
+        }
+    }
+    let inc = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "checks_incomplete")
+        .unwrap();
+    assert_eq!(inc["detail"]["excludedValueBasis"], "last_price");
+    client.cancel().await.unwrap();
 }

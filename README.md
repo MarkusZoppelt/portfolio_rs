@@ -206,12 +206,19 @@ Missing quotes or FX rates are never hidden: every response carries
 `complete` (false when any position is unpriced) and `dataQuality`
 (`missingPrices`, `missingFx`, `affectedPositions`, `affectedClasses`).
 Totals then cover only priced positions; a class with an unpriced position has
-a `null` value and, if targeted, status `unknown`. Every other class gets its
-drift, status and `amountToTarget` against the priced total;
-`get_allocation` lists the left-out positions in `excludedPositions` and their
-share at cost basis in `excludedValueShare`. Constraint checks that would fail
-only because of the partial total are skipped, and `check_policy` adds
-`checks_incomplete`.
+a `null` value. No percentage, drift or `amountToTarget` is derived from such a
+partial total; each class gets `actualPercentMin`/`actualPercentMax` instead:
+its possible share whatever the excluded positions are worth, from 0 up to
+their maximum plausible value (twice the last cached price; unbounded when a
+position is only known at cost basis or not at all). A band status
+(`above_band`, `below_band`, `within_band`) is set only when it holds for the
+whole range, otherwise `unknown`. `get_allocation` lists the left-out
+positions in `excludedPositions` and their estimated share in
+`excludedValueShare` (last cached price at any age, else cost basis;
+`excludedValueBasis`: `last_price` | `cost_basis`; null without an estimate).
+`check_policy` reports a breach only when it is certain (`detail.basis:
+"partial"`); a band or limit that might be violated is a `possible_breach`
+warning, and `checks_incomplete` summarizes what was judged on a partial basis.
 `networkStatus` (in every tool response and in `get_context`, also via `/api/context`) is `connected` (every market position has a fresh quote and FX
 rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
 fresh quotes; cached prices do not count as connected). Each position row

@@ -6,7 +6,7 @@ use super::dto::*;
 use crate::money::{dec, percent_of, to_f64, Decimal};
 use crate::policy::Policy;
 use crate::portfolio::Portfolio;
-use crate::position::{parse_purchase_date, PortfolioPosition, PriceStatus};
+use crate::position::{parse_purchase_date, ExcludedBasis, PortfolioPosition, PriceStatus};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -408,6 +408,50 @@ pub fn no_policy_finding() -> Finding {
     )
 }
 
+/// An excluded position's maximum plausible base value: twice its last
+/// cached price (the price may have moved since), unbounded (`None`) when it
+/// is only known at cost basis or not at all.
+pub const PLAUSIBLE_PRICE_FACTOR: f64 = 2.0;
+
+fn excluded_max(p: &PortfolioPosition) -> Option<Decimal> {
+    match p.excluded_estimate() {
+        Some((v, ExcludedBasis::LastPrice)) => Some(v * dec(PLAUSIBLE_PRICE_FACTOR)),
+        _ => None,
+    }
+}
+
+/// Sum of maximum plausible values; `None` (unbounded) if any is unbounded.
+fn sum_max<'a>(it: impl Iterator<Item = &'a &'a PortfolioPosition>) -> Option<Decimal> {
+    it.map(|p| excluded_max(p)).sum()
+}
+
+/// Share range of a part `priced` (plus own excluded positions up to
+/// `own_max`) when other excluded positions are worth 0..`other_max`.
+/// `None` bounds are unbounded; `own_any`/`other_any` say whether there are
+/// such positions at all.
+pub fn share_range(
+    priced: Decimal,
+    total: Decimal,
+    own: (bool, Option<Decimal>),
+    other: (bool, Option<Decimal>),
+) -> (f64, f64) {
+    let min = match other {
+        (false, _) => percent_of(priced, total),
+        (true, Some(m)) => percent_of(priced, total + m),
+        (true, None) => Some(Decimal::ZERO),
+    }
+    .map(pct)
+    .unwrap_or(0.0);
+    let max = match own {
+        (false, _) => percent_of(priced, total),
+        (true, Some(m)) => percent_of(priced + m, total + m),
+        (true, None) => Some(dec(100.0)),
+    }
+    .map(pct)
+    .unwrap_or(100.0);
+    (min, max)
+}
+
 pub struct Allocation {
     /// Sum of the priced positions only.
     pub total: Decimal,
@@ -418,9 +462,13 @@ pub struct Allocation {
     pub missing: Vec<String>,
     /// Ids of included positions without a base value (left out of `total`).
     pub excluded_positions: Vec<String>,
-    /// Share of the excluded positions at cost basis in (priced total +
-    /// their cost basis); null when one of them has no cost basis either.
+    /// Estimated share of the excluded positions (last cached price, else
+    /// cost basis) in (priced total + estimate); null when one has neither.
     pub excluded_value_share: Option<f64>,
+    pub excluded_value_basis: Option<&'static str>,
+    /// Maximum plausible value of all excluded positions (`None`: unbounded;
+    /// zero when nothing is excluded).
+    pub excluded_max: Option<Decimal>,
 }
 
 pub fn allocation(
@@ -437,23 +485,52 @@ pub fn allocation(
         .collect();
     let total = total_known(&included);
     let complete = included.iter().all(|p| value_base(p).is_some());
+    let excluded: Vec<&PortfolioPosition> = included
+        .iter()
+        .copied()
+        .filter(|p| value_base(p).is_none())
+        .collect();
+    let excluded_max_all = sum_max(excluded.iter());
     // Group case-insensitively, keeping the first spelling seen. A class with
     // any unpriced position has an unknown value (never a partial sum or 0).
     let mut order: Vec<String> = Vec::new();
     let mut values: HashMap<String, (String, Option<Decimal>)> = HashMap::new();
+    let mut priced: HashMap<String, Decimal> = HashMap::new();
     for p in &included {
         let key = p.get_asset_class().to_lowercase();
         if !values.contains_key(&key) {
             order.push(key.clone());
         }
         let entry = values
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| (p.get_asset_class().to_string(), Some(Decimal::ZERO)));
         entry.1 = match (entry.1, value_base(p)) {
             (Some(sum), Some(v)) => Some(sum + v),
             _ => None,
         };
+        *priced.entry(key).or_default() += value_base(p).unwrap_or(Decimal::ZERO);
     }
+    let range = |key: &str| -> Option<(f64, f64)> {
+        if complete {
+            return None;
+        }
+        let own: Vec<&PortfolioPosition> = excluded
+            .iter()
+            .copied()
+            .filter(|p| p.get_asset_class().to_lowercase() == key)
+            .collect();
+        let other: Vec<&PortfolioPosition> = excluded
+            .iter()
+            .copied()
+            .filter(|p| p.get_asset_class().to_lowercase() != key)
+            .collect();
+        Some(share_range(
+            priced.get(key).copied().unwrap_or(Decimal::ZERO),
+            total,
+            (!own.is_empty(), sum_max(own.iter())),
+            (!other.is_empty(), sum_max(other.iter())),
+        ))
+    };
     let band = |t: &crate::policy::AllocationTarget| {
         (
             t.target_percent,
@@ -469,18 +546,26 @@ pub fn allocation(
         if target.is_none() {
             untargeted.push(label.clone());
         }
-        classes.push(class_row(label, *value, total, target.map(band)));
+        classes.push(class_row(
+            label,
+            *value,
+            total,
+            target.map(band),
+            range(key),
+        ));
     }
     let mut missing = Vec::new();
     if let Some(pol) = policy {
         for t in &pol.allocations {
-            if !values.contains_key(&t.asset_class.to_lowercase()) {
+            let key = t.asset_class.to_lowercase();
+            if !values.contains_key(&key) {
                 missing.push(t.asset_class.clone());
                 classes.push(class_row(
                     &t.asset_class,
                     Some(Decimal::ZERO),
                     total,
                     Some(band(t)),
+                    range(&key),
                 ));
             }
         }
@@ -491,21 +576,24 @@ pub fn allocation(
             .total_cmp(&key(a))
             .then_with(|| a.asset_class.cmp(&b.asset_class))
     });
-    let excluded: Vec<&&PortfolioPosition> = included
-        .iter()
-        .filter(|p| value_base(p).is_none())
-        .collect();
-    let excluded_cost: Option<Decimal> = excluded
-        .iter()
-        .map(|p| p.total_invested_dec())
-        .sum::<Option<Decimal>>();
-    let excluded_value_share = excluded_cost.map(|c| {
-        if excluded.is_empty() {
-            0.0
-        } else {
-            pct(percent_of(c, total + c).unwrap_or(Decimal::ZERO))
+    let estimates: Option<Vec<(Decimal, ExcludedBasis)>> =
+        excluded.iter().map(|p| p.excluded_estimate()).collect();
+    let (excluded_value_share, excluded_value_basis) = match estimates {
+        _ if excluded.is_empty() => (Some(0.0), None),
+        None => (None, None),
+        Some(est) => {
+            let e: Decimal = est.iter().map(|(v, _)| *v).sum();
+            let basis = if est.iter().any(|(_, b)| *b == ExcludedBasis::CostBasis) {
+                ExcludedBasis::CostBasis
+            } else {
+                ExcludedBasis::LastPrice
+            };
+            (
+                Some(pct(percent_of(e, total + e).unwrap_or(Decimal::ZERO))),
+                Some(basis.as_str()),
+            )
         }
-    });
+    };
     Allocation {
         total,
         complete,
@@ -514,6 +602,25 @@ pub fn allocation(
         missing,
         excluded_positions: excluded.iter().map(|p| pid(p)).collect(),
         excluded_value_share,
+        excluded_value_basis,
+        excluded_max: if excluded.is_empty() {
+            Some(Decimal::ZERO)
+        } else {
+            excluded_max_all
+        },
+    }
+}
+
+/// Band status of a share range: set only when the whole range agrees.
+fn range_status(min: f64, max: f64, low: f64, high: f64) -> &'static str {
+    if min > high {
+        "above_band"
+    } else if max < low {
+        "below_band"
+    } else if min >= low && max <= high {
+        "within_band"
+    } else {
+        "unknown"
     }
 }
 
@@ -522,12 +629,18 @@ fn class_row(
     value: Option<Decimal>,
     total: Decimal,
     target: Option<(f64, f64)>,
+    range: Option<(f64, f64)>,
 ) -> ClassAllocation {
-    let actual = value.map(|v| percent_of(v, total).unwrap_or(Decimal::ZERO));
+    // Percentages only against a complete total; otherwise a min/max range.
+    let actual = value
+        .filter(|_| range.is_none())
+        .map(|v| percent_of(v, total).unwrap_or(Decimal::ZERO));
     let mut row = ClassAllocation {
         asset_class: label.to_string(),
         value: value.map(money),
         actual_percent: actual.map(pct),
+        actual_percent_min: range.map(|r| r.0),
+        actual_percent_max: range.map(|r| r.1),
         target_percent: None,
         tolerance_percent: None,
         band_low: None,
@@ -539,14 +652,17 @@ fn class_row(
     let Some((t, tol)) = target else {
         return row;
     };
+    let low = money_f((t - tol).max(0.0));
+    let high = money_f((t + tol).min(100.0));
     row.target_percent = Some(t);
     row.tolerance_percent = Some(tol);
-    row.band_low = Some(money_f((t - tol).max(0.0)));
-    row.band_high = Some(money_f((t + tol).min(100.0)));
+    row.band_low = Some(low);
+    row.band_high = Some(high);
     row.status = "unknown".to_string();
-    // Drift is judged on the priced part (see `excludedValueShare`); a class
-    // is unknown only when it holds an unpriced position itself.
-    if let (Some(v), Some(actual)) = (value, actual) {
+    if let Some((min, max)) = range {
+        // Partial data: no drift or amount, a band status only when certain.
+        row.status = range_status(min, max, low, high).to_string();
+    } else if let (Some(v), Some(actual)) = (value, actual) {
         let drift = actual - dec(t);
         row.status = if drift.abs() <= dec(tol) {
             "within_band"
@@ -579,12 +695,47 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
         ));
     }
     let alloc = allocation(portfolio, Some(policy), true, true);
+    let range_detail = |c: &ClassAllocation| {
+        json!({ "actualPercentMin": c.actual_percent_min, "actualPercentMax": c.actual_percent_max,
+                "excludedValueShare": alloc.excluded_value_share, "basis": "partial" })
+    };
     for c in &alloc.classes {
-        match (c.target_percent, c.tolerance_percent, c.drift_points) {
-            (Some(t), Some(tol), Some(drift))
-                if (c.status == "below_band" || c.status == "above_band")
-                    && c.value.is_some_and(|v| v > 0.0) =>
-            {
+        let (Some(t), Some(tol)) = (c.target_percent, c.tolerance_percent) else {
+            continue;
+        };
+        let out = c.status == "below_band" || c.status == "above_band";
+        if let (Some(min), Some(max)) = (c.actual_percent_min, c.actual_percent_max) {
+            // Partial data: certain breaches use the nearest possible share.
+            let (low, high) = (c.band_low.unwrap_or(0.0), c.band_high.unwrap_or(100.0));
+            if out {
+                let drift = if c.status == "above_band" {
+                    min - t
+                } else {
+                    max - t
+                };
+                let severity = if drift.abs() > 2.0 * tol {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                };
+                findings.push(
+                    Finding::new("allocation_out_of_band", severity, Category::Allocation,
+                        format!("{} is {:.2}–{:.2}% vs target {:.2}% ±{:.2} whatever the unpriced positions are worth (drift at least {:+.2} pts).", c.asset_class, min, max, t, tol, drift))
+                        .class(&c.asset_class)
+                        .detail(json!({ "actualPercentMin": min, "actualPercentMax": max, "targetPercent": t, "tolerancePercent": tol, "driftPointsAtLeast": money_f(drift), "basis": "partial" })),
+                );
+            } else if c.status == "unknown" && (min < low || max > high) {
+                findings.push(
+                    Finding::new("possible_breach", Severity::Warning, Category::Allocation,
+                        format!("{} may be outside its band ({:.2}–{:.2}% possible vs {:.2}–{:.2}%); checked on a partial basis because prices are missing.", c.asset_class, min, max, low, high))
+                        .class(&c.asset_class)
+                        .detail(range_detail(c)),
+                );
+            }
+            continue;
+        }
+        match c.drift_points {
+            Some(drift) if out && c.value.is_some_and(|v| v > 0.0) => {
                 let severity = if drift.abs() > 2.0 * tol {
                     Severity::Critical
                 } else {
@@ -631,9 +782,11 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
 
     let total = alloc.total;
     let c = &policy.constraints;
-    // With partial data a weight against the priced total is an upper bound:
-    // a pass is certain, a failure is not. Uncertain checks are skipped.
-    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    // With partial data a share is a range: [v / (total + max excluded),
+    // v / total]. A breach is reported only when the whole range is over the
+    // limit; a range straddling it is a possible_breach warning.
+    let partial = !alloc.complete;
+    let mut possible: Vec<serde_json::Value> = Vec::new();
     if let Some(min) = c.minimum_cash_amount {
         let cash: Decimal = portfolio
             .positions
@@ -644,13 +797,10 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
         let passed = cash >= dec(min);
         checks.push(ConstraintCheckRow {
             code: "cash_below_minimum_amount".into(),
-            limit_percent: None,
-            actual_percent: None,
             limit_amount: Some(money_f(min)),
             actual_amount: Some(money(cash)),
-            position_id: None,
-            asset_class: None,
             passed,
+            ..Default::default()
         });
         if !passed {
             findings.push(Finding::new(
@@ -669,35 +819,51 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
             "minimum_cash_months is set, but monthly expenses are unknown; not checked.".into(),
         ));
     }
+    let excluded_any = partial;
     if let Some(limit) = c.single_position_limit_percent {
         for p in portfolio.positions.iter().filter(|p| !p.is_cash()) {
             let Some(v) = value_base(p) else { continue };
-            let w = percent_of(v, total).unwrap_or(Decimal::ZERO);
-            let passed = w <= dec(limit);
-            if !passed && !alloc.complete {
-                skipped.push(json!({ "code": "single_position_limit", "positionId": p.id() }));
-                continue;
-            }
-            checks.push(ConstraintCheckRow {
+            let (min, max) =
+                share_range(v, total, (false, None), (excluded_any, alloc.excluded_max));
+            let mut row = ConstraintCheckRow {
                 code: "single_position_limit".into(),
                 limit_percent: Some(limit),
-                actual_percent: Some(pct(w)),
-                limit_amount: None,
-                actual_amount: None,
                 position_id: p.id().map(String::from),
-                asset_class: None,
-                passed,
-            });
-            if !passed {
+                ..Default::default()
+            };
+            if partial {
+                row.actual_percent_min = Some(min);
+                row.actual_percent_max = Some(max);
+            } else {
+                row.actual_percent = Some(max);
+            }
+            if partial && min <= limit && max > limit {
+                possible.push(json!({ "code": "single_position_limit", "positionId": p.id() }));
+                findings.push(
+                    Finding::new("possible_breach", Severity::Warning, Category::Constraint,
+                        format!("{} may exceed the {limit:.2}% position limit ({min:.2}–{max:.2}% possible); checked on a partial basis because prices are missing.", p.get_name()))
+                        .position(p.id())
+                        .class(p.get_asset_class())
+                        .detail(json!({ "code": "single_position_limit", "limitPercent": limit, "actualPercentMin": min, "actualPercentMax": max, "basis": "partial" })),
+                );
+                continue;
+            }
+            row.passed = min <= limit;
+            checks.push(row);
+            if min > limit {
+                let shown = if partial {
+                    format!("at least {min:.2}%")
+                } else {
+                    format!("{min:.2}%")
+                };
                 findings.push(
                     Finding::new(
                         "single_position_limit",
                         Severity::Critical,
                         Category::Constraint,
                         format!(
-                            "{} is {:.2}% of the portfolio (limit {limit:.2}%).",
-                            p.get_name(),
-                            pct(w)
+                            "{} is {shown} of the portfolio (limit {limit:.2}%).",
+                            p.get_name()
                         ),
                     )
                     .position(p.id())
@@ -708,37 +874,50 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
     }
     if let Some(limit) = c.asset_class_limit_percent {
         for cl in alloc.classes.iter() {
-            let (Some(value), Some(actual)) = (cl.value, cl.actual_percent) else {
-                skipped.push(json!({ "code": "asset_class_limit", "assetClass": cl.asset_class }));
-                continue;
+            let (min, max) = match (
+                cl.actual_percent,
+                cl.actual_percent_min,
+                cl.actual_percent_max,
+            ) {
+                (Some(a), _, _) if cl.value.is_some_and(|v| v > 0.0) => (a, a),
+                (None, Some(lo), Some(hi)) if hi > 0.0 => (lo, hi),
+                _ => continue,
             };
-            if value <= 0.0 {
-                continue;
-            }
-            let passed = actual <= limit;
-            if !passed && !alloc.complete {
-                skipped.push(json!({ "code": "asset_class_limit", "assetClass": cl.asset_class }));
-                continue;
-            }
-            checks.push(ConstraintCheckRow {
+            let mut row = ConstraintCheckRow {
                 code: "asset_class_limit".into(),
                 limit_percent: Some(limit),
-                actual_percent: Some(actual),
-                limit_amount: None,
-                actual_amount: None,
-                position_id: None,
+                actual_percent: cl.actual_percent,
+                actual_percent_min: cl.actual_percent_min,
+                actual_percent_max: cl.actual_percent_max,
                 asset_class: Some(cl.asset_class.clone()),
-                passed,
-            });
-            if !passed {
+                ..Default::default()
+            };
+            if min <= limit && max > limit {
+                possible.push(json!({ "code": "asset_class_limit", "assetClass": cl.asset_class }));
+                findings.push(
+                    Finding::new("possible_breach", Severity::Warning, Category::Constraint,
+                        format!("{} may exceed the {limit:.2}% asset class limit ({min:.2}–{max:.2}% possible); checked on a partial basis because prices are missing.", cl.asset_class))
+                        .class(&cl.asset_class)
+                        .detail(json!({ "code": "asset_class_limit", "limitPercent": limit, "actualPercentMin": min, "actualPercentMax": max, "basis": "partial" })),
+                );
+                continue;
+            }
+            row.passed = min <= limit;
+            checks.push(row);
+            if min > limit {
+                let shown = if partial {
+                    format!("at least {min:.2}%")
+                } else {
+                    format!("{min:.2}%")
+                };
                 findings.push(
                     Finding::new(
                         "asset_class_limit",
                         Severity::Critical,
                         Category::Constraint,
                         format!(
-                            "{} is {:.2}% of the portfolio (limit {limit:.2}%).",
-                            cl.asset_class, actual
+                            "{} is {shown} of the portfolio (limit {limit:.2}%).",
+                            cl.asset_class
                         ),
                     )
                     .class(&cl.asset_class),
@@ -746,7 +925,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
             }
         }
     }
-    if !alloc.complete {
+    if partial {
         let unknown: Vec<&str> = alloc
             .classes
             .iter()
@@ -758,11 +937,20 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                 "checks_incomplete",
                 Severity::Warning,
                 Category::Policy,
-                "Prices or FX rates are missing: allocation drift is not judged and \
-                 percentage limits that could be breached are skipped."
-                    .into(),
+                format!(
+                    "{} position(s) have no price or FX rate (excluded value share {}). Allocation and limits are \
+                     judged on the priced part: only breaches that hold whatever the excluded positions are worth are \
+                     reported; anything that might be out of bounds is a possible_breach warning.",
+                    alloc.excluded_positions.len(),
+                    alloc
+                        .excluded_value_share
+                        .map_or("unknown".to_string(), |s| format!("{s:.2}%"))
+                ),
             )
-            .detail(json!({ "unknownClasses": unknown, "skippedChecks": skipped })),
+            .detail(json!({ "unknownClasses": unknown, "possibleBreaches": possible,
+                            "excludedPositions": alloc.excluded_positions,
+                            "excludedValueShare": alloc.excluded_value_share,
+                            "excludedValueBasis": alloc.excluded_value_basis })),
         );
     }
     PolicyCheck { findings, checks }
