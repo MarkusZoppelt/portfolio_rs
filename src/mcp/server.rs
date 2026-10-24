@@ -173,6 +173,7 @@ impl PortfolioServer {
             unrealized_pnl: pnl.unrealized_pnl.map(money),
             unrealized_pnl_percent: pnl.unrealized_pnl_percent.map(pct),
             day_pnl: pnl.day_pnl.map(money),
+            pnl_partial: pnl.partial,
             positions,
         }))
     }
@@ -216,6 +217,8 @@ impl PortfolioServer {
             classes: alloc.classes,
             untargeted_classes: alloc.untargeted,
             missing_classes: alloc.missing,
+            excluded_positions: alloc.excluded_positions,
+            excluded_value_share: alloc.excluded_value_share,
         }))
     }
 

@@ -1208,22 +1208,20 @@ async fn missing_quote_is_visible_everywhere() {
     let commodities = class(&v, "Commodities");
     assert!(commodities["value"].is_null());
     assert!(commodities["actualPercent"].is_null());
-    for c in v["classes"].as_array().unwrap() {
-        assert!(c["amountToTarget"].is_null(), "{c}");
-        assert!(c["driftPoints"].is_null(), "{c}");
-        assert!(
-            ["unknown", "untargeted"].contains(&c["status"].as_str().unwrap()),
-            "{c}"
-        );
+    // Finance item 1: only the class with the unpriced position is unknown;
+    // the others are judged on the priced part.
+    assert!(["unknown", "untargeted"].contains(&commodities["status"].as_str().unwrap()));
+    assert!(commodities["driftPoints"].is_null());
+    assert!(class(&v, "Bonds")["driftPoints"].is_number());
+    assert_ne!(class(&v, "Bonds")["status"], "unknown");
+    assert_eq!(v["excludedPositions"].as_array().unwrap().len(), 1);
+    // Null when the excluded position has no base cost basis either.
+    if let Some(share) = v["excludedValueShare"].as_f64() {
+        assert!(share > 0.0 && share < 100.0, "{share}");
     }
-    assert_eq!(class(&v, "Bonds")["status"], "unknown");
 
     let v = ok(&client, "check_policy", json!({})).await;
     let found = codes(&v["findings"]);
-    assert!(
-        !found.contains(&"allocation_out_of_band".to_string()),
-        "{found:?}"
-    );
     assert!(found.contains(&"checks_incomplete".to_string()));
     // Data-quality warnings appear once, in the top-level warnings only.
     assert!(!found.contains(&"no_live_price".to_string()));
@@ -1247,12 +1245,15 @@ async fn missing_fx_is_visible_everywhere() {
     assert_eq!(v["totalValue"], 50000.0);
     let v = ok(&client, "get_allocation", json!({})).await;
     assert!(class(&v, "Stocks")["value"].is_null());
-    assert_eq!(class(&v, "Cash")["status"], "unknown");
-    assert!(class(&v, "Cash")["amountToTarget"].is_null());
+    // Finance item 1: drift on the priced part; only classes holding an
+    // unpriced position are unknown.
+    assert_eq!(class(&v, "Stocks")["status"], "unknown");
+    assert_eq!(class(&v, "Cash")["status"], "above_band");
+    assert!(class(&v, "Cash")["amountToTarget"].is_number());
+    assert!(!v["excludedPositions"].as_array().unwrap().is_empty());
     let v = ok(&client, "check_policy", json!({})).await;
-    // Cash is 100 % of the priced total, but that is not a known breach.
+    // The constraint check against a partial total stays skipped.
     assert!(!codes(&v["breaches"]).contains(&"asset_class_limit".to_string()));
-    assert!(!codes(&v["findings"]).contains(&"allocation_out_of_band".to_string()));
     client.cancel().await.unwrap();
 }
 
@@ -1660,12 +1661,13 @@ async fn get_positions_portfolio_totals_currency_and_price_as_of() {
     assert!(cash["priceAsOf"].is_null());
     client.cancel().await.unwrap();
 
-    // One market position without a quote: no partial sum labelled as total.
+    // One market position without a quote: sums over the priced positions,
+    // flagged partial (Finance item 1).
     let (_tmp, client) = connect_partial("quotes_no_gsg.json").await;
     let v = ok(&client, "get_positions", json!({})).await;
-    assert!(v["unrealizedPnl"].is_null(), "{}", v["unrealizedPnl"]);
-    assert!(v["unrealizedPnlPercent"].is_null());
-    assert!(v["dayPnl"].is_null());
+    assert_eq!(v["pnlPartial"], true);
+    assert!(v["unrealizedPnl"].is_number(), "{}", v["unrealizedPnl"]);
+    assert!(v["invested"].is_number());
     client.cancel().await.unwrap();
 }
 
