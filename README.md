@@ -120,6 +120,73 @@ total portfolio values (including cash).
 - **MCP server**: `portfolio_rs mcp` serves your portfolio read-only to MCP
   clients over stdio (see [MCP server](#mcp-server)).
 
+## MCP server
+
+`portfolio_rs mcp` starts a local, read-only [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio. The MCP client spawns it as a child process; JSON-RPC goes over
+stdin/stdout and diagnostics go to stderr. It never writes your files or the
+app config, and it has no network listener.
+
+    portfolio_rs mcp example_data.json                    # one positions file
+    portfolio_rs mcp example_data.json --policy policy.toml
+    portfolio_rs mcp --workspace ~/finance                # positions.json + portfolio/policy.toml
+    portfolio_rs mcp --offline --portfolio demo example_data.json
+
+With no FILE or `--workspace`, it serves the configured workspace (if the last
+mode was workspace) or the configured portfolio file. `--policy` has no
+default, so nothing is picked up from the current directory.
+
+### Client configuration
+
+Most clients (Claude Desktop, Cursor, opencode, ...) take a command, arguments
+and environment. A demo setup with the bundled fake data and offline quotes:
+
+```json
+{
+  "mcpServers": {
+    "portfolio": {
+      "command": "portfolio_rs",
+      "args": ["mcp", "--portfolio", "demo", "/path/to/portfolio_rs/example_data.json"],
+      "env": { "PORTFOLIO_RS_QUOTES": "offline" }
+    }
+  }
+}
+```
+
+Use absolute paths: clients start servers from an arbitrary working directory.
+For deterministic prices without network access, point the env var at a quote
+fixture, e.g. `"PORTFOLIO_RS_QUOTES": "fixture:/path/to/portfolio_rs/tests/fixtures/quotes_example.json"`.
+Drop the `env` entry to use live quotes (Yahoo Finance).
+
+### Tools
+
+All tools are read-only. Outputs are camelCase JSON with `schemaVersion`,
+`portfolioId`, `asOf` (RFC 3339), `baseCurrency` and `warnings`; unknown values
+are `null`, never `0`. Every tool accepts an optional `portfolioId`.
+
+| Tool | Returns |
+| --- | --- |
+| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
+| `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
+| `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); `minSeverity` filter |
+| `get_transactions` | Buys and sells synthesized from purchase history; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
+| `list_portfolios` | The served portfolio (paths only with `includePaths`) |
+| `get_context` | The `portfolio_rs context` report as Markdown or JSON |
+
+Errors come back as tool results with `isError: true` and
+`{"error": {"code", "message"}}`, codes `unknown_portfolio` and
+`invalid_argument`. Error and finding messages never contain amounts.
+
+### Resources
+
+| URI | Content |
+| --- | --- |
+| `portfolio://<id>/context.md` | Portfolio context report (Markdown) |
+| `portfolio://<id>/policy` | Parsed investment policy (JSON), when one is loaded |
+| `portfolio://<id>/policy.md` | Workspace `INVESTMENT_POLICY.md`, when present |
+| `portfolio://schema/positions` | JSON Schema of a position row |
+| `portfolio://schema/findings` | Finding schema and the catalog of finding codes |
+
 ## HTTP API
 
 Serve your portfolio to local scripts, agents, and GUIs:
