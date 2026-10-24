@@ -1839,3 +1839,45 @@ async fn list_portfolios_reports_quote_source() {
     let v = ok(&client, "list_portfolios", json!({})).await;
     assert_eq!(v["portfolios"][0]["quoteSource"], "offline");
 }
+
+/// Item 11: class and position order in the context markdown and JSON is
+/// deterministic, also when unknown (null) values tie.
+#[tokio::test]
+async fn context_order_is_deterministic() {
+    let mut seen_md = None;
+    let mut seen_json = None;
+    for _ in 0..12 {
+        let (_t, client) = connect_partial("quotes_no_fx.json").await;
+        let md = ok(&client, "get_context", json!({})).await["markdown"].clone();
+        let js = ok(&client, "get_context", json!({"format": "json"})).await["context"].clone();
+        let classes: Vec<Value> = js["allocation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["assetClass"].clone())
+            .collect();
+        let names: Vec<Value> = js["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].clone())
+            .collect();
+        let md = md
+            .as_str()
+            .unwrap()
+            .lines()
+            .filter(|l| !l.to_ascii_lowercase().contains("generated"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        match (&seen_md, &seen_json) {
+            (Some(m), Some(j)) => {
+                assert_eq!(&md, m);
+                assert_eq!(&(classes.clone(), names.clone()), j);
+            }
+            _ => {
+                seen_md = Some(md);
+                seen_json = Some((classes, names));
+            }
+        }
+    }
+}
