@@ -476,7 +476,7 @@ pub fn build_cli() -> Command {
                     Arg::new("portfolio")
                         .long("portfolio")
                         .value_name("ID")
-                        .help("Portfolio id exposed to clients (default: default)"),
+                        .help("Portfolio id exposed to clients (default: main)"),
                 )
                 .arg(
                     Arg::new("offline")

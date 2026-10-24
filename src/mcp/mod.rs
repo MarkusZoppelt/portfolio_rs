@@ -81,7 +81,7 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
     let id = opts
         .portfolio_id
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| "main".to_string());
     if id.is_empty()
         || !id
             .chars()
