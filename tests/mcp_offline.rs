@@ -535,7 +535,12 @@ async fn get_transactions_synthesizes_purchases() {
     assert_eq!(dates, sorted);
     for t in txs {
         assert!(t["id"].as_str().unwrap().starts_with("tx_pos_"));
-        assert_eq!(t["type"], "buy");
+        let expected = if t["assetClass"] == "Cash" {
+            "deposit"
+        } else {
+            "buy"
+        };
+        assert_eq!(t["type"], expected);
     }
     let spy: Vec<_> = txs.iter().filter(|t| t["ticker"] == "SPY").collect();
     assert_eq!(spy.len(), 2);
@@ -549,8 +554,9 @@ async fn get_transactions_synthesizes_purchases() {
     assert!(v["totals"]["buyAmountBase"].is_null());
     assert!(codes(&v["warnings"]).contains(&"fx_historic_unavailable".to_string()));
     let cash = txs.iter().find(|t| t["ticker"].is_null()).unwrap();
-    assert_eq!(cash["priceSource"], "missing");
+    assert_eq!(cash["priceSource"], "cash");
     assert_eq!(cash["currency"], "EUR");
+    assert_eq!(cash["amountBase"], 50000.0);
 
     let v = ok(
         &client,
@@ -1643,5 +1649,31 @@ async fn get_positions_portfolio_totals_and_currency() {
     assert!(v["unrealizedPnl"].is_null(), "{}", v["unrealizedPnl"]);
     assert!(v["unrealizedPnlPercent"].is_null());
     assert!(v["dayPnl"].is_null());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_transactions_cash_is_a_deposit_and_fees_are_never_mixed_null_zero() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_transactions", json!({})).await;
+    let txs = v["transactions"].as_array().unwrap();
+    // The cash entry is a deposit at par, not a "buy" with a missing price.
+    let deposits: Vec<&Value> = txs.iter().filter(|t| t["type"] == "deposit").collect();
+    assert_eq!(deposits.len(), 1, "{txs:?}");
+    assert_eq!(deposits[0]["price"], 1.0);
+    assert_eq!(deposits[0]["amountBase"], 50000.0);
+    assert_eq!(deposits[0]["currency"], "EUR");
+    assert_eq!(v["totals"]["depositAmountBase"], 50000.0);
+    assert_eq!(v["totals"]["withdrawalAmountBase"], 0.0);
+    // fees is a number whenever amount is computed (0 = none recorded).
+    for t in txs {
+        assert!(t["fees"].is_number(), "{t}");
+    }
+    let only = ok(&client, "get_transactions", json!({"types": ["buy"]})).await;
+    assert!(only["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["type"] == "buy"));
     client.cancel().await.unwrap();
 }
