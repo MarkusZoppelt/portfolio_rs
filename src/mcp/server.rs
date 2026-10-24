@@ -669,7 +669,13 @@ impl PortfolioServer {
             data_coverage: coverage,
             breakdown: Vec::new(),
         };
+        // Keep a known end value even when the start is missing.
+        let known_end = end
+            .as_ref()
+            .filter(|e| e.complete)
+            .map(|e| perf::r2(e.total_base));
         let (Some(start), Some(end)) = (start, end) else {
+            out.end_value = known_end;
             warnings.push(Finding::new(
                 "insufficient_history",
                 Severity::Warning,
@@ -882,7 +888,19 @@ impl PortfolioServer {
         }
         out.twr_percent = twr.map(|v| (v * 100.0).round() / 100.0);
         out.method = method.to_string();
+        let labels: std::collections::HashMap<String, (String, Option<String>)> = portfolio
+            .positions
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.id()?.to_string(),
+                    (p.get_name().to_string(), p.get_ticker().map(String::from)),
+                ))
+            })
+            .collect();
         let row = |key: String, e: &perf::Effects| PerformanceBreakdown {
+            name: None,
+            ticker: None,
             key,
             start_value: perf::r2(e.start_value),
             end_value: perf::r2(e.end_value),
@@ -899,7 +917,14 @@ impl PortfolioServer {
                 .collect(),
             GroupBy::Position => effects
                 .iter()
-                .map(|(k, (_, e))| row(k.clone(), e))
+                .map(|(k, (_, e))| {
+                    let mut r = row(k.clone(), e);
+                    if let Some((name, ticker)) = labels.get(k) {
+                        r.name = Some(name.clone());
+                        r.ticker = ticker.clone();
+                    }
+                    r
+                })
                 .collect(),
         };
         meta.warnings = warnings;

@@ -193,7 +193,8 @@ pattern is in the workspace `.gitignore` template and checked by `doctor`.
 `manualRevaluation`; `change` always equals their sum (within 0.01).
 Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
 `1y`, `since_inception` and `custom` (with `from` and `to`, YYYY-MM-DD).
-`groupBy` is `none`, `assetClass` or `position`.
+`groupBy` is `none`, `assetClass` or `position` (position rows carry `name` and
+`ticker`). With `insufficient_history`, `endValue` still holds a known end value.
 
 The start value is the last stored snapshot dated before `from`
 (`dataCoverage.startPointDate`), at most `maxStartAgeDays` days before the
@@ -237,7 +238,8 @@ The MCP server only reads snapshots. Write them with:
 
 Each run values the portfolio and stores one line per day (a second run that
 day replaces it) in `<data-dir>/<portfolio>/snapshots.jsonl`, written
-atomically with mode 0600 (the directory gets 0700). The data dir is
+atomically with mode 0600 (the directory, and any parents the snapshot
+creates, get 0700); cash `quantity` is the balance (`Amount`). The data dir is
 `--data-dir`, else `PORTFOLIO_RS_DATA_DIR`, else `<workspace>/portfolio/history`
 in workspace mode, else `$XDG_DATA_HOME/portfolio_rs` (`~/.local/share/portfolio_rs`);
 never the current directory. Pass the same `--data-dir` to `mcp`. A daily cron
