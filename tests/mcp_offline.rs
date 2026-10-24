@@ -1617,3 +1617,31 @@ async fn cash_buffer_in_check_policy_and_get_context() {
     );
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn get_positions_portfolio_totals_and_currency() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    // Sum of the market rows (cash has no cost basis).
+    assert_eq!(v["invested"], 39900.0);
+    assert_eq!(v["unrealizedPnl"], 7308.0);
+    assert_eq!(v["unrealizedPnlPercent"], 18.32);
+    assert!(v["dayPnl"].is_number());
+    let cash = v["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "cash")
+        .unwrap();
+    assert_eq!(cash["currency"], "EUR");
+    assert_eq!(by_ticker(&v["positions"], "SPY")["currency"], "USD");
+    client.cancel().await.unwrap();
+
+    // One market position without a quote: no partial sum labelled as total.
+    let (_tmp, client) = connect_partial("quotes_no_gsg.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert!(v["unrealizedPnl"].is_null(), "{}", v["unrealizedPnl"]);
+    assert!(v["unrealizedPnlPercent"].is_null());
+    assert!(v["dayPnl"].is_null());
+    client.cancel().await.unwrap();
+}

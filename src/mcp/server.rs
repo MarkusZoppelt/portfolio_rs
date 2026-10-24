@@ -149,8 +149,11 @@ impl PortfolioServer {
         self.check_id(&input.portfolio_id)?;
         let portfolio = self.portfolio(input.refresh.unwrap_or(false)).await;
         self.check_class(&portfolio, &input.asset_class).await?;
+        let base = self.base_currency().await;
+        let pnl = analytics::portfolio_pnl(&portfolio);
         let (positions, total, cash) = analytics::position_rows(
             &portfolio,
+            &base,
             input.include_manual.unwrap_or(true),
             input.asset_class.as_deref(),
             input.sort_by.unwrap_or_default(),
@@ -161,6 +164,10 @@ impl PortfolioServer {
                 .await,
             total_value: money(total),
             cash_value: money(cash),
+            invested: pnl.invested.map(money),
+            unrealized_pnl: pnl.unrealized_pnl.map(money),
+            unrealized_pnl_percent: pnl.unrealized_pnl_percent.map(pct),
+            day_pnl: pnl.day_pnl.map(money),
             positions,
             network_status: analytics::network_status(&portfolio).to_string(),
         }))
