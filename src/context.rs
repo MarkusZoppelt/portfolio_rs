@@ -42,6 +42,9 @@ pub struct PortfolioContext {
     risk_flags: Vec<String>,
     data_quality_flags: Vec<String>,
     follow_up_commands: Vec<String>,
+    /// False when a position has no price or FX rate: totals cover only the
+    /// priced positions and their values/weights are null.
+    complete: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,8 +63,9 @@ struct ContextSummary {
 #[serde(rename_all = "camelCase")]
 struct AllocationContext {
     asset_class: String,
-    value: f64,
-    percent: f64,
+    /// Null when a position in the class is unpriced.
+    value: Option<f64>,
+    percent: Option<f64>,
     position_count: usize,
 }
 
@@ -72,9 +76,13 @@ struct PositionContext {
     ticker: Option<String>,
     asset_class: String,
     quantity: f64,
+    /// Latest price in `priceCurrency` (the quote currency, not the base).
     price: Option<f64>,
-    value: f64,
-    weight_percent: f64,
+    price_currency: Option<String>,
+    /// Base-currency value; null when the price or FX rate is unknown.
+    value: Option<f64>,
+    weight_percent: Option<f64>,
+    /// Average cost in `priceCurrency`.
     average_cost: Option<f64>,
     invested: Option<f64>,
     pnl: Option<f64>,
@@ -86,20 +94,23 @@ impl PortfolioContext {
     pub fn from_portfolio(portfolio: &Portfolio, currency: &str, network_status: &str) -> Self {
         let breakdown = portfolio.value_breakdown();
         let total = breakdown.total;
-        let mut allocation: HashMap<String, (Decimal, usize)> = HashMap::new();
+        let mut allocation: HashMap<String, (Option<Decimal>, usize)> = HashMap::new();
         let mut positions = Vec::new();
         let mut data_quality_flags = Vec::new();
 
         for position in &portfolio.positions {
-            let value_dec = position.balance_dec();
-            let value = to_f64(value_dec);
+            let priced = position.get_ticker().is_none() || position.has_market_price();
+            let value_dec = priced.then(|| position.balance_dec());
             let asset_class = position.get_asset_class().to_string();
             let is_cash = position.is_cash();
 
             let allocation_entry = allocation
                 .entry(asset_class.clone())
-                .or_insert((Decimal::ZERO, 0));
-            allocation_entry.0 += value_dec;
+                .or_insert((Some(Decimal::ZERO), 0));
+            allocation_entry.0 = match (allocation_entry.0, value_dec) {
+                (Some(sum), Some(v)) => Some(sum + v),
+                _ => None,
+            };
             allocation_entry.1 += 1;
 
             if position.get_ticker().is_some() && position.total_invested().is_none() {
@@ -122,7 +133,7 @@ impl PortfolioContext {
                     position.price_currency().unwrap_or("?"),
                     position.get_name()
                 ));
-            } else if !position.has_market_price() {
+            } else if position.get_ticker().is_some() && !position.has_market_price() {
                 data_quality_flags.push(format!(
                     "No current market price for {}; position excluded from totals.",
                     position.get_name()
@@ -134,9 +145,15 @@ impl PortfolioContext {
                 ticker: position.get_ticker().map(ToString::to_string),
                 asset_class,
                 quantity: position.get_amount(),
-                price: position.get_ticker().map(|_| position.market_price()),
-                value,
-                weight_percent: percent(value_dec, total),
+                price: (position.get_ticker().is_some() && position.has_market_price())
+                    .then(|| position.market_price()),
+                price_currency: if position.get_ticker().is_some() {
+                    Some(position.price_currency().unwrap_or(currency).to_uppercase())
+                } else {
+                    None
+                },
+                value: value_dec.map(to_f64),
+                weight_percent: value_dec.map(|v| percent(v, total)),
                 average_cost: position.average_cost(),
                 invested: position.total_invested(),
                 pnl: position.pnl(),
@@ -149,17 +166,28 @@ impl PortfolioContext {
             .into_iter()
             .map(|(asset_class, (value, position_count))| AllocationContext {
                 asset_class,
-                value: to_f64(value),
-                percent: percent(value, total),
+                value: value.map(to_f64),
+                percent: value.map(|v| percent(v, total)),
                 position_count,
             })
             .collect::<Vec<_>>();
-        allocation.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(Ordering::Equal));
+        let key = |v: Option<f64>| v.unwrap_or(f64::NEG_INFINITY);
+        allocation.sort_by(|a, b| {
+            key(b.value)
+                .partial_cmp(&key(a.value))
+                .unwrap_or(Ordering::Equal)
+        });
 
-        positions.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(Ordering::Equal));
+        positions.sort_by(|a, b| {
+            key(b.value)
+                .partial_cmp(&key(a.value))
+                .unwrap_or(Ordering::Equal)
+        });
+        let complete = positions.iter().all(|p| p.value.is_some());
 
-        let largest_position = positions.first().map(|p| p.name.clone());
-        let largest_position_percent = positions.first().map(|p| p.weight_percent);
+        let largest = positions.iter().find(|p| p.value.is_some());
+        let largest_position = largest.map(|p| p.name.clone());
+        let largest_position_percent = largest.and_then(|p| p.weight_percent);
 
         let summary = ContextSummary {
             total_value: to_f64(total),
@@ -171,7 +199,16 @@ impl PortfolioContext {
             largest_position_percent,
         };
 
-        let risk_flags = risk_flags(&summary, &allocation, &positions);
+        let risk_flags = risk_flags(&summary, &allocation, &positions, complete);
+        let any_priced = portfolio
+            .positions
+            .iter()
+            .any(|p| p.get_ticker().is_some() && p.has_market_price());
+        let network_status = match (network_status, complete, any_priced) {
+            ("Connected", false, true) => "Partial",
+            ("Connected", false, false) => "Offline",
+            (s, _, _) => s,
+        };
 
         if network_status != "Connected" {
             data_quality_flags.push(format!(
@@ -190,6 +227,7 @@ impl PortfolioContext {
             positions,
             risk_flags,
             data_quality_flags,
+            complete,
             follow_up_commands: vec![
                 "portfolio_rs balances [JSON_FILE]".to_string(),
                 "portfolio_rs allocation [JSON_FILE]".to_string(),
@@ -197,6 +235,11 @@ impl PortfolioContext {
                 "portfolio_rs context [JSON_FILE] --format json".to_string(),
             ],
         }
+    }
+
+    /// Replace the suggested follow-ups (MCP names its tools instead of CLI commands).
+    pub fn set_follow_up_commands(&mut self, commands: Vec<String>) {
+        self.follow_up_commands = commands;
     }
 
     pub fn to_json(&self) -> Result<String> {
@@ -209,7 +252,14 @@ impl PortfolioContext {
         out.push_str("# Portfolio Context\n\n");
         out.push_str(&format!("Generated: {}\n", self.generated_at));
         out.push_str(&format!("Currency: {}\n", self.currency));
-        out.push_str(&format!("Network Status: {}\n\n", self.network_status));
+        out.push_str(&format!("Network Status: {}\n", self.network_status));
+        if !self.complete {
+            let unpriced = self.positions.iter().filter(|p| p.value.is_none()).count();
+            out.push_str(&format!(
+                "Data: INCOMPLETE ({unpriced} unpriced position(s)); totals and weights cover priced positions only.\n"
+            ));
+        }
+        out.push('\n');
 
         out.push_str("## Summary\n\n");
         out.push_str(&format!(
@@ -244,8 +294,8 @@ impl PortfolioContext {
             out.push_str(&format!(
                 "| {} | {} | {} | {} |\n",
                 escape_markdown(&item.asset_class),
-                money(item.value, &self.currency),
-                pct(item.percent),
+                opt(item.value.map(|v| money(v, &self.currency))),
+                opt(item.percent.map(pct)),
                 item.position_count
             ));
         }
@@ -264,12 +314,12 @@ impl PortfolioContext {
                     .unwrap_or_else(|| "-".to_string()),
                 escape_markdown(&position.asset_class),
                 quantity(position.quantity),
-                position
-                    .price
-                    .map(|value| money(value, &self.currency))
-                    .unwrap_or_else(|| "-".to_string()),
-                money(position.value, &self.currency),
-                pct(position.weight_percent),
+                opt(position.price.map(|value| money(
+                    value,
+                    position.price_currency.as_deref().unwrap_or(&self.currency)
+                ))),
+                opt(position.value.map(|v| money(v, &self.currency))),
+                opt(position.weight_percent.map(pct)),
                 position
                     .pnl
                     .map(|value| money(value, &self.currency))
@@ -304,30 +354,46 @@ fn risk_flags(
     summary: &ContextSummary,
     allocation: &[AllocationContext],
     positions: &[PositionContext],
+    complete: bool,
 ) -> Vec<String> {
     let mut flags = Vec::new();
 
-    if summary.position_count == 0 || summary.total_value <= 0.0 {
+    if summary.position_count == 0 || (summary.total_value <= 0.0 && complete) {
         flags.push("Portfolio is empty or has no positive value.".to_string());
+        return flags;
+    }
+    if !complete {
+        // Weights against a partial total overstate every priced position
+        // (e.g. cash shows as 100 % offline): no concentration or liquidity
+        // flags until all positions are priced.
+        flags.push(
+            "Data is incomplete; concentration and liquidity flags are not evaluated.".to_string(),
+        );
         return flags;
     }
 
     for position in positions {
-        if position.weight_percent >= SINGLE_POSITION_CONCENTRATION_THRESHOLD {
+        let Some(weight) = position.weight_percent else {
+            continue;
+        };
+        if weight >= SINGLE_POSITION_CONCENTRATION_THRESHOLD {
             flags.push(format!(
                 "Single-position concentration: {} is {} of the portfolio.",
                 position.name,
-                pct(position.weight_percent)
+                pct(weight)
             ));
         }
     }
 
     for item in allocation {
-        if item.percent >= ASSET_CLASS_CONCENTRATION_THRESHOLD {
+        let Some(percent) = item.percent else {
+            continue;
+        };
+        if percent >= ASSET_CLASS_CONCENTRATION_THRESHOLD {
             flags.push(format!(
                 "Asset-class concentration: {} is {} of the portfolio.",
                 item.asset_class,
-                pct(item.percent)
+                pct(percent)
             ));
         }
     }
@@ -352,6 +418,10 @@ fn percent(value: Decimal, total: Decimal) -> f64 {
 
 fn money(value: f64, currency: &str) -> String {
     format!("{value:.2} {currency}")
+}
+
+fn opt(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "-".to_string())
 }
 
 fn pct(value: f64) -> String {

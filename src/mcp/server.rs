@@ -91,6 +91,19 @@ impl PortfolioServer {
         })
     }
 
+    /// The CLI context with follow-ups naming MCP tools instead of CLI commands.
+    async fn context(&self) -> eyre::Result<crate::context::PortfolioContext> {
+        let mut ctx = self.served.state.get_context().await?;
+        ctx.set_follow_up_commands(vec![
+            "get_positions".to_string(),
+            "get_allocation".to_string(),
+            "check_policy".to_string(),
+            "get_transactions".to_string(),
+            "get_context {\"format\": \"json\"}".to_string(),
+        ]);
+        Ok(ctx)
+    }
+
     fn uri(&self, suffix: &str) -> String {
         format!("portfolio://{}/{suffix}", self.served.id)
     }
@@ -386,9 +399,7 @@ impl PortfolioServer {
         self.check_id(&input.portfolio_id)?;
         let format = input.format.unwrap_or_default();
         let context = self
-            .served
-            .state
-            .get_context()
+            .context()
             .await
             .map_err(|_| ToolError::new("internal", "could not build the portfolio context"))?;
         let (markdown, value) = match format {
@@ -563,7 +574,7 @@ impl ServerHandler for PortfolioServer {
         }
         match what {
             "context.md" => {
-                let ctx = self.served.state.get_context().await.map_err(|_| {
+                let ctx = self.context().await.map_err(|_| {
                     McpError::internal_error("could not build the portfolio context", None)
                 })?;
                 Ok(text(uri, "text/markdown", ctx.to_markdown()))
