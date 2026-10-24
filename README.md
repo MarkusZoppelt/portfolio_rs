@@ -220,7 +220,9 @@ count as contributions (`incomeEffect` is 0 until there is an income ledger).
 for every day, otherwise Modified Dietz over the stored points
 (`modified_dietz`, flagged by a `performance_approximate` note), with each buy or sell
 weighted at its transaction date and each cash change (or flow without a dated
-transaction) at the snapshot that shows it. Dates (`from`, `to` and every
+transaction) at the snapshot that shows it. A buy or sell without a recorded
+price is valued at the historic close of its date, also flagged by a
+`performance_approximate` note (`detail.reason: estimated_transaction_price`). Dates (`from`, `to` and every
 snapshot `date`) must be strict `YYYY-MM-DD`; snapshot lines with bad JSON or
 a looser date are skipped and counted in `dataCoverage.skippedLines`, with a
 `snapshot_lines_skipped` warning because they can move the start point.

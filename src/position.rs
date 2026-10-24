@@ -928,12 +928,13 @@ pub async fn handle_position_with<P: QuoteProvider>(
         apply_quote_result(position, close);
 
         // Purchase prices are needed even without a current price: the cost
-        // basis sizes an excluded position (Finance N1/N3).
+        // basis sizes an excluded position (Finance N1/N3). Sells get one too,
+        // so their proceeds are known to performance (Finance retest N1).
         if !position.purchases.is_empty() {
             let mut filled_purchases = Vec::with_capacity(position.purchases.len());
             for mut p in position.purchases.clone() {
                 let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
-                if needs_price && p.quantity > Decimal::ZERO {
+                if needs_price && p.quantity != Decimal::ZERO {
                     if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
                         if let Ok(close) = provider.close_on(ticker, date).await {
                             p.estimated_price = Some(dec(close.max(0.0)));

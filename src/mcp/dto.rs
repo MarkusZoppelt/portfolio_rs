@@ -308,7 +308,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "performance_approximate",
         "data_quality",
         "info",
-        "The return is a Modified Dietz approximation because no daily snapshot chain covers the period.",
+        "The figures are approximate: a Modified Dietz return (no daily snapshot chain covers the period), or transactions valued at the historic close for want of a recorded price.",
     ),
     (
         "performance_twr_unavailable",
