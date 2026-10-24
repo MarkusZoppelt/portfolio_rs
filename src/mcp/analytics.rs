@@ -87,10 +87,12 @@ fn total_known(positions: &[&PortfolioPosition]) -> Decimal {
     positions.iter().filter_map(|p| value_base(p)).sum()
 }
 
-/// Portfolio-level cost basis and PnL over the market positions (cash and
-/// manual holdings have none). Each total is null as soon as one market
-/// position lacks the input, so a partial sum is never reported as the total.
+/// Portfolio-level cost basis and PnL over the priced market positions (cash
+/// and manual holdings have none). Positions without a base value or without
+/// the input are left out and `partial` is set, so a partial sum is always
+/// flagged. A total is null only when no position contributes.
 pub struct PortfolioPnl {
+    pub partial: bool,
     pub invested: Option<Decimal>,
     pub unrealized_pnl: Option<Decimal>,
     pub unrealized_pnl_percent: Option<Decimal>,
@@ -98,13 +100,24 @@ pub struct PortfolioPnl {
 }
 
 pub fn portfolio_pnl(portfolio: &Portfolio) -> PortfolioPnl {
-    let market: Vec<&PortfolioPosition> = portfolio
+    let all_market: Vec<&PortfolioPosition> = portfolio
         .positions
         .iter()
         .filter(|p| kind(p) == "market")
         .collect();
+    let market: Vec<&PortfolioPosition> = all_market
+        .iter()
+        .copied()
+        .filter(|p| value_base(p).is_some())
+        .collect();
+    let partial = std::cell::Cell::new(market.len() < all_market.len());
     let sum = |f: &dyn Fn(&PortfolioPosition) -> Option<Decimal>| -> Option<Decimal> {
-        market.iter().map(|p| f(p)).sum::<Option<Decimal>>()
+        let parts: Vec<Option<Decimal>> = market.iter().map(|p| f(p)).collect();
+        if parts.iter().any(Option::is_none) {
+            partial.set(true);
+        }
+        let known: Vec<Decimal> = parts.into_iter().flatten().collect();
+        (!known.is_empty() || all_market.is_empty()).then(|| known.into_iter().sum())
     };
     let invested = sum(&|p| p.total_invested_dec());
     let unrealized_pnl = sum(&|p| p.pnl_dec());
@@ -119,6 +132,7 @@ pub fn portfolio_pnl(portfolio: &Portfolio) -> PortfolioPnl {
         _ => None,
     };
     PortfolioPnl {
+        partial: partial.get(),
         invested,
         unrealized_pnl,
         unrealized_pnl_percent,
@@ -402,6 +416,11 @@ pub struct Allocation {
     pub classes: Vec<ClassAllocation>,
     pub untargeted: Vec<String>,
     pub missing: Vec<String>,
+    /// Ids of included positions without a base value (left out of `total`).
+    pub excluded_positions: Vec<String>,
+    /// Share of the excluded positions at cost basis in (priced total +
+    /// their cost basis); null when one of them has no cost basis either.
+    pub excluded_value_share: Option<f64>,
 }
 
 pub fn allocation(
@@ -450,7 +469,7 @@ pub fn allocation(
         if target.is_none() {
             untargeted.push(label.clone());
         }
-        classes.push(class_row(label, *value, total, target.map(band), complete));
+        classes.push(class_row(label, *value, total, target.map(band)));
     }
     let mut missing = Vec::new();
     if let Some(pol) = policy {
@@ -462,7 +481,6 @@ pub fn allocation(
                     Some(Decimal::ZERO),
                     total,
                     Some(band(t)),
-                    complete,
                 ));
             }
         }
@@ -473,12 +491,29 @@ pub fn allocation(
             .total_cmp(&key(a))
             .then_with(|| a.asset_class.cmp(&b.asset_class))
     });
+    let excluded: Vec<&&PortfolioPosition> = included
+        .iter()
+        .filter(|p| value_base(p).is_none())
+        .collect();
+    let excluded_cost: Option<Decimal> = excluded
+        .iter()
+        .map(|p| p.total_invested_dec())
+        .sum::<Option<Decimal>>();
+    let excluded_value_share = excluded_cost.map(|c| {
+        if excluded.is_empty() {
+            0.0
+        } else {
+            pct(percent_of(c, total + c).unwrap_or(Decimal::ZERO))
+        }
+    });
     Allocation {
         total,
         complete,
         classes,
         untargeted,
         missing,
+        excluded_positions: excluded.iter().map(|p| pid(p)).collect(),
+        excluded_value_share,
     }
 }
 
@@ -487,7 +522,6 @@ fn class_row(
     value: Option<Decimal>,
     total: Decimal,
     target: Option<(f64, f64)>,
-    complete: bool,
 ) -> ClassAllocation {
     let actual = value.map(|v| percent_of(v, total).unwrap_or(Decimal::ZERO));
     let mut row = ClassAllocation {
@@ -510,9 +544,9 @@ fn class_row(
     row.band_low = Some(money_f((t - tol).max(0.0)));
     row.band_high = Some(money_f((t + tol).min(100.0)));
     row.status = "unknown".to_string();
-    // Drift and buy/sell amounts from a partial total would be wrong: only
-    // judge them when every position is priced.
-    if let (true, Some(v), Some(actual)) = (complete, value, actual) {
+    // Drift is judged on the priced part (see `excludedValueShare`); a class
+    // is unknown only when it holds an unpriced position itself.
+    if let (Some(v), Some(actual)) = (value, actual) {
         let drift = actual - dec(t);
         row.status = if drift.abs() <= dec(tol) {
             "within_band"

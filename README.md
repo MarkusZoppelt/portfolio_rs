@@ -201,8 +201,12 @@ Missing quotes or FX rates are never hidden: every response carries
 `complete` (false when any position is unpriced) and `dataQuality`
 (`missingPrices`, `missingFx`, `affectedPositions`, `affectedClasses`).
 Totals then cover only priced positions; a class with an unpriced position has
-a `null` value, targeted classes get status `unknown`, `amountToTarget` and
-drift findings are suppressed, and `check_policy` adds `checks_incomplete`.
+a `null` value and, if targeted, status `unknown`. Every other class gets its
+drift, status and `amountToTarget` against the priced total;
+`get_allocation` lists the left-out positions in `excludedPositions` and their
+share at cost basis in `excludedValueShare`. Constraint checks that would fail
+only because of the partial total are skipped, and `check_policy` adds
+`checks_incomplete`.
 `networkStatus` (in every tool response and in `get_context`, also via `/api/context`) is `connected` (every market position has a fresh quote and FX
 rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
 fresh quotes; cached prices do not count as connected). Each position row
@@ -215,7 +219,7 @@ governed by the cash-buffer and asset-class rules instead.
 
 | Tool | Returns |
 | --- | --- |
-| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` over market positions (null if any input is unknown). Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
+| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` summed over the priced market positions, `pnlPartial: true` when a position is left out. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
 | `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); one deduplicated list (policy findings + warning-severity data quality, filtered by `minSeverity`) feeds `findings` (policy part), `breaches` (critical), top-level `warnings` (warning severity), `counts` and `status`, so `counts.warning` = `warnings` length and `counts.critical` = `breaches` length; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with `synthesized: true`, dated at the earliest purchase date or else the file date, fees 0); `fees` is 0 when none is recorded; `complete` is false when a matching `amountBase` is null (no historic FX); date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |

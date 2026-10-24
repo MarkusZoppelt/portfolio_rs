@@ -428,15 +428,17 @@ pub struct PositionsOutput {
     pub meta: Meta,
     pub total_value: f64,
     pub cash_value: f64,
-    /// Portfolio-level cost basis of the market positions (base currency);
-    /// null when any market position's cost basis is unknown.
+    /// Portfolio-level cost basis of the priced market positions (base
+    /// currency); positions without the input are left out (`pnlPartial`).
     pub invested: Option<f64>,
-    /// Unrealized PnL of the market positions; null when any is unknown.
+    /// Unrealized PnL of the priced market positions.
     pub unrealized_pnl: Option<f64>,
     pub unrealized_pnl_percent: Option<f64>,
-    /// Today's PnL of the market positions vs. the previous close; null when
-    /// any market position lacks a price or previous close.
+    /// Today's PnL of the priced market positions vs. the previous close.
     pub day_pnl: Option<f64>,
+    /// True when invested/PnL/dayPnl leave out a market position (no price,
+    /// FX, cost basis or previous close).
+    pub pnl_partial: bool,
     pub positions: Vec<PositionRow>,
 }
 
@@ -463,10 +465,10 @@ pub struct ClassAllocation {
     /// actualPercent - targetPercent, in percentage points.
     pub drift_points: Option<f64>,
     /// within_band | below_band | above_band | untargeted | unknown
-    /// (unknown: targeted, but data is incomplete so drift cannot be judged).
+    /// (unknown: targeted, but the class holds an unpriced position).
     pub status: String,
     /// Base-currency amount to buy (positive) or sell (negative) to reach the
-    /// target; null when data is incomplete.
+    /// target against the priced total; null when the class value is unknown.
     pub amount_to_target: Option<f64>,
 }
 
@@ -480,6 +482,12 @@ pub struct AllocationOutput {
     pub classes: Vec<ClassAllocation>,
     pub untargeted_classes: Vec<String>,
     pub missing_classes: Vec<String>,
+    /// Ids of positions without a base value; drift and percentages cover the
+    /// priced part only.
+    pub excluded_positions: Vec<String>,
+    /// Excluded positions' share at cost basis (percent of priced total plus
+    /// their cost basis); null when a cost basis is unknown too.
+    pub excluded_value_share: Option<f64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
