@@ -14,7 +14,7 @@ use eyre::{bail, eyre, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::money::{dec, percent_change, to_f64, Decimal};
+use crate::money::{dec, to_f64, Decimal};
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::services::quotes::AnyProvider;
 use crate::{
@@ -322,28 +322,18 @@ impl AppState {
         let breakdown = portfolio.value_breakdown();
         let allocation = portfolio.get_allocation();
 
-        // Summed over every position with a cost basis (unlike
-        // `cost_basis_totals`, which skips cash and unpriced holdings).
-        let mut total_invested = Decimal::ZERO;
-        let mut total_pnl = Decimal::ZERO;
+        // Same scope as the CLI and TUI: securities with a price and a
+        // complete cost basis; cash and the rest are excluded (and flagged
+        // per position via `invested: null`).
+        let (total_invested, total_pnl) = portfolio.cost_basis_totals_dec();
         let positions: Vec<PositionDto> = portfolio
             .positions
             .iter()
             .enumerate()
-            .map(|(i, p)| {
-                if let Some(inv) = p.total_invested_dec() {
-                    total_invested += inv;
-                }
-                if let Some(pnl) = p.pnl_dec() {
-                    total_pnl += pnl;
-                }
-                position_to_dto(i, p)
-            })
+            .map(|(i, p)| position_to_dto(i, p))
             .collect();
 
-        let pnl_percent = percent_change(breakdown.total, total_invested)
-            .map(to_f64)
-            .unwrap_or(0.0);
+        let pnl_percent = portfolio.hist_percent();
 
         PortfolioSummaryDto {
             total_value: to_f64(breakdown.total),
@@ -1244,5 +1234,64 @@ mod tests {
         assert_eq!(perf.invested, 1_000.0);
         assert_eq!(perf.unrealized_pnl, -200.0);
         assert!((perf.pnl_percent - (-20.0)).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_summary_totals_use_cost_basis_scope() {
+        use crate::position::PriceStatus;
+        let mut priced =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 10.0, 80.0, PriceStatus::Live);
+        priced.purchases.push(Purchase {
+            quantity: dec(10.0),
+            price: Some(dec(100.0)),
+            ..Default::default()
+        });
+        let mut no_basis =
+            PortfolioPosition::for_test(Some("FAKENB"), "Stocks", 1.0, 50.0, PriceStatus::Live);
+        no_basis.purchases.push(Purchase {
+            quantity: dec(1.0),
+            ..Default::default()
+        });
+        let mut gone = PortfolioPosition::for_test(
+            Some("FAKEGONE"),
+            "Stocks",
+            1.0,
+            0.0,
+            PriceStatus::Unavailable,
+        );
+        gone.purchases.push(Purchase {
+            quantity: dec(1.0),
+            price: Some(dec(500.0)),
+            ..Default::default()
+        });
+        let mut cash = PortfolioPosition::for_test(None, "Cash", 1_000.0, 0.0, PriceStatus::Live);
+        cash.purchases.push(Purchase {
+            quantity: dec(1.0),
+            price: Some(dec(1_000.0)),
+            ..Default::default()
+        });
+        let mut portfolio = Portfolio::new();
+        for p in [priced, no_basis, gone, cash] {
+            portfolio.add_position(p);
+        }
+        let flagged: Vec<_> = portfolio
+            .positions_without_cost_basis()
+            .iter()
+            .map(|p| p.get_ticker().unwrap().to_string())
+            .collect();
+        assert_eq!(flagged, vec!["FAKENB"]);
+
+        let state = AppState::new("EUR".to_string());
+        *state.portfolio_cache.write().await = Some(CachedPortfolio {
+            portfolio,
+            fetched_at: Instant::now(),
+        });
+        let summary = state.get_portfolio_summary().await;
+        assert_eq!(summary.total_invested, 1_000.0);
+        assert_eq!(summary.total_pnl, -200.0);
+        assert!((summary.pnl_percent - (-20.0)).abs() < 1e-9);
+        let perf = state.get_performance().await;
+        assert_eq!(perf.invested, summary.total_invested);
+        assert_eq!(perf.unrealized_pnl, summary.total_pnl);
     }
 }

@@ -80,6 +80,9 @@ impl Portfolio {
     }
 
     /// [`Self::cost_basis_totals`] as [`Decimal`]s.
+    ///
+    /// Only securities with both a market price and a complete cost basis
+    /// count, on both sides; see [`Self::positions_without_cost_basis`].
     pub fn cost_basis_totals_dec(&self) -> (Decimal, Decimal) {
         let mut invested = Decimal::ZERO;
         let mut pnl = Decimal::ZERO;
@@ -87,14 +90,22 @@ impl Portfolio {
             if position.is_cash() || !position.has_market_price() {
                 continue;
             }
-            if let Some(inv) = position.total_invested_dec() {
+            if let (Some(inv), Some(p)) = (position.total_invested_dec(), position.pnl_dec()) {
                 invested += inv;
-            }
-            if let Some(p) = position.pnl_dec() {
                 pnl += p;
             }
         }
         (invested, pnl)
+    }
+
+    /// Priced securities left out of invested/PnL totals because their cost
+    /// basis is unknown (no purchases, or a buy without a price).
+    pub fn positions_without_cost_basis(&self) -> Vec<&PortfolioPosition> {
+        self.positions
+            .iter()
+            .filter(|p| !p.is_cash() && p.has_market_price() && p.total_invested_dec().is_none())
+            .filter(|p| p.quantity_dec() > Decimal::ZERO)
+            .collect()
     }
 
     /// Total, cash, securities and previous-close value, in one pass.
@@ -521,6 +532,16 @@ impl Portfolio {
                 out,
                 "Warning: {} position(s) without market price excluded from totals: {}",
                 no_price.len(),
+                labels
+            );
+        }
+        let no_basis = self.positions_without_cost_basis();
+        if !no_basis.is_empty() {
+            let labels = no_basis.iter().map(label).collect::<Vec<_>>().join(", ");
+            let _ = writeln!(
+                out,
+                "Warning: {} position(s) without complete cost basis excluded from invested/PnL: {}",
+                no_basis.len(),
                 labels
             );
         }
