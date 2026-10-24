@@ -249,9 +249,10 @@ pub async fn serve_stdio(opts: McpOptions) -> Result<()> {
 }
 
 /// Value the portfolio selected by `opts` and upsert today's snapshot.
-/// Returns the snapshot file path. Used by `portfolio_rs snapshot`; the MCP
+/// Returns the snapshot file path, what happened to the line, and whether
+/// the new snapshot was complete. Used by `portfolio_rs snapshot`; the MCP
 /// server itself never writes snapshots.
-pub async fn record_snapshot(opts: &McpOptions) -> Result<PathBuf> {
+pub async fn record_snapshot(opts: &McpOptions) -> Result<(PathBuf, snapshots::Upsert, bool)> {
     let served = load(opts).await?;
     let path = served.snapshots_path.clone().ok_or_else(|| {
         eyre::eyre!("no snapshot dir: pass --data-dir or set PORTFOLIO_RS_DATA_DIR")
@@ -265,6 +266,6 @@ pub async fn record_snapshot(opts: &McpOptions) -> Result<PathBuf> {
         .format("%Y-%m-%d")
         .to_string();
     let snap = snapshots::from_portfolio(&portfolio, &base, &today, stale);
-    snapshots::upsert(&path, &snap)?;
-    Ok(path)
+    let outcome = snapshots::upsert(&path, &snap)?;
+    Ok((path, outcome, snap.complete))
 }

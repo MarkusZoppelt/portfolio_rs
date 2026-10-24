@@ -63,7 +63,18 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
 /// `portfolio_rs snapshot`: value the portfolio and upsert today's line.
 pub async fn handle_snapshot(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
     let opts = options(matches, cfg);
-    let path = crate::mcp::record_snapshot(&opts).await?;
-    eprintln!("Snapshot written to {}", path.display());
+    use crate::mcp::snapshots::Upsert;
+    let (path, outcome, complete) = crate::mcp::record_snapshot(&opts).await?;
+    match outcome {
+        Upsert::Written if complete => eprintln!("Snapshot written to {}", path.display()),
+        Upsert::Written => eprintln!(
+            "Snapshot written to {} (incomplete: some prices or FX rates are missing)",
+            path.display()
+        ),
+        Upsert::KeptComplete => eprintln!(
+            "Warning: today's snapshot would be incomplete; kept the complete one already in {}",
+            path.display()
+        ),
+    }
     Ok(())
 }

@@ -2775,7 +2775,7 @@ fn day(offset: i64) -> String {
 
 /// Record today's snapshot of example_data into `dir` and return it parsed.
 async fn seed_today(dir: &Path) -> (PathBuf, Value) {
-    let path = portfolio_rs::mcp::record_snapshot(&McpOptions {
+    let (path, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
         data_dir: Some(dir.to_path_buf()),
         ..opts()
     })
@@ -3012,5 +3012,42 @@ async fn vanished_position_is_a_flow_not_a_loss() {
     let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k}: {v}"));
     assert!((f("netContributions") + 1000.0).abs() < 0.01, "{v}");
     assert!(f("marketEffect").abs() < 0.01, "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// Finance B5: strict dates; skipped lines warn; Modified Dietz is flagged.
+#[tokio::test]
+async fn performance_dates_are_strict_and_fallbacks_warn() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_history(tmp.path(), &[-3, -1]).await;
+    let mut loose = today.clone();
+    loose["date"] = json!(format!("{}T00:00:00", day(-2)));
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&format!("{loose}\n{{broken\n"));
+    std::fs::write(&path, text).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let text = err(
+        &client,
+        "get_performance",
+        json!({"period": "custom", "from": format!("{}T00:00:00", day(-2)), "to": day(0)}),
+    )
+    .await;
+    assert_eq!(text, "invalid_argument");
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "custom", "from": day(-2), "to": day(0)}),
+    )
+    .await;
+    assert_eq!(v["dataCoverage"]["skippedLines"], 2, "{v}");
+    let w = has_code(&v, "snapshot_lines_skipped").expect("skipped warning");
+    assert_eq!(w["severity"], "warning", "{w}");
+    // -3 → -1 → live today is not a daily chain: Modified Dietz, flagged.
+    assert_eq!(v["method"], "modified_dietz", "{v}");
+    assert!(has_code(&v, "performance_approximate").is_some(), "{v}");
     client.cancel().await.unwrap();
 }

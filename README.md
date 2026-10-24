@@ -209,7 +209,11 @@ balances, so a deposit is never return, and interest or dividends paid to cash
 count as contributions (`incomeEffect` is 0 until there is an income ledger).
 `twrPercent` is chained daily (`method: daily_twr`) when there is a snapshot
 for every day, otherwise Modified Dietz over the stored points
-(`modified_dietz`), with each cash change dated at the snapshot that shows it.
+(`modified_dietz`, flagged by a `performance_approximate` note), with each cash
+change dated at the snapshot that shows it. Dates (`from`, `to` and every
+snapshot `date`) must be strict `YYYY-MM-DD`; snapshot lines with bad JSON or
+a looser date are skipped and counted in `dataCoverage.skippedLines`, with a
+`snapshot_lines_skipped` warning because they can move the start point.
 `fxEffect` and `mwrPercent` are null for now, and nothing is reconstructed from
 historic closes (`reconstructed: false`).
 
@@ -231,9 +235,12 @@ in workspace mode, else `$XDG_DATA_HOME/portfolio_rs` (`~/.local/share/portfolio
 never the current directory. Pass the same `--data-dir` to `mcp`. A daily cron
 entry:
 
-    55 23 * * * portfolio_rs snapshot --workspace ~/finance --offline
+    55 23 * * * portfolio_rs snapshot --workspace ~/finance
 
-(`--offline` uses cached prices; drop it to fetch quotes.) Each line is
+Do not add `--offline` to a cron entry: cached prices expire, and the
+snapshots then turn incomplete. An incomplete snapshot never replaces a
+complete one for the same day; `snapshot` warns and keeps the complete
+line. Each line is
 `{date, baseCurrency, positions: [{positionId, kind, assetClass, quantity,
 price, priceCurrency, fxRate, valueBase}], cashBase, totalBase, netFlowsBase,
 complete, dataStatus}`. The workspace `.gitignore` template covers

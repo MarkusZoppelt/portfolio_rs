@@ -84,6 +84,36 @@ pub fn snapshots_path(data_dir: &Path, portfolio_id: &str) -> PathBuf {
 
 /// Read all snapshots, sorted by date. A missing file is an empty history;
 /// unreadable lines are skipped and counted.
+/// Strict `YYYY-MM-DD` (Finance B5): exactly ten ASCII characters, digits
+/// and two dashes, and a real calendar day. Rejects `2026-10-17T00:00:00`,
+/// `+2026-10-17`, ` 2026-10-17` and `2026-1-7`.
+pub fn strict_date(s: &str) -> Option<chrono::NaiveDate> {
+    let b = s.as_bytes();
+    let shape = b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    if !shape {
+        return None;
+    }
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
+
+/// What `upsert` did with the new line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upsert {
+    Written,
+    /// The new snapshot was incomplete and a complete one for the same day
+    /// already exists, so the file was left alone (Finance B4).
+    KeptComplete,
+}
+
+/// Snapshots sorted by date (one per day, the last line wins) and the
+/// number of skipped lines (unparseable JSON or a non-strict date).
 pub fn read(path: &Path) -> (Vec<Snapshot>, usize) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return (Vec::new(), 0);
@@ -92,9 +122,9 @@ pub fn read(path: &Path) -> (Vec<Snapshot>, usize) {
     let mut out: Vec<Snapshot> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| match serde_json::from_str(l) {
-            Ok(s) => Some(s),
-            Err(_) => {
+        .filter_map(|l| match serde_json::from_str::<Snapshot>(l) {
+            Ok(s) if strict_date(&s.date).is_some() => Some(s),
+            _ => {
                 bad += 1;
                 None
             }
@@ -157,7 +187,7 @@ pub fn round2(v: f64) -> f64 {
 
 /// Insert or replace the snapshot for its date and rewrite the file
 /// atomically (temp file in the same dir, fsync, rename, dir fsync), mode 0600.
-pub fn upsert(path: &Path, snap: &Snapshot) -> Result<()> {
+pub fn upsert(path: &Path, snap: &Snapshot) -> Result<Upsert> {
     let dir = path
         .parent()
         .ok_or_else(|| eyre::eyre!("bad snapshot path"))?;
@@ -168,6 +198,9 @@ pub fn upsert(path: &Path, snap: &Snapshot) -> Result<()> {
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     let (mut all, _) = read(path);
+    if !snap.complete && all.iter().any(|s| s.date == snap.date && s.complete) {
+        return Ok(Upsert::KeptComplete);
+    }
     all.retain(|s| s.date != snap.date);
     all.push(snap.clone());
     all.sort_by(|a, b| a.date.cmp(&b.date));
@@ -198,7 +231,7 @@ pub fn upsert(path: &Path, snap: &Snapshot) -> Result<()> {
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
-    Ok(())
+    Ok(Upsert::Written)
 }
 
 #[cfg(test)]
@@ -216,6 +249,70 @@ mod tests {
             complete: true,
             data_status: "complete".into(),
         }
+    }
+
+    #[test]
+    fn strict_date_rejects_loose_forms() {
+        assert!(strict_date("2026-10-17").is_some());
+        for bad in [
+            "2026-10-17T00:00:00",
+            "+2026-10-17",
+            " 2026-10-17",
+            "2026-1-7",
+            "2026-02-30",
+            "20261017",
+            "",
+        ] {
+            assert!(strict_date(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn read_skips_non_strict_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = snapshots_path(dir.path(), "main");
+        upsert(&path, &snap("2026-01-01", 1.0)).unwrap();
+        let mut loose = serde_json::to_value(snap("2026-01-02", 2.0)).unwrap();
+        loose["date"] = "2026-01-02T00:00:00".into();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&format!("{loose}\nnot json\n"));
+        std::fs::write(&path, text).unwrap();
+        let (all, bad) = read(&path);
+        assert_eq!(bad, 2);
+        assert_eq!(all.len(), 1);
+    }
+
+    /// Finance B4: an incomplete snapshot never replaces a complete one.
+    #[test]
+    fn incomplete_snapshot_keeps_same_day_complete_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = snapshots_path(dir.path(), "main");
+        assert_eq!(
+            upsert(&path, &snap("2026-01-02", 1.0)).unwrap(),
+            Upsert::Written
+        );
+        let mut partial = snap("2026-01-02", 0.5);
+        partial.complete = false;
+        partial.data_status = "partial".into();
+        assert_eq!(upsert(&path, &partial).unwrap(), Upsert::KeptComplete);
+        let (all, _) = read(&path);
+        assert_eq!(all[0].total_base, 1.0);
+        assert!(all[0].complete);
+        // A complete one still replaces; an incomplete one replaces an incomplete one.
+        assert_eq!(
+            upsert(&path, &snap("2026-01-02", 2.0)).unwrap(),
+            Upsert::Written
+        );
+        let mut p2 = partial.clone();
+        p2.date = "2026-01-03".into();
+        upsert(&path, &p2).unwrap();
+        p2.total_base = 0.7;
+        assert_eq!(upsert(&path, &p2).unwrap(), Upsert::Written);
+        let (all, _) = read(&path);
+        assert_eq!(
+            all.iter().map(|s| s.total_base).collect::<Vec<_>>(),
+            vec![2.0, 0.7]
+        );
     }
 
     #[test]

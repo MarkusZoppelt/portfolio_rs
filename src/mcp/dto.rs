@@ -281,6 +281,18 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "A valuation at the period start or end is missing prices or FX rates; performance figures are null.",
     ),
     (
+        "snapshot_lines_skipped",
+        "data_quality",
+        "warning",
+        "Snapshot lines were skipped (bad JSON or a non-strict date); the start point may be older than intended.",
+    ),
+    (
+        "performance_approximate",
+        "data_quality",
+        "info",
+        "The return is a Modified Dietz approximation because no daily snapshot chain covers the period.",
+    ),
+    (
         "performance_twr_unavailable",
         "data_quality",
         "info",

@@ -29,9 +29,9 @@ fn now_rfc3339() -> String {
 fn parse_day(field: &str, value: &Option<String>) -> Result<Option<String>, ToolError> {
     match value {
         None => Ok(None),
-        Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        Some(s) => super::snapshots::strict_date(s)
             .map(|d| Some(d.format("%Y-%m-%d").to_string()))
-            .map_err(|_| {
+            .ok_or_else(|| {
                 ToolError::invalid(format!("{field} must be a date in YYYY-MM-DD format"))
             }),
     }
@@ -537,7 +537,7 @@ impl PortfolioServer {
         let parse = |v: &Option<String>, name: &str| -> Result<Option<NaiveDate>, ToolError> {
             v.as_deref()
                 .map(|d| {
-                    NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                    snapshots::strict_date(d).ok_or_else(|| {
                         ToolError::new("invalid_argument", format!("{name} must be YYYY-MM-DD"))
                     })
                 })
@@ -751,6 +751,20 @@ impl PortfolioServer {
         out.market_effect = Some(perf::r2(t.market_effect));
         out.income_effect = Some(0.0);
         out.manual_revaluation = Some(perf::r2(t.manual_revaluation));
+        if skipped > 0 {
+            warnings.push(
+                Finding::new(
+                    "snapshot_lines_skipped",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    format!(
+                        "{skipped} snapshot line(s) were skipped (bad JSON or a date not in YYYY-MM-DD form); the start point ({}) may be older than intended.",
+                        start.date
+                    ),
+                )
+                .detail(json!({ "skippedLines": skipped, "startPointDate": start.date })),
+            );
+        }
         let mut points = vec![start.clone()];
         points.extend(
             snaps
@@ -771,6 +785,17 @@ impl PortfolioServer {
                 Category::DataQuality,
                 "The time-weighted return could not be computed for this period.".to_string(),
             ));
+        }
+        if twr.is_some() && method == "modified_dietz" {
+            warnings.push(
+                Finding::new(
+                    "performance_approximate",
+                    Severity::Info,
+                    Category::DataQuality,
+                    "No daily snapshot chain covers the period, so the return is a Modified Dietz approximation, not a time-weighted return.".to_string(),
+                )
+                .detail(json!({ "method": method })),
+            );
         }
         out.twr_percent = twr.map(|v| (v * 100.0).round() / 100.0);
         out.method = method.to_string();
