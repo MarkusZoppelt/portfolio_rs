@@ -1978,10 +1978,12 @@ async fn opening_deposit_is_dated_and_filterable() {
     assert_eq!(tx["date"], "2025-04-15", "{v}");
     assert_eq!(tx["fees"], 0.0);
     assert_eq!(tx["synthesized"], true);
+    assert_eq!(tx["dateSource"], "earliest_purchase");
     assert_eq!(tx["amount"], 50000.0);
     let v = ok(&client, "get_transactions", json!({})).await;
     assert_eq!(v["transactions"][0]["type"], "deposit", "opening first");
     assert_eq!(v["transactions"][1]["synthesized"], false);
+    assert!(v["transactions"][1].get("dateSource").is_none());
     let from = ok(&client, "get_transactions", json!({"from": "2025-01-01"})).await;
     assert!(from["transactions"]
         .as_array()
@@ -2012,6 +2014,7 @@ async fn opening_deposit_is_dated_and_filterable() {
     let v = ok(&client, "get_transactions", json!({})).await;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     assert_eq!(v["transactions"][0]["date"], today);
+    assert_eq!(v["transactions"][0]["dateSource"], "file_mtime");
 }
 
 /// Item 10 / retest A3: `complete` describes current values only; missing

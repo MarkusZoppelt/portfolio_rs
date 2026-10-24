@@ -578,6 +578,10 @@ pub struct Transaction {
     /// True for an opening deposit synthesized from a cash balance without
     /// entries (its date is inferred, not recorded).
     pub synthesized: bool,
+    /// Where a synthesized date comes from: earliest_purchase | file_mtime
+    /// (omitted for recorded transactions and when no date is known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_source: Option<String>,
     #[serde(rename = "type")]
     pub tx_type: TxType,
     pub position_id: String,

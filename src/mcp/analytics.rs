@@ -993,7 +993,8 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
 ///
 /// A cash position without entries gets one opening deposit dated at the
 /// earliest purchase date in the portfolio, else `file_date` (the data
-/// file's modification date), with fees 0 and `synthesized: true`.
+/// file's modification date), with fees 0, `synthesized: true` and
+/// `dateSource` naming which.
 pub fn transactions(
     portfolio: &Portfolio,
     base: &str,
@@ -1006,8 +1007,8 @@ pub fn transactions(
         .flat_map(|p| p.get_purchases())
         .filter_map(|pur| pur.date.as_deref().and_then(parse_purchase_date))
         .min()
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .or(file_date);
+        .map(|d| (d.format("%Y-%m-%d").to_string(), "earliest_purchase"))
+        .or(file_date.map(|d| (d, "file_mtime")));
     for p in &portfolio.positions {
         let id = pid(p);
         let currency = if kind(p) == "market" {
@@ -1019,8 +1020,9 @@ pub fn transactions(
             let balance = p.balance_dec();
             out.push(Transaction {
                 id: format!("tx_{id}_opening"),
-                date: opening_date.clone(),
+                date: opening_date.as_ref().map(|d| d.0.clone()),
                 synthesized: true,
+                date_source: opening_date.as_ref().map(|d| d.1.to_string()),
                 tx_type: TxType::Deposit,
                 position_id: id.clone(),
                 ticker: None,
@@ -1053,6 +1055,7 @@ pub fn transactions(
             out.push(Transaction {
                 id: format!("tx_{id}_{i}"),
                 synthesized: false,
+                date_source: None,
                 date: pur
                     .date
                     .as_deref()
