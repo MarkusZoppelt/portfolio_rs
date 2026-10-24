@@ -95,14 +95,18 @@ fn round2_opt<S: serde::Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::E
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ContextSummary {
+    /// Banner first in the summary; null when every position is priced.
+    incomplete: Option<String>,
     #[serde(serialize_with = "round2")]
     total_value: f64,
     #[serde(serialize_with = "round2")]
     cash_value: f64,
     #[serde(serialize_with = "round2")]
     securities_value: f64,
-    #[serde(serialize_with = "round2")]
-    cash_percent: f64,
+    /// Null when incomplete: the total misses the unpriced positions, so the
+    /// cash share would be overstated.
+    #[serde(serialize_with = "round2_opt")]
+    cash_percent: Option<f64>,
     position_count: usize,
     largest_position: Option<String>,
     #[serde(serialize_with = "round2_opt")]
@@ -294,16 +298,36 @@ impl PortfolioContext {
                 .then_with(|| a.name.cmp(&b.name))
         });
         let complete = positions.iter().all(|p| p.value.is_some());
+        let unpriced = positions.iter().filter(|p| p.value.is_none()).count();
+        if !complete {
+            // Cash weights against a partial total overstate cash; null them
+            // (positions, the cash classes in the allocation, the summary).
+            let cash_classes: std::collections::BTreeSet<String> = positions
+                .iter()
+                .filter(|p| p.is_cash)
+                .map(|p| p.asset_class.clone())
+                .collect();
+            for p in positions.iter_mut().filter(|p| p.is_cash) {
+                p.weight_percent = None;
+            }
+            for a in allocation
+                .iter_mut()
+                .filter(|a| cash_classes.contains(&a.asset_class))
+            {
+                a.percent = None;
+            }
+        }
 
         let largest = positions.iter().find(|p| p.value.is_some());
         let largest_position = largest.map(|p| p.name.clone());
-        let largest_position_percent = largest.and_then(|p| p.weight_percent);
+        let largest_position_percent = largest.filter(|_| complete).and_then(|p| p.weight_percent);
 
         let summary = ContextSummary {
+            incomplete: (!complete).then(|| incomplete_banner(unpriced)),
             total_value: to_f64(total),
             cash_value: to_f64(breakdown.cash),
             securities_value: to_f64(breakdown.securities),
-            cash_percent: percent(breakdown.cash, total),
+            cash_percent: complete.then(|| percent(breakdown.cash, total)),
             position_count: positions.len(),
             largest_position,
             largest_position_percent,
@@ -364,15 +388,12 @@ impl PortfolioContext {
         let mut out = String::new();
 
         out.push_str("# Portfolio Context\n\n");
+        if let Some(banner) = &self.summary.incomplete {
+            out.push_str(&format!("> **{banner}**\n\n"));
+        }
         out.push_str(&format!("Generated: {}\n", self.generated_at));
         out.push_str(&format!("Currency: {}\n", self.currency));
         out.push_str(&format!("Network Status: {}\n", self.network_status));
-        if !self.complete {
-            let unpriced = self.positions.iter().filter(|p| p.value.is_none()).count();
-            out.push_str(&format!(
-                "Data: INCOMPLETE ({unpriced} unpriced position(s)); totals and weights cover priced positions only.\n"
-            ));
-        }
         out.push('\n');
 
         out.push_str("## Summary\n\n");
@@ -383,7 +404,10 @@ impl PortfolioContext {
         out.push_str(&format!(
             "- Cash: {} ({})\n",
             money(self.summary.cash_value, &self.currency),
-            pct(self.summary.cash_percent)
+            self.summary
+                .cash_percent
+                .map(pct)
+                .unwrap_or_else(|| "n/a".to_string())
         ));
         if let (Some(min), Some(surplus)) = (self.cash_buffer.minimum, self.cash_buffer.surplus) {
             out.push_str(&format!(
@@ -526,10 +550,10 @@ fn risk_flags(
         }
     }
 
-    if summary.cash_percent < LOW_CASH_THRESHOLD {
+    if let Some(cash) = summary.cash_percent.filter(|c| *c < LOW_CASH_THRESHOLD) {
         flags.push(format!(
             "Cash allocation is low at {}; consider checking liquidity needs against policy.",
-            pct(summary.cash_percent)
+            pct(cash)
         ));
     }
 
@@ -579,6 +603,13 @@ fn push_list(out: &mut String, items: &[String]) {
     for item in items {
         out.push_str(&format!("- {}\n", escape_markdown(item)));
     }
+}
+
+/// The incomplete banner shown first in the summary and in context.md.
+fn incomplete_banner(unpriced: usize) -> String {
+    format!(
+        "INCOMPLETE: {unpriced} unpriced position(s). Totals cover priced positions only; cash weights and derived shares are not shown."
+    )
 }
 
 #[cfg(test)]
