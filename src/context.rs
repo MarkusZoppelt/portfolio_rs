@@ -302,20 +302,13 @@ impl PortfolioContext {
         let complete = positions.iter().all(|p| p.value.is_some());
         let unpriced = positions.iter().filter(|p| p.value.is_none()).count();
         if !complete {
-            // Cash weights against a partial total overstate cash; null them
-            // (positions, the cash classes in the allocation, the summary).
-            let cash_classes: std::collections::BTreeSet<String> = positions
-                .iter()
-                .filter(|p| p.is_cash)
-                .map(|p| p.asset_class.clone())
-                .collect();
-            for p in positions.iter_mut().filter(|p| p.is_cash) {
+            // Every weight against a partial total is overstated; null them
+            // all (positions, allocation, summary) and show the range-free
+            // values only.
+            for p in positions.iter_mut() {
                 p.weight_percent = None;
             }
-            for a in allocation
-                .iter_mut()
-                .filter(|a| cash_classes.contains(&a.asset_class))
-            {
+            for a in allocation.iter_mut() {
                 a.percent = None;
             }
         }
@@ -625,7 +618,7 @@ fn push_list(out: &mut String, items: &[String]) {
 /// The incomplete banner shown first in the summary and in context.md.
 fn incomplete_banner(unpriced: usize) -> String {
     format!(
-        "INCOMPLETE: {unpriced} unpriced position(s). Totals cover priced positions only; cash weights and derived shares are not shown."
+        "INCOMPLETE: {unpriced} unpriced position(s). Totals cover priced positions only; weights and shares are not shown."
     )
 }
 

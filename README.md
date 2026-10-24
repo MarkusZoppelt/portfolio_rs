@@ -206,8 +206,8 @@ Missing quotes or FX rates are never hidden: every response carries
 `complete` (false when any position is unpriced) and `dataQuality`
 (`missingPrices`, `missingFx`, `affectedPositions`, `affectedClasses`).
 Totals then cover only priced positions; a class with an unpriced position has
-a `null` value. No percentage, drift or `amountToTarget` is derived from such a
-partial total; each class gets `actualPercentMin`/`actualPercentMax` instead:
+a `null` value. No percentage (position `weightPercent`, context class and cash
+percentages), drift or `amountToTarget` is derived from such a partial total; each class gets `actualPercentMin`/`actualPercentMax` instead:
 its possible share whatever the excluded positions are worth, from 0 up to
 their maximum plausible value (twice the last cached price; unbounded when a
 position is only known at cost basis or not at all). A band status

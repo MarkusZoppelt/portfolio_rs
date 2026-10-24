@@ -160,6 +160,9 @@ pub fn position_rows(
 ) -> (Vec<PositionRow>, Decimal, Decimal) {
     let all: Vec<&PortfolioPosition> = portfolio.positions.iter().collect();
     let total = total_known(&all);
+    // Weights against a partial total mislead (every share is overstated),
+    // so they are null whenever any position lacks a base value.
+    let complete = all.iter().all(|p| value_base(p).is_some());
     let cash: Decimal = all
         .iter()
         .filter(|p| p.is_cash())
@@ -204,7 +207,10 @@ pub fn position_rows(
                 fx_rate: if market { p.fx_rate() } else { None },
                 price_status: price_status(p).to_string(),
                 value_base: value.map(money),
-                weight_percent: value.and_then(|v| percent_of(v, total)).map(pct),
+                weight_percent: value
+                    .filter(|_| complete)
+                    .and_then(|v| percent_of(v, total))
+                    .map(pct),
                 average_cost: if market {
                     p.average_cost_dec().map(|d| to_f64(d.round_dp(6)))
                 } else {
