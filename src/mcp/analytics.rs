@@ -128,6 +128,9 @@ pub fn position_rows(
                 } else {
                     None
                 },
+                price_as_of: (market && p.has_market_price())
+                    .then(|| p.price_as_of().map(String::from))
+                    .flatten(),
                 currency: if market {
                     p.price_currency().map(String::from)
                 } else {

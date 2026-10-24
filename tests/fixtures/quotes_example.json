@@ -6,7 +6,8 @@
     },
     "SPY": {
       "price": 500.0,
-      "currency": "USD"
+      "currency": "USD",
+      "asOf": "2026-01-02T21:00:00Z"
     },
     "TLT": {
       "price": 90.0,
