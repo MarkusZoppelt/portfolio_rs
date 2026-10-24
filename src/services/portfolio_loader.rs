@@ -223,6 +223,7 @@ mod tests {
     use crate::services::quotes::{FixtureProvider, OfflineProvider};
 
     #[tokio::test]
+    #[ignore = "requires network access to Yahoo Finance"]
     async fn test_create_live_portfolio() {
         let positions_str = read_to_string("example_data.json").unwrap();
         let (portfolio, _network_status) = create_live_portfolio(positions_str).await;
