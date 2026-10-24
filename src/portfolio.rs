@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::money::{dec, div, percent_change, to_f64, Decimal};
 use crate::position::{PortfolioPosition, PriceStatus};
 use crate::services::quotes::{QuoteError, QuoteProvider, YahooProvider};
 
@@ -39,12 +40,15 @@ impl Portfolio {
     }
 
     pub fn get_total_value(&self) -> f64 {
-        let mut sum = 0.0;
+        to_f64(self.total_value_dec())
+    }
 
-        for position in &self.positions {
-            sum += position.get_balance();
-        }
-        sum
+    /// [`Self::get_total_value`] as a [`Decimal`].
+    pub fn total_value_dec(&self) -> Decimal {
+        self.positions
+            .iter()
+            .map(PortfolioPosition::balance_dec)
+            .sum()
     }
 
     /// Positions that count towards market (period) returns: ticker holdings
@@ -57,9 +61,11 @@ impl Portfolio {
 
     /// Current base-currency value of [`Self::market_priced_securities`].
     pub fn current_securities_value(&self) -> f64 {
-        self.market_priced_securities()
-            .map(PortfolioPosition::get_balance)
-            .sum()
+        to_f64(
+            self.market_priced_securities()
+                .map(PortfolioPosition::balance_dec)
+                .sum(),
+        )
     }
 
     /// `(invested, unrealized PnL)` from [`PortfolioPosition::total_invested`]
@@ -69,20 +75,20 @@ impl Portfolio {
     /// Cash is neither a gain nor a loss. Unpriced holdings are excluded so a
     /// missing quote is not treated as a full loss against cost basis.
     pub fn cost_basis_totals(&self) -> (f64, f64) {
-        let mut invested = 0.0_f64;
-        let mut pnl = 0.0_f64;
+        let mut invested = Decimal::ZERO;
+        let mut pnl = Decimal::ZERO;
         for position in &self.positions {
             if position.is_cash() || !position.has_market_price() {
                 continue;
             }
-            if let Some(inv) = position.total_invested() {
+            if let Some(inv) = position.total_invested_dec() {
                 invested += inv;
             }
-            if let Some(p) = position.pnl() {
+            if let Some(p) = position.pnl_dec() {
                 pnl += p;
             }
         }
-        (invested, pnl)
+        (to_f64(invested), to_f64(pnl))
     }
 
     /// Value of the currently held, priced ticker positions at `date`, at
@@ -168,27 +174,29 @@ impl Portfolio {
     }
 
     pub fn get_allocation(&self) -> HashMap<String, f64> {
-        let mut allocation: HashMap<String, f64> = HashMap::new();
-        let total_value = self.get_total_value();
-        if total_value == 0.0 {
-            return allocation;
+        let total_value = self.total_value_dec();
+        if total_value.is_zero() {
+            return HashMap::new();
         }
 
+        // Sum balances per class first, then take one percentage per class.
+        let mut balances: HashMap<String, Decimal> = HashMap::new();
         for position in &self.positions {
             if !position.has_market_price() {
                 continue;
             }
-            let asset_class = position.get_asset_class();
-            let balance = position.get_balance();
-            let percentage = balance / total_value * 100.0;
-
-            if let Some(value) = allocation.get_mut(asset_class) {
-                *value += percentage;
-            } else {
-                allocation.insert(asset_class.to_string(), percentage);
-            }
+            *balances
+                .entry(position.get_asset_class().to_string())
+                .or_default() += position.balance_dec();
         }
-        allocation
+        balances
+            .into_iter()
+            .map(|(class, balance)| {
+                let percentage =
+                    div(balance * Decimal::ONE_HUNDRED, total_value).unwrap_or(Decimal::ZERO);
+                (class, to_f64(percentage))
+            })
+            .collect()
     }
 
     // Print the portfolio as a table
@@ -876,16 +884,16 @@ impl Portfolio {
 fn like_for_like_values<'a>(
     pairs: impl IntoIterator<Item = (&'a PortfolioPosition, Option<f64>)>,
 ) -> (f64, f64) {
-    let mut historic = 0.0;
-    let mut current = 0.0;
+    let mut historic = Decimal::ZERO;
+    let mut current = Decimal::ZERO;
     for (position, close) in pairs {
         let Some(close) = close.filter(|c| *c > 0.0) else {
             continue;
         };
-        historic += close * position.get_amount() * position.fx_rate().unwrap_or(1.0);
-        current += position.get_balance();
+        historic += dec(close) * position.quantity_dec() * position.fx_factor_dec();
+        current += position.balance_dec();
     }
-    (historic, current)
+    (to_f64(historic), to_f64(current))
 }
 
 /// `(name, %day, day pnl)` of one position.
@@ -907,8 +915,8 @@ pub fn top_movers<T: Clone>(movers: Vec<Mover<T>>, n: usize) -> (Vec<Mover<T>>, 
 
 /// Percentage return from `historic` to `current`; `None` if `historic <= 0`.
 pub fn period_return_percent(current: f64, historic: f64) -> Option<f64> {
-    if historic > 0.0 && historic.is_finite() && current.is_finite() {
-        Some((current - historic) / historic * 100.0)
+    if historic.is_finite() && current.is_finite() {
+        percent_change(dec(current), dec(historic)).map(to_f64)
     } else {
         None
     }
