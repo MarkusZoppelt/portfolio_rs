@@ -410,6 +410,27 @@ impl PortfolioPosition {
 
     /// True for ticker-less holdings, and for ticker holdings only when a live
     /// quote produced a positive price.
+    /// True when a quote arrived for this ticker, even if its FX rate did
+    /// not: the native price (in [`Self::price_currency`]) is known, only
+    /// base-currency values are not.
+    pub fn has_native_price(&self) -> bool {
+        self.ticker.is_some()
+            && matches!(
+                self.price_status,
+                PriceStatus::Live | PriceStatus::FxUnavailable
+            )
+            && self.last_spot > Decimal::ZERO
+    }
+
+    /// Day change in the quote currency; unlike
+    /// [`Self::daily_variation_percent`] also known without an FX rate.
+    pub fn native_daily_variation_percent(&self) -> Option<f64> {
+        if !self.has_native_price() {
+            return None;
+        }
+        percent_change(self.last_spot, self.previous_close?).map(to_f64)
+    }
+
     pub fn has_market_price(&self) -> bool {
         if self.ticker.is_none() {
             return true;

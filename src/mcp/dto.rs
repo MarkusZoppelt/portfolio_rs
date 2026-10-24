@@ -407,7 +407,8 @@ pub struct PositionRow {
     pub price_source: String,
     /// Base-currency units per unit of priceCurrency; null when no conversion applies.
     pub fx_rate: Option<f64>,
-    /// live | stale (from the cache) | unavailable | manual | cash
+    /// live | stale (from the cache) | fx_unavailable (native price known,
+    /// no FX rate) | unavailable | manual | cash
     pub price_status: String,
     /// Value in the base currency; null when the price or FX rate is unavailable.
     pub value_base: Option<f64>,

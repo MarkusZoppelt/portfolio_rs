@@ -34,6 +34,7 @@ fn price_status(p: &PortfolioPosition) -> &'static str {
         _ => match p.price_status() {
             PriceStatus::Live if p.has_market_price() && p.is_stale() => "stale",
             PriceStatus::Live if p.has_market_price() => "live",
+            PriceStatus::FxUnavailable if p.has_native_price() => "fx_unavailable",
             _ => "unavailable",
         },
     }
@@ -156,14 +157,16 @@ pub fn position_rows(
                 asset_class: p.get_asset_class().to_string(),
                 kind: kind(p).to_string(),
                 quantity: qty(p.quantity_dec()),
-                price: (market && p.has_market_price())
+                // The native quote stays even without FX; only base values
+                // are null then.
+                price: (market && p.has_native_price())
                     .then(|| to_f64(dec(p.market_price()).round_dp(6))),
                 price_currency: if market {
                     p.price_currency().map(String::from)
                 } else {
                     None
                 },
-                price_as_of: (market && p.has_market_price())
+                price_as_of: (market && p.has_native_price())
                     .then(|| p.price_as_of().map(String::from))
                     .flatten(),
                 currency: if market {
@@ -189,8 +192,8 @@ pub fn position_rows(
                 } else {
                     None
                 },
-                day_change_percent: if market && p.has_market_price() {
-                    p.daily_variation_percent().map(|v| pct(dec(v)))
+                day_change_percent: if market && p.has_native_price() {
+                    p.native_daily_variation_percent().map(|v| pct(dec(v)))
                 } else {
                     None
                 },

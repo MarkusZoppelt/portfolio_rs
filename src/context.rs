@@ -239,7 +239,8 @@ impl PortfolioContext {
                 ticker: position.get_ticker().map(ToString::to_string),
                 asset_class,
                 quantity: position.get_amount(),
-                price: (position.get_ticker().is_some() && position.has_market_price())
+                // Native quote even without FX; only `value` needs the rate.
+                price: (position.get_ticker().is_some() && position.has_native_price())
                     .then(|| position.market_price()),
                 // Unknown stays null: never label a foreign quote as base.
                 price_currency: if position.get_ticker().is_some() {
@@ -250,7 +251,7 @@ impl PortfolioContext {
                 } else {
                     None
                 },
-                price_as_of: (position.get_ticker().is_some() && position.has_market_price())
+                price_as_of: (position.get_ticker().is_some() && position.has_native_price())
                     .then(|| position.price_as_of().map(String::from))
                     .flatten(),
                 is_stale: position.get_ticker().is_some()
@@ -262,7 +263,7 @@ impl PortfolioContext {
                 invested: position.total_invested(),
                 pnl: position.pnl(),
                 historic_return_percent: position.historic_variation_percent(),
-                daily_return_percent: position.daily_variation_percent(),
+                daily_return_percent: position.native_daily_variation_percent(),
                 is_cash,
             });
         }

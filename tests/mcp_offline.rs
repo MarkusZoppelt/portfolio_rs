@@ -2005,3 +2005,34 @@ async fn transactions_complete_reflects_base_amounts() {
     assert_eq!(v["complete"], true, "{v}");
     assert!(v["totals"]["depositAmountBase"].is_number());
 }
+
+/// t9 nofx / item 7: without FX the native quote stays (price, priceCurrency,
+/// day change); only base-currency values are null.
+#[tokio::test]
+async fn no_fx_keeps_native_price() {
+    let (_t, client) = connect_partial("quotes_no_fx.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let spy = by_ticker(&v["positions"], "SPY");
+    assert_eq!(spy["price"], 500.0, "{spy}");
+    assert_eq!(spy["priceCurrency"], "USD");
+    assert_eq!(spy["priceStatus"], "fx_unavailable");
+    assert!(spy["dayChangePercent"].is_number(), "{spy}");
+    assert!(spy["valueBase"].is_null());
+    assert!(spy["weightPercent"].is_null());
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    let spy = ctx["context"]["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["ticker"] == "SPY")
+        .unwrap()
+        .clone();
+    assert_eq!(spy["price"], 500.0, "{spy}");
+    assert_eq!(spy["priceCurrency"], "USD");
+    assert!(spy["value"].is_null());
+    let md = ok(&client, "get_context", json!({})).await["markdown"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(md.contains("500.00 USD"), "{md}");
+}
