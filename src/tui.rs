@@ -391,6 +391,10 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
     let fetches = ticker_amounts.iter().map(|(t, _)| {
         let t2 = t.clone();
         async move {
+            // Offline and fixture quote modes never reach Yahoo, not even for charts.
+            if !fetches_yahoo_history(crate::services::quotes::AnyProvider::configured()) {
+                return None;
+            }
             // Per-ticker timeout to avoid stalls
             let fut = async {
                 let resp = yahoo::YahooConnector::new()?
@@ -2849,6 +2853,11 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
     f.render_widget(list, area);
 }
 
+/// Chart history comes straight from Yahoo; only the default quote mode may fetch it.
+fn fetches_yahoo_history(quotes: &crate::services::quotes::AnyProvider) -> bool {
+    matches!(quotes, crate::services::quotes::AnyProvider::Yahoo)
+}
+
 /// Whether a raw JSON position object is the same position as `pos`.
 ///
 /// Matches by `Id` when both sides have one, so two positions with the same
@@ -2905,5 +2914,15 @@ mod tests {
         ));
         // Id on one side only: legacy match.
         assert!(json_matches_position(&raw(None, "Stocks"), &pos));
+    }
+
+    #[test]
+    fn test_chart_history_respects_quote_mode() {
+        use crate::services::quotes::AnyProvider;
+        assert!(fetches_yahoo_history(&AnyProvider::Yahoo));
+        assert!(!fetches_yahoo_history(&AnyProvider::Offline));
+        assert!(!fetches_yahoo_history(
+            &AnyProvider::Fixture(Box::default())
+        ));
     }
 }
