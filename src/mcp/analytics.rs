@@ -40,10 +40,12 @@ fn price_status(p: &PortfolioPosition) -> &'static str {
     }
 }
 
-/// live | cache | fixture | none (cash and manual positions: none).
+/// live | cache | fixture | none (cash, manual and unpriced positions: none);
+/// set whenever a native price is shown, also when its FX rate is missing.
 pub fn price_source(p: &PortfolioPosition) -> &'static str {
     match p.price_source() {
-        Some(src) if kind(p) == "market" && p.has_market_price() => src.as_str(),
+        // Wherever a native price is shown, also without an FX rate.
+        Some(src) if kind(p) == "market" && p.has_native_price() => src.as_str(),
         _ => "none",
     }
 }
@@ -202,7 +204,7 @@ pub fn position_rows(
                 } else {
                     Some(base.to_string())
                 },
-                is_stale: market && p.has_market_price() && p.is_stale(),
+                is_stale: market && p.has_native_price() && p.is_stale(),
                 price_source: price_source(p).to_string(),
                 fx_rate: if market { p.fx_rate() } else { None },
                 price_status: price_status(p).to_string(),

@@ -167,7 +167,8 @@ not next to a `.gpg` file).
 
 Without an FX rate for its quote currency a position keeps its native `price`,
 `priceCurrency`, `priceAsOf` and day change (`priceStatus: "fx_unavailable"`);
-only base-currency values (`valueBase`, `weightPercent`, ...) are null.
+only base-currency values (`valueBase`, `weightPercent`, ...) are null. Its
+`priceSource` and `isStale` still describe that native price.
 
     portfolio_rs mcp --cache-max-age 3 example_data.json   # days, 0 disables fallback
     portfolio_rs mcp --no-cache example_data.json          # neither read nor write

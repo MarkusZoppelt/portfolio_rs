@@ -2287,6 +2287,52 @@ async fn seeded_cache(seed_fixture: &str) -> (TempDir, String, String) {
     (tmp, data, policy.to_string_lossy().into_owned())
 }
 
+/// Finance retest L2: a position whose native price is shown but whose FX
+/// rate is missing or expired reports where that price came from: the
+/// fixture (not stale) or the cache (stale), never `none`.
+#[tokio::test]
+async fn price_shown_without_fx_reports_its_source() {
+    // Live (fixture) price, no FX.
+    let (_t, client) = connect_partial("quotes_no_fx.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let spy = by_ticker(&v["positions"], "SPY");
+    assert_eq!(spy["priceStatus"], "fx_unavailable", "{spy}");
+    assert_eq!(spy["priceSource"], "fixture", "{spy}");
+    assert_eq!(spy["isStale"], false, "{spy}");
+    client.cancel().await.unwrap();
+
+    // Cached price, FX rate expired (dropped from the cache and the fixture).
+    let (tmp, data, policy) = seeded_cache("quotes_example.json").await;
+    let cache = tmp.path().join(".positions.json.quotes-cache.json");
+    let mut c: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    c["fx"] = json!({});
+    std::fs::write(&cache, c.to_string()).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["TLT", "EURUSD=X"])),
+        cache: CacheMode::On,
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let tlt = by_ticker(&v["positions"], "TLT");
+    assert_eq!(tlt["priceStatus"], "fx_unavailable", "{tlt}");
+    assert_eq!(tlt["price"], 90.0, "{tlt}");
+    assert_eq!(tlt["priceSource"], "cache", "{tlt}");
+    assert_eq!(tlt["isStale"], true, "{tlt}");
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    let row = ctx["context"]["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["ticker"] == "TLT")
+        .unwrap()
+        .clone();
+    assert_eq!(row["isStale"], true, "{row}");
+    client.cancel().await.unwrap();
+}
+
 /// A fixture without the given symbols' latest quotes.
 fn fixture_without(symbols: &[&str]) -> AnyProvider {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/quotes_example.json");
