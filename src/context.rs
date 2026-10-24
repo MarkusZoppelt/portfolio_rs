@@ -79,15 +79,33 @@ impl CashBuffer {
     }
 }
 
+/// JSON money and percentages carry 2 decimals (the markdown formats them the
+/// same way); internal values keep full precision for the risk flags.
+fn round2<S: serde::Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(((v * 100.0).round() / 100.0) + 0.0)
+}
+
+fn round2_opt<S: serde::Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(v) => round2(v, s),
+        None => s.serialize_none(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ContextSummary {
+    #[serde(serialize_with = "round2")]
     total_value: f64,
+    #[serde(serialize_with = "round2")]
     cash_value: f64,
+    #[serde(serialize_with = "round2")]
     securities_value: f64,
+    #[serde(serialize_with = "round2")]
     cash_percent: f64,
     position_count: usize,
     largest_position: Option<String>,
+    #[serde(serialize_with = "round2_opt")]
     largest_position_percent: Option<f64>,
 }
 
@@ -96,7 +114,9 @@ struct ContextSummary {
 struct AllocationContext {
     asset_class: String,
     /// Null when a position in the class is unpriced.
+    #[serde(serialize_with = "round2_opt")]
     value: Option<f64>,
+    #[serde(serialize_with = "round2_opt")]
     percent: Option<f64>,
     position_count: usize,
 }
@@ -109,6 +129,7 @@ struct PositionContext {
     asset_class: String,
     quantity: f64,
     /// Latest price in `priceCurrency` (the quote currency, not the base).
+    #[serde(serialize_with = "round2_opt")]
     price: Option<f64>,
     price_currency: Option<String>,
     /// Provider timestamp of `price` (RFC 3339); null when not reported.
@@ -116,13 +137,20 @@ struct PositionContext {
     /// True when the price or its FX rate came from the last-known-price cache.
     is_stale: bool,
     /// Base-currency value; null when the price or FX rate is unknown.
+    #[serde(serialize_with = "round2_opt")]
     value: Option<f64>,
+    #[serde(serialize_with = "round2_opt")]
     weight_percent: Option<f64>,
     /// Average cost in `priceCurrency`.
+    #[serde(serialize_with = "round2_opt")]
     average_cost: Option<f64>,
+    #[serde(serialize_with = "round2_opt")]
     invested: Option<f64>,
+    #[serde(serialize_with = "round2_opt")]
     pnl: Option<f64>,
+    #[serde(serialize_with = "round2_opt")]
     historic_return_percent: Option<f64>,
+    #[serde(serialize_with = "round2_opt")]
     daily_return_percent: Option<f64>,
     #[serde(skip)]
     is_cash: bool,
