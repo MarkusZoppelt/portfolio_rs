@@ -1881,3 +1881,38 @@ async fn context_order_is_deterministic() {
         }
     }
 }
+
+/// Item 5: get_context JSON (shared with /api/context) rounds money and
+/// percentages to 2 decimals; quantities keep their precision.
+#[tokio::test]
+async fn context_json_is_rounded_to_two_decimals() {
+    fn check(v: &Value, key: &str, bad: &mut Vec<String>) {
+        match v {
+            Value::Object(m) => m.iter().for_each(|(k, v)| check(v, k, bad)),
+            Value::Array(a) => a.iter().for_each(|v| check(v, key, bad)),
+            Value::Number(n) if key != "quantity" && key != "positionCount" => {
+                let f = n.as_f64().unwrap();
+                if ((f * 100.0).round() / 100.0 - f).abs() > 1e-9 {
+                    bad.push(format!("{key}={f}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    for client in [
+        connect(opts()).await,
+        connect_partial("quotes_no_gsg.json").await.1,
+    ] {
+        let v = ok(&client, "get_context", json!({"format": "json"})).await;
+        let mut bad = Vec::new();
+        check(&v["context"], "", &mut bad);
+        assert!(bad.is_empty(), "{bad:?}");
+        let mut saw_fraction = false;
+        for p in v["context"]["positions"].as_array().unwrap() {
+            if let Some(w) = p["weightPercent"].as_f64() {
+                saw_fraction |= w.fract() != 0.0;
+            }
+        }
+        assert!(saw_fraction, "fixture should yield fractional weights");
+    }
+}

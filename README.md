@@ -214,7 +214,7 @@ governed by the cash-buffer and asset-class rules instead.
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); `breaches` = critical findings (deduplicated), top-level `warnings` = data quality + warning-severity findings; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with a null date); `fees` is 0 when none is recorded; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
 | `list_portfolios` | The served portfolio with its `quoteSource` (`yahoo`, `offline` or `fixture`; paths only with `includePaths`) |
-| `get_context` | The `portfolio_rs context` report as Markdown or JSON |
+| `get_context` | The `portfolio_rs context` report as Markdown or JSON (money and percentages rounded to 2 decimals, as in `/api/context`) |
 
 Errors come back as tool results with `isError: true` and
 `{"error": {"code", "message"}}`, codes `unknown_portfolio`,
