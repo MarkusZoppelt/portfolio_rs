@@ -249,16 +249,20 @@ impl PortfolioContext {
             })
             .collect::<Vec<_>>();
         let key = |v: Option<f64>| v.unwrap_or(f64::NEG_INFINITY);
+        // Value descending, unknown values last; ties by name so the order is
+        // deterministic (the class map is a HashMap).
         allocation.sort_by(|a, b| {
             key(b.value)
                 .partial_cmp(&key(a.value))
                 .unwrap_or(Ordering::Equal)
+                .then_with(|| a.asset_class.cmp(&b.asset_class))
         });
 
         positions.sort_by(|a, b| {
             key(b.value)
                 .partial_cmp(&key(a.value))
                 .unwrap_or(Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
         });
         let complete = positions.iter().all(|p| p.value.is_some());
 
