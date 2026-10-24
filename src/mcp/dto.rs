@@ -308,13 +308,19 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "performance_approximate",
         "data_quality",
         "info",
-        "The figures are approximate: a Modified Dietz return (no daily snapshot chain covers the period), or transactions valued at the historic close for want of a recorded price.",
+        "The figures are approximate: a Modified Dietz return (no daily snapshot chain covers the period), transactions valued at the historic close for want of a recorded price, or manual-position transactions with no price valued at the last snapshot's unit value (or Amount/Quantity) when quantities agree, otherwise booked as externalUnknown (detail.reason: modified_dietz | estimated_transaction_price | estimated_manual_value).",
     ),
     (
         "performance_twr_unavailable",
         "data_quality",
         "info",
         "The time-weighted return could not be computed (an intermediate snapshot is partial or a value is zero).",
+    ),
+    (
+        "unknown_gain_factor_class",
+        "data_quality",
+        "info",
+        "A --gain-factor class matches no asset class in the portfolio.",
     ),
 ];
 

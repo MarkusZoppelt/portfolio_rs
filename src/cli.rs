@@ -523,7 +523,7 @@ pub fn build_cli() -> Command {
                         .value_name("CLASS=FACTOR")
                         .action(clap::ArgAction::Append)
                         .value_parser(parse_gain_factor)
-                        .help("Plausible-gain factor for cost-basis estimates of CLASS (FACTOR or 'never'; repeatable). Default: 3 for funds, ETFs, bonds, gold and commodities; never (always material) for crypto, stocks and other classes"),
+                        .help("Plausible-gain factor for cost-basis estimates of CLASS (a finite FACTOR >= 1, or 'never'; repeatable, last flag wins). Default: 3 for funds, ETFs, bonds, gold and commodities; never (always material) for crypto, stocks and other classes"),
                 )
                 .arg(
                     Arg::new("data-dir")
@@ -712,7 +712,7 @@ fn parse_gain_factor(s: &str) -> Result<(String, Option<f64>), String> {
         .parse()
         .map_err(|_| format!("factor '{f}' is not a number or 'never'"))?;
     if !v.is_finite() || v < 1.0 {
-        return Err(format!("factor {v} must be at least 1"));
+        return Err(format!("factor must be a finite number >= 1 (got '{f}')"));
     }
     Ok((class, Some(v)))
 }
@@ -953,5 +953,48 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert!(errors.contains(&"Unknown component: 'invalid_component'".to_string()));
         assert!(errors.contains(&"Unknown component: 'another_invalid'".to_string()));
+    }
+
+    #[test]
+    fn parse_gain_factor_rejects_non_finite_and_below_one() {
+        assert_eq!(
+            parse_gain_factor("stocks=inf").unwrap_err(),
+            "factor must be a finite number >= 1 (got 'inf')"
+        );
+        assert_eq!(
+            parse_gain_factor("stocks=NaN").unwrap_err(),
+            "factor must be a finite number >= 1 (got 'NaN')"
+        );
+        assert_eq!(
+            parse_gain_factor("stocks=0.5").unwrap_err(),
+            "factor must be a finite number >= 1 (got '0.5')"
+        );
+        assert_eq!(
+            parse_gain_factor("Stocks=2").unwrap(),
+            ("stocks".into(), Some(2.0))
+        );
+        assert_eq!(
+            parse_gain_factor("Crypto=never").unwrap(),
+            ("crypto".into(), None)
+        );
+    }
+
+    #[test]
+    fn gain_factor_repeated_class_keeps_the_last_flag() {
+        let opts = crate::mcp::analytics::PolicyOptions {
+            gain_factors: vec![
+                ("stocks".into(), Some(2.0)),
+                ("stocks".into(), None),
+                ("crypto".into(), None),
+                ("crypto".into(), Some(4.0)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(opts.gain_factor("Stocks"), None);
+        assert_eq!(opts.gain_factor("CRYPTO"), Some(4.0));
+        assert_eq!(
+            opts.gain_factor("gold"),
+            Some(crate::mcp::analytics::DEFAULT_GAIN_FACTOR)
+        );
     }
 }

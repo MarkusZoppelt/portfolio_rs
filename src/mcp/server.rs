@@ -200,12 +200,13 @@ impl PortfolioServer {
         self.check_id(&input.portfolio_id)?;
         let portfolio = self.portfolio(false).await;
         let policy = self.served.state.policy().await;
+        let opts = self.policy_options();
         let alloc = analytics::allocation_with(
             &portfolio,
             policy.as_ref(),
             input.include_cash.unwrap_or(true),
             input.include_manual.unwrap_or(true),
-            &self.policy_options(),
+            &opts,
         );
         let mut warnings = analytics::data_quality(&portfolio);
         if policy.is_none() {
@@ -214,6 +215,7 @@ impl PortfolioServer {
                     .unwrap_or_else(analytics::no_policy_finding),
             );
         }
+        warnings.extend(analytics::unknown_gain_factor_findings(&portfolio, &opts));
         Ok(Json(AllocationOutput {
             meta: self.meta(&portfolio, warnings).await,
             policy: policy.as_ref().map(|p| PolicyRef {
@@ -243,9 +245,10 @@ impl PortfolioServer {
         let min = input.min_severity.unwrap_or(Severity::Info);
         let portfolio = self.portfolio(false).await;
         let policy = self.served.state.policy().await;
+        let opts = self.policy_options();
         let (mut findings, checks) = match &policy {
             Some(p) => {
-                let c = analytics::check_policy_with(&portfolio, p, self.policy_options());
+                let c = analytics::check_policy_with(&portfolio, p, opts.clone());
                 (c.findings, c.checks)
             }
             None => (
@@ -315,6 +318,7 @@ impl PortfolioServer {
         } else {
             ("ok", "ok")
         };
+        warnings.extend(analytics::unknown_gain_factor_findings(&portfolio, &opts));
         let cash_buffer = crate::context::CashBuffer::new(&portfolio, policy.as_ref());
         Ok(Json(PolicyCheckOutput {
             meta: self.meta(&portfolio, warnings).await,
@@ -726,7 +730,38 @@ impl PortfolioServer {
         meta.complete = meta.complete && complete;
         meta.has_stale = has_stale;
         meta.data_status = analytics::data_status(meta.complete, has_stale).to_string();
-        let txs = analytics::transactions(&portfolio, &base, None);
+        let mut txs = analytics::transactions(&portfolio, &base, None);
+        // Local copy only: a manual add-on with no price is valued at
+        // Amount/Quantity so position_effects can estimate it. get_transactions
+        // is unchanged.
+        let mut manual_unpriced = Vec::new();
+        for tx in &mut txs {
+            if tx.amount.is_some() || tx.amount_base.is_some() {
+                continue;
+            }
+            let Some(p) = portfolio
+                .positions
+                .iter()
+                .find(|p| p.id() == Some(tx.position_id.as_str()))
+            else {
+                continue;
+            };
+            if p.get_ticker().is_some() || p.is_cash() {
+                continue;
+            }
+            let quantity = p.get_amount();
+            if quantity > 0.0 {
+                tx.price = Some((p.get_balance() / quantity * 1e6).round() / 1e6);
+                tx.price_source = "manual_unit_value".to_string();
+            }
+            if tx
+                .date
+                .as_deref()
+                .is_some_and(|d| d > start.date.as_str() && d <= end.date.as_str())
+            {
+                manual_unpriced.push(tx.id.clone());
+            }
+        }
         let gap = start_gap(&start);
         if gap > 0 {
             warnings.push(
@@ -847,7 +882,7 @@ impl PortfolioServer {
         } else {
             None
         };
-        let Some(effects) = effects else {
+        let Some(mut effects) = effects else {
             meta.complete = false;
             meta.data_status = analytics::data_status(false, has_stale).to_string();
             if !currency_changed {
@@ -878,6 +913,9 @@ impl PortfolioServer {
                 .cloned(),
         );
         points.push(end.clone());
+        // Per snapshot step, then summed. A deposit and a later buy from cash
+        // match; one split over the whole span sees the same sign and does not.
+        perf::split_stepwise(&mut effects, &points, &txs);
         let (twr, method) = if points.iter().all(|p| p.complete) {
             perf::twr(&points, &txs)
         } else {
@@ -927,6 +965,21 @@ impl PortfolioServer {
                 )
                 .detail(json!({ "method": method, "reason": "estimated_transaction_price",
                                 "transactionIds": estimated })),
+            );
+        }
+        if !manual_unpriced.is_empty() {
+            warnings.push(
+                Finding::new(
+                    "performance_approximate",
+                    Severity::Info,
+                    Category::DataQuality,
+                    format!(
+                        "{} manual-position transaction(s) in the period have no price; they are valued at the last snapshot's unit value (or Amount/Quantity) when the snapshot quantities agree, otherwise booked as externalUnknown, so contributions and revaluation are approximate.",
+                        manual_unpriced.len()
+                    ),
+                )
+                .detail(json!({ "method": method, "reason": "estimated_manual_value",
+                                "transactionIds": manual_unpriced })),
             );
         }
         out.twr_percent = twr.map(|v| (v * 100.0).round() / 100.0);

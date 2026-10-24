@@ -840,7 +840,8 @@ impl PolicyOptions {
     /// The plausible-gain factor for a cost-basis estimate in `class`.
     pub fn gain_factor(&self, class: &str) -> Option<f64> {
         let key = class.to_lowercase();
-        if let Some((_, f)) = self.gain_factors.iter().find(|(c, _)| *c == key) {
+        // Repeated `--gain-factor` flags: the last one for this class wins.
+        if let Some((_, f)) = self.gain_factors.iter().rev().find(|(c, _)| *c == key) {
             return *f;
         }
         match key.as_str() {
@@ -862,6 +863,36 @@ impl Default for PolicyOptions {
 
 pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
     check_policy_with(portfolio, policy, PolicyOptions::default())
+}
+
+/// `--gain-factor` classes that match no asset class in the portfolio.
+pub fn unknown_gain_factor_findings(portfolio: &Portfolio, opts: &PolicyOptions) -> Vec<Finding> {
+    let known: std::collections::BTreeSet<String> = portfolio
+        .positions
+        .iter()
+        .map(|p| p.get_asset_class().to_lowercase())
+        .collect();
+    let mut unknown = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (class, _) in &opts.gain_factors {
+        if !known.contains(class) && seen.insert(class.clone()) {
+            unknown.push(class.clone());
+        }
+    }
+    if unknown.is_empty() {
+        return Vec::new();
+    }
+    vec![Finding::new(
+        "unknown_gain_factor_class",
+        Severity::Info,
+        Category::DataQuality,
+        format!(
+            "--gain-factor names {} class(es) with no holding: {}.",
+            unknown.len(),
+            unknown.join(", ")
+        ),
+    )
+    .detail(json!({ "classes": unknown }))]
 }
 
 pub fn check_policy_with(
@@ -1350,4 +1381,40 @@ pub fn transactions(
             .then_with(|| a.id.cmp(&b.id))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portfolio::Portfolio;
+    use crate::position::{PortfolioPosition, PriceStatus};
+
+    #[test]
+    fn unknown_gain_factor_class_lists_overrides_with_no_holding() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("SPY"),
+            "Stocks",
+            1.0,
+            1.0,
+            PriceStatus::Live,
+        ));
+        let opts = PolicyOptions {
+            gain_factors: vec![
+                ("stocks".into(), Some(2.0)),
+                ("widgets".into(), Some(2.0)),
+                ("widgets".into(), Some(4.0)),
+            ],
+            ..PolicyOptions::default()
+        };
+        let findings = unknown_gain_factor_findings(&portfolio, &opts);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "unknown_gain_factor_class");
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert_eq!(findings[0].category, Category::DataQuality);
+        let classes = findings[0].detail.as_ref().unwrap()["classes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(classes, &vec![json!("widgets")]);
+    }
 }
