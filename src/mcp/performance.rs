@@ -221,9 +221,13 @@ pub fn twr(points: &[Snapshot], txs: &[Transaction]) -> (Option<f64>, &'static s
         .windows(2)
         .all(|w| days(&w[0].date, &w[1].date) == Some(1));
     let mut intervals = Vec::new();
+    let mut per_position = Vec::new();
     for w in points.windows(2) {
         match position_effects(&w[0], &w[1], txs) {
-            Some(e) => intervals.push((w[1].date.clone(), total(&e))),
+            Some(e) => {
+                intervals.push((w[1].date.clone(), total(&e)));
+                per_position.push(e);
+            }
             None => return (None, if daily { "daily_twr" } else { "modified_dietz" }),
         }
     }
@@ -246,10 +250,34 @@ pub fn twr(points: &[Snapshot], txs: &[Transaction]) -> (Option<f64>, &'static s
         let v1 = intervals.last().unwrap().1.end_value;
         let mut flows = 0.0;
         let mut weighted = 0.0;
-        for (date, e) in &intervals {
-            let t = days(&start.date, date).unwrap_or(span) as f64;
+        // Weight each buy/sell at its own transaction date; cash changes
+        // and unknown flows (no dated transaction) at the snapshot that
+        // shows them.
+        let weight = |date: &str| {
+            let t = days(&start.date, date).unwrap_or(span).clamp(0, span) as f64;
+            (span as f64 - t) / span as f64
+        };
+        for (i, (date, e)) in intervals.iter().enumerate() {
             flows += e.net_contributions;
-            weighted += e.net_contributions * (span as f64 - t) / span as f64;
+            let (w0, w1) = (&points[i], &points[i + 1]);
+            for (id, (_, pe)) in &per_position[i] {
+                let s = w0.positions.iter().find(|p| p.position_id == *id);
+                let en = w1.positions.iter().find(|p| p.position_id == *id);
+                let is_cash = en.or(s).is_some_and(|p| p.kind == "cash");
+                let dated: Vec<&Transaction> = txs
+                    .iter()
+                    .filter(|t| t.position_id == *id && in_interval(t, &w0.date, &w1.date))
+                    .collect();
+                if is_cash || dated.is_empty() {
+                    weighted += pe.net_contributions * weight(date);
+                    continue;
+                }
+                let fx = en.and_then(|p| p.fx_rate).or(s.and_then(|p| p.fx_rate));
+                for tx in dated {
+                    let amount = tx_flow(tx, fx).unwrap_or(0.0);
+                    weighted += amount * weight(tx.date.as_deref().unwrap_or(date));
+                }
+            }
         }
         let denom = v0 + weighted;
         if denom == 0.0 {
@@ -373,6 +401,22 @@ mod tests {
         let (r, m) = twr(&pts, &[]);
         assert_eq!(m, "modified_dietz");
         assert!((r.unwrap() - 16.0).abs() < 1e-9, "{r:?}");
+    }
+
+    /// Finance LOW: a buy is weighted at its transaction date, the cash
+    /// that paid for it at the snapshot that shows it.
+    #[test]
+    fn modified_dietz_dates_buys_on_the_transaction_date() {
+        // d1: a 100. d11: a 230 after an external 100 buy on d2 (no cash).
+        let pts = [
+            snap("2026-01-01", 100.0, 0.0),
+            snap("2026-01-11", 230.0, 0.0),
+        ];
+        let tx = buy("2026-01-02", 100.0);
+        let (r, m) = twr(&pts, &[tx]);
+        assert_eq!(m, "modified_dietz");
+        // (230 - 100 - 100) / (100 + 100 * 9/10) = 30 / 190.
+        assert!((r.unwrap() - 3000.0 / 190.0).abs() < 1e-9, "{r:?}");
     }
 
     #[test]

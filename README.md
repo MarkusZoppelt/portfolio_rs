@@ -218,8 +218,9 @@ balances, so a deposit is never return, and interest or dividends paid to cash
 count as contributions (`incomeEffect` is 0 until there is an income ledger).
 `twrPercent` is chained daily (`method: daily_twr`) when there is a snapshot
 for every day, otherwise Modified Dietz over the stored points
-(`modified_dietz`, flagged by a `performance_approximate` note), with each cash
-change dated at the snapshot that shows it. Dates (`from`, `to` and every
+(`modified_dietz`, flagged by a `performance_approximate` note), with each buy or sell
+weighted at its transaction date and each cash change (or flow without a dated
+transaction) at the snapshot that shows it. Dates (`from`, `to` and every
 snapshot `date`) must be strict `YYYY-MM-DD`; snapshot lines with bad JSON or
 a looser date are skipped and counted in `dataCoverage.skippedLines`, with a
 `snapshot_lines_skipped` warning because they can move the start point.
