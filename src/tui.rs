@@ -1,7 +1,8 @@
 use crate::create_live_portfolio;
 use crate::error::ValidationError;
+use crate::money::{percent_change, percent_of, to_f64, Decimal};
 use crate::portfolio::Portfolio;
-use crate::position::Purchase;
+use crate::position::{PortfolioPosition, Purchase};
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::services::portfolio_loader::create_live_portfolio_with_logging;
 
@@ -1756,7 +1757,9 @@ fn render_detailed_allocation_positions(f: &mut Frame, area: Rect, portfolio: &P
 
     for (i, position) in positions.iter().enumerate() {
         let name = position.get_name();
-        let percentage = (position.get_balance() / portfolio.get_total_value()) * 100.0;
+        let percentage = percent_of(position.balance_dec(), portfolio.total_value_dec())
+            .map(to_f64)
+            .unwrap_or(f64::NAN);
         let color = colors[i % colors.len()];
 
         // Create horizontal bar (max 30 characters wide)
@@ -2104,31 +2107,11 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
         // Total Portfolio Value with daily PnL
         if !app.disabled_components.is_disabled(Component::TotalValue) {
-            let total_value = portfolio.get_total_value();
-            // Compute daily PnL and %Day including all positions (cash has no daily variation)
-            let mut prev_total = 0.0_f64;
-            let mut current_total = 0.0_f64;
-            for position in &portfolio.positions {
-                let value = position.get_balance();
-                current_total += value;
-                // For positions with tickers, calculate previous value from daily variation
-                // For cash positions (no ticker), previous value equals current value (no fluctuation)
-                let prev = position.daily_variation_percent().map(|dv| {
-                    let ratio = dv / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON {
-                        value / (1.0 + ratio)
-                    } else {
-                        value
-                    }
-                });
-                prev_total += prev.unwrap_or(value);
-            }
-            let day_pnl_abs = current_total - prev_total;
-            let daily_percent = if prev_total > 0.0 {
-                (current_total - prev_total) / prev_total * 100.0
-            } else {
-                0.0
-            };
+            // Daily PnL and %Day over all positions (cash has no daily variation).
+            let breakdown = portfolio.value_breakdown();
+            let total_value = to_f64(breakdown.total);
+            let day_pnl_abs = breakdown.day_pnl();
+            let daily_percent = breakdown.day_percent();
             let big_text_value = match app.currency.as_str() {
                 "USD" | "CAD" | "AUD" | "HKD" | "SGD" => {
                     format!("${}", format_with_commas(total_value))
@@ -2566,12 +2549,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
         }
         if !app.disabled_components.is_disabled(Component::Invested) {
             // Sum invested where available
-            let mut invested_sum = 0.0_f64;
-            for p in &portfolio.positions {
-                if let Some(i) = p.total_invested() {
-                    invested_sum += i;
-                }
-            }
+            let invested_sum = to_f64(invested_sum_dec(portfolio));
             total_cells.push(Cell::from(format!("{invested_sum:.2}")));
         }
         if !app.disabled_components.is_disabled(Component::Balance) {
@@ -2585,19 +2563,8 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
         }
         if !app.disabled_components.is_disabled(Component::PnL) {
             // Securities-only PnL: exclude cash from value side
-            let mut invested_sum = 0.0_f64;
-            for p in &portfolio.positions {
-                if let Some(i) = p.total_invested() {
-                    invested_sum += i;
-                }
-            }
-            let securities_value: f64 = portfolio
-                .positions
-                .iter()
-                .filter(|p| !p.is_cash())
-                .map(|p| p.get_balance())
-                .sum();
-            let pnl_total = securities_value - invested_sum;
+            let pnl_total =
+                to_f64(portfolio.value_breakdown().securities - invested_sum_dec(portfolio));
             let color = if pnl_total >= 0.0 {
                 Color::Green
             } else {
@@ -2609,23 +2576,12 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::Hist) {
-            let mut invested_sum = 0.0_f64;
-            for p in &portfolio.positions {
-                if let Some(i) = p.total_invested() {
-                    invested_sum += i;
-                }
-            }
-            let securities_value: f64 = portfolio
-                .positions
-                .iter()
-                .filter(|p| !p.is_cash())
-                .map(|p| p.get_balance())
-                .sum();
-            let hist_pct = if invested_sum > 0.0 {
-                (securities_value - invested_sum) / invested_sum * 100.0
-            } else {
-                0.0
-            };
+            let hist_pct = percent_change(
+                portfolio.value_breakdown().securities,
+                invested_sum_dec(portfolio),
+            )
+            .map(to_f64)
+            .unwrap_or(0.0);
             let color = if hist_pct >= 0.0 {
                 Color::Green
             } else {
@@ -2637,31 +2593,8 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::Daily) {
-            // Calculate total daily variation including all positions (cash has no daily variation)
-            let mut prev_total = 0.0_f64;
-            let mut current_total = 0.0_f64;
-            for position in &portfolio.positions {
-                let value = position.get_balance();
-                current_total += value;
-                let day_var = position.daily_variation_percent();
-                let prev_value_for_position = match day_var {
-                    Some(dv) => {
-                        let ratio = dv / 100.0;
-                        if (1.0 + ratio).abs() > f64::EPSILON {
-                            value / (1.0 + ratio)
-                        } else {
-                            value
-                        }
-                    }
-                    None => value,
-                };
-                prev_total += prev_value_for_position;
-            }
-            let total_day_var = if prev_total > 0.0 {
-                (current_total - prev_total) / prev_total * 100.0
-            } else {
-                0.0
-            };
+            // Total daily variation over all positions (cash has no daily variation)
+            let total_day_var = portfolio.value_breakdown().day_percent();
             let color = if total_day_var >= 0.0 {
                 Color::Green
             } else {
@@ -2964,4 +2897,15 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
         .style(Style::default().fg(Color::White));
 
     f.render_widget(list, area);
+}
+
+/// Invested amount summed over every position with a cost basis (the TUI
+/// totals row; unlike `Portfolio::cost_basis_totals` it does not skip cash or
+/// unpriced holdings).
+fn invested_sum_dec(portfolio: &Portfolio) -> Decimal {
+    portfolio
+        .positions
+        .iter()
+        .filter_map(PortfolioPosition::total_invested_dec)
+        .sum()
 }
