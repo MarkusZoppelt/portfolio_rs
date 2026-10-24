@@ -192,8 +192,9 @@ governed by the cash-buffer and asset-class rules instead.
 | `get_context` | The `portfolio_rs context` report as Markdown or JSON |
 
 Errors come back as tool results with `isError: true` and
-`{"error": {"code", "message"}}`, codes `unknown_portfolio` and
-`invalid_argument`. Error and finding messages never contain amounts.
+`{"error": {"code", "message"}}`, codes `unknown_portfolio`,
+`invalid_argument` (also an `assetClass` that no position or policy uses) and
+`not_found` (an unknown `positionId`). Error and finding messages never contain amounts.
 
 ### Resources
 

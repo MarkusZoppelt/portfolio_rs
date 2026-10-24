@@ -55,6 +55,32 @@ impl PortfolioServer {
         }
     }
 
+    /// `invalid_argument` unless `class` is used by a position or the policy.
+    async fn check_class(
+        &self,
+        portfolio: &Portfolio,
+        class: &Option<String>,
+    ) -> Result<(), ToolError> {
+        let Some(class) = class else { return Ok(()) };
+        let mut known: Vec<String> = portfolio
+            .positions
+            .iter()
+            .map(|p| p.get_asset_class().to_string())
+            .collect();
+        if let Some(policy) = self.served.state.policy().await {
+            known.extend(policy.allocations.iter().map(|a| a.asset_class.clone()));
+        }
+        if known.iter().any(|k| k.eq_ignore_ascii_case(class)) {
+            return Ok(());
+        }
+        known.sort();
+        known.dedup();
+        Err(ToolError::invalid(format!(
+            "unknown assetClass {class:?}; known: {}",
+            known.join(", ")
+        )))
+    }
+
     async fn base_currency(&self) -> String {
         self.served.state.currency().await
     }
@@ -122,6 +148,7 @@ impl PortfolioServer {
     ) -> Result<Json<PositionsOutput>, ToolError> {
         self.check_id(&input.portfolio_id)?;
         let portfolio = self.portfolio(input.refresh.unwrap_or(false)).await;
+        self.check_class(&portfolio, &input.asset_class).await?;
         let (positions, total, cash) = analytics::position_rows(
             &portfolio,
             input.include_manual.unwrap_or(true),
@@ -291,7 +318,20 @@ impl PortfolioServer {
         };
         let portfolio = self.portfolio(false).await;
         let base = self.base_currency().await;
+        self.check_class(&portfolio, &input.asset_class).await?;
         let all = analytics::transactions(&portfolio, &base);
+        if let Some(id) = &input.position_id {
+            if !portfolio
+                .positions
+                .iter()
+                .any(|p| p.id() == Some(id.as_str()))
+            {
+                return Err(ToolError::new(
+                    "not_found",
+                    format!("unknown positionId {id:?}; see get_positions"),
+                ));
+            }
+        }
         let matching: Vec<Transaction> = all
             .into_iter()
             .filter(|t| {

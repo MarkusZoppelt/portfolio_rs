@@ -1563,3 +1563,32 @@ async fn protocol_edges_from_finance_low_items() {
     }
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn unknown_filters_are_errors_not_empty_results() {
+    let client = connect(opts()).await;
+    assert_eq!(
+        err(&client, "get_positions", json!({"assetClass": "Nope"})).await,
+        "invalid_argument"
+    );
+    assert_eq!(
+        err(&client, "get_transactions", json!({"assetClass": "Nope"})).await,
+        "invalid_argument"
+    );
+    assert_eq!(
+        err(
+            &client,
+            "get_transactions",
+            json!({"positionId": "pos_nope"})
+        )
+        .await,
+        "not_found"
+    );
+    // Known values still filter (case-insensitive).
+    let v = ok(&client, "get_positions", json!({"assetClass": "crypto"})).await;
+    assert!(!v["positions"].as_array().unwrap().is_empty());
+    let id = v["positions"][0]["id"].as_str().unwrap().to_string();
+    let t = ok(&client, "get_transactions", json!({"positionId": id})).await;
+    assert!(t["transactions"].is_array());
+    client.cancel().await.unwrap();
+}
