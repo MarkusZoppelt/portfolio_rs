@@ -1366,3 +1366,83 @@ async fn cost_basis_is_never_unconverted_and_current_fx_is_flagged() {
     );
     client.cancel().await.unwrap();
 }
+
+/// Finance item 6: the single-position limit agrees across CLI `review`,
+/// get_context riskFlags and check_policy. Cash is excluded everywhere.
+/// Example weights: Cash 51.4 %, BTC 22.2 %, SPY 20.6 %; limit 21 %.
+#[tokio::test]
+async fn single_position_limit_agrees_everywhere_and_excludes_cash() {
+    let tmp = TempDir::new().unwrap();
+    let policy = tmp.path().join("policy.toml");
+    std::fs::write(
+        &policy,
+        POLICY_LOWER.replace(
+            "single_position_limit_percent = 25.0",
+            "single_position_limit_percent = 21.0",
+        ),
+    )
+    .unwrap();
+    let client = connect(McpOptions {
+        policy: Some(policy.to_string_lossy().into_owned()),
+        ..opts()
+    })
+    .await;
+
+    let v = ok(&client, "check_policy", json!({})).await;
+    let mut breached: Vec<String> = v["constraintChecks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["code"] == "single_position_limit" && c["passed"] == false)
+        .map(|c| c["positionId"].as_str().unwrap().to_string())
+        .collect();
+    breached.sort();
+    let positions = ok(&client, "get_positions", json!({})).await;
+    let btc_id = position(&positions, "BTC-USD")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(breached, vec![btc_id]);
+
+    let ctx = ok(&client, "get_context", json!({ "format": "json" })).await;
+    let flags: Vec<String> = ctx["context"]["riskFlags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap().to_string())
+        .filter(|f| f.starts_with("Single-position"))
+        .collect();
+    assert_eq!(flags.len(), 1, "{flags:?}");
+    assert!(
+        flags[0].contains("Bitcoin") || flags[0].contains("BTC"),
+        "{flags:?}"
+    );
+    assert!(flags[0].contains("cash excluded"));
+    client.cancel().await.unwrap();
+
+    let home = TempDir::new().unwrap();
+    let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
+        .args(["review", &example_data(), "--policy"])
+        .arg(&policy)
+        .args(["--format", "json"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("PORTFOLIO_RS_QUOTES", format!("fixture:{}", fixture_path()))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let review: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let single: Vec<&Value> = review["constraintChecks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == "Single Position Limit")
+        .collect();
+    assert_eq!(single.len(), 1, "{single:?}");
+    assert!(!single[0]["message"].as_str().unwrap().contains("Cash"));
+}

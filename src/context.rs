@@ -5,6 +5,7 @@ use eyre::{eyre, Result};
 use serde::Serialize;
 
 use crate::money::{percent_of, to_f64, Decimal};
+use crate::policy::Policy;
 use crate::portfolio::Portfolio;
 use crate::position::PriceStatus;
 
@@ -88,10 +89,28 @@ struct PositionContext {
     pnl: Option<f64>,
     historic_return_percent: Option<f64>,
     daily_return_percent: Option<f64>,
+    #[serde(skip)]
+    is_cash: bool,
 }
 
 impl PortfolioContext {
     pub fn from_portfolio(portfolio: &Portfolio, currency: &str, network_status: &str) -> Self {
+        Self::from_portfolio_with_policy(portfolio, currency, network_status, None)
+    }
+
+    /// Like [`Self::from_portfolio`], but the single-position risk flag uses
+    /// the policy's `single_position_limit_percent` (default 25 %), so it
+    /// agrees with `review` and `check_policy`. Cash is never a "position"
+    /// for that limit.
+    pub fn from_portfolio_with_policy(
+        portfolio: &Portfolio,
+        currency: &str,
+        network_status: &str,
+        policy: Option<&Policy>,
+    ) -> Self {
+        let single_limit = policy
+            .and_then(|p| p.constraints.single_position_limit_percent)
+            .unwrap_or(SINGLE_POSITION_CONCENTRATION_THRESHOLD);
         let breakdown = portfolio.value_breakdown();
         let total = breakdown.total;
         let mut allocation: HashMap<String, (Option<Decimal>, usize)> = HashMap::new();
@@ -150,8 +169,12 @@ impl PortfolioContext {
                 quantity: position.get_amount(),
                 price: (position.get_ticker().is_some() && position.has_market_price())
                     .then(|| position.market_price()),
+                // Unknown stays null: never label a foreign quote as base.
                 price_currency: if position.get_ticker().is_some() {
-                    Some(position.price_currency().unwrap_or(currency).to_uppercase())
+                    position
+                        .price_currency()
+                        .map(str::to_uppercase)
+                        .or_else(|| position.has_market_price().then(|| currency.to_uppercase()))
                 } else {
                     None
                 },
@@ -162,6 +185,7 @@ impl PortfolioContext {
                 pnl: position.pnl(),
                 historic_return_percent: position.historic_variation_percent(),
                 daily_return_percent: position.daily_variation_percent(),
+                is_cash,
             });
         }
 
@@ -202,7 +226,7 @@ impl PortfolioContext {
             largest_position_percent,
         };
 
-        let risk_flags = risk_flags(&summary, &allocation, &positions, complete);
+        let risk_flags = risk_flags(&summary, &allocation, &positions, complete, single_limit);
         let any_priced = portfolio
             .positions
             .iter()
@@ -367,6 +391,7 @@ fn risk_flags(
     allocation: &[AllocationContext],
     positions: &[PositionContext],
     complete: bool,
+    single_limit: f64,
 ) -> Vec<String> {
     let mut flags = Vec::new();
 
@@ -384,15 +409,16 @@ fn risk_flags(
         return flags;
     }
 
-    for position in positions {
+    for position in positions.iter().filter(|p| !p.is_cash) {
         let Some(weight) = position.weight_percent else {
             continue;
         };
-        if weight >= SINGLE_POSITION_CONCENTRATION_THRESHOLD {
+        if weight > single_limit {
             flags.push(format!(
-                "Single-position concentration: {} is {} of the portfolio.",
+                "Single-position concentration: {} is {} of the portfolio (limit {}, cash excluded).",
                 position.name,
-                pct(weight)
+                pct(weight),
+                pct(single_limit)
             ));
         }
     }

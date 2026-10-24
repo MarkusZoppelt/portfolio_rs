@@ -173,6 +173,11 @@ a `null` value, targeted classes get status `unknown`, `amountToTarget` and
 drift findings are suppressed, and `check_policy` adds `checks_incomplete`.
 `networkStatus` is `connected`, `partial` or `offline`.
 
+The policy's `single_position_limit_percent` applies to non-cash positions
+only, identically in `portfolio_rs review`, `check_policy` and the
+`get_context` risk flags (which fall back to 25 % without a policy). Cash is
+governed by the cash-buffer and asset-class rules instead.
+
 | Tool | Returns |
 | --- | --- |
 | `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
