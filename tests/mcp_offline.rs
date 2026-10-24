@@ -2105,8 +2105,10 @@ async fn incomplete_context_nulls_cash_weights_and_has_banner() {
     assert!(md.contains("- Cash: ") && md.contains("(n/a)"), "{md}");
 }
 
-/// Finance item 8: check_policy `findings`, `breaches`, `warnings` and
-/// `counts` are views of one list (fixture and partial data, every minSeverity).
+/// Finance item 8 / retest A6: `counts`, `breaches` and `policyStatus` come
+/// from the policy findings only; data-quality items never change them and
+/// appear only in the top-level `warnings` (fixture and partial data, every
+/// minSeverity).
 #[tokio::test]
 async fn check_policy_counts_match_lists() {
     for quotes in [
@@ -2117,38 +2119,109 @@ async fn check_policy_counts_match_lists() {
         let (_t, client) = connect_partial(quotes).await;
         for min in ["info", "warning", "critical"] {
             let v = ok(&client, "check_policy", json!({"minSeverity": min})).await;
-            let n = |k: &str| v[k].as_array().unwrap().len() as u64;
+            let findings = v["findings"].as_array().unwrap();
+            assert!(
+                findings.iter().all(|f| f["category"] != "data_quality"),
+                "{quotes} {min} {v}"
+            );
+            let sev = |s: &str| findings.iter().filter(|f| f["severity"] == s).count() as u64;
             let counts = &v["counts"];
+            for s in ["info", "warning", "critical"] {
+                assert_eq!(
+                    counts[s].as_u64().unwrap(),
+                    sev(s),
+                    "{quotes} {min} {s} {v}"
+                );
+            }
             assert_eq!(
-                counts["warning"].as_u64().unwrap(),
-                n("warnings"),
+                v["breaches"].as_array().unwrap().len() as u64,
+                sev("critical"),
                 "{quotes} {min} {v}"
             );
-            assert_eq!(
-                counts["critical"].as_u64().unwrap(),
-                n("breaches"),
-                "{quotes} {min} {v}"
-            );
-            let sev = |s: &str| {
-                v["findings"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|f| f["severity"] == s)
-                    .count() as u64
-            };
-            assert_eq!(counts["info"].as_u64().unwrap(), sev("info"), "{v}");
-            assert!(sev("critical") <= n("breaches"));
-            let expected = if n("breaches") > 0 {
-                "breach"
-            } else if n("warnings") > 0 {
+            // Policy warnings are in the top-level warnings too.
+            let top = v["warnings"].as_array().unwrap();
+            for f in findings.iter().filter(|f| f["severity"] == "warning") {
+                assert!(top.contains(f), "{quotes} {min} {f}");
+            }
+            let expected = if sev("critical") > 0 {
+                "breaches"
+            } else if sev("warning") > 0 {
                 "warnings"
             } else {
                 "ok"
             };
-            assert_eq!(v["status"], expected);
+            assert_eq!(v["policyStatus"], expected, "{quotes} {min}");
+            assert_eq!(
+                v["status"],
+                if expected == "breaches" {
+                    "breach"
+                } else {
+                    expected
+                }
+            );
+            let data = if quotes == "quotes_example.json" {
+                "complete"
+            } else {
+                "partial"
+            };
+            assert_eq!(v["dataStatus"], data, "{quotes}");
         }
     }
+}
+
+/// Finance retest A6: data-quality warnings alone leave policyStatus ok.
+#[tokio::test]
+async fn data_quality_does_not_drive_policy_status() {
+    let (_t, client) = connect_partial("quotes_no_gsg.json").await;
+    let v = ok(&client, "check_policy", json!({"minSeverity": "critical"})).await;
+    assert!(
+        codes(&v["warnings"]).is_empty(),
+        "minSeverity filters warnings"
+    );
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert!(codes(&v["warnings"]).contains(&"no_live_price".to_string()));
+    assert!(!codes(&v["findings"]).contains(&"no_live_price".to_string()));
+    let policy_warnings = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["severity"] == "warning")
+        .count() as u64;
+    assert_eq!(v["counts"]["warning"].as_u64().unwrap(), policy_warnings);
+    client.cancel().await.unwrap();
+}
+
+/// Finance retest B4: cached prices are complete but `stale`: a
+/// stale_prices finding, dataStatus stale, and a marker in context.md.
+#[tokio::test]
+async fn stale_cache_prices_drive_data_status() {
+    let (_tmp, data, policy) = seeded_cache("quotes_example.json").await;
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["TLT"])),
+        cache: CacheMode::On,
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["complete"], true, "{}", v["dataQuality"]);
+    assert_eq!(v["hasStale"], true);
+    assert_eq!(v["dataStatus"], "stale");
+    assert!(
+        codes(&v["warnings"]).contains(&"stale_prices".to_string()),
+        "{v}"
+    );
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert_eq!(v["dataStatus"], "stale");
+    assert!(!codes(&v["findings"]).contains(&"stale_prices".to_string()));
+    let v = ok(&client, "get_context", json!({ "format": "json" })).await;
+    assert_eq!(v["context"]["summary"]["dataStatus"], "stale");
+    let v = ok(&client, "get_context", json!({})).await;
+    let md = v["markdown"].as_str().unwrap();
+    assert!(md.contains("(stale)"), "{md}");
+    assert!(md.contains("Data Status: stale"), "{md}");
+    client.cancel().await.unwrap();
 }
 
 /// Finance retest L5: copy example_data.json into a temp dir and fill its
