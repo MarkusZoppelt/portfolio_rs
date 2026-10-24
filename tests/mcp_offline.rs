@@ -953,3 +953,32 @@ mod stdio {
         assert!(messages.is_empty());
     }
 }
+
+#[tokio::test]
+async fn readme_documents_every_tool_and_resource() {
+    let readme =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
+    let section = readme
+        .split("## MCP server")
+        .nth(1)
+        .expect("README has an MCP server section");
+    let client = connect(opts()).await;
+    for tool in client.list_all_tools().await.unwrap() {
+        assert!(
+            section.contains(&format!("`{}`", tool.name)),
+            "README misses tool {}",
+            tool.name
+        );
+    }
+    for template in client.list_all_resource_templates().await.unwrap() {
+        let uri = template.uri_template.replace("{id}", "<id>");
+        assert!(section.contains(&uri), "README misses resource {uri}");
+    }
+    for resource in client.list_all_resources().await.unwrap() {
+        let uri = resource
+            .uri
+            .replace("portfolio://default/", "portfolio://<id>/");
+        assert!(section.contains(&uri), "README misses resource {uri}");
+    }
+    client.cancel().await.unwrap();
+}
