@@ -428,24 +428,25 @@ impl PortfolioServer {
             withdrawal_amount_base: sum(TxType::Withdrawal),
         };
         let mut warnings = Vec::new();
-        let mut fx_positions: Vec<String> = matching
+        let fx_missing: Vec<&Transaction> = matching
             .iter()
             .filter(|t| t.amount.is_some() && t.amount_base.is_none())
-            .map(|t| t.position_id.clone())
             .collect();
+        let fx_historic_missing = fx_missing.len();
+        let mut fx_positions: Vec<String> =
+            fx_missing.iter().map(|t| t.position_id.clone()).collect();
         fx_positions.dedup();
         if !fx_positions.is_empty() {
             warnings.push(
                 Finding::new(
                     "fx_historic_unavailable",
-                    Severity::Info,
+                    Severity::Warning,
                     Category::DataQuality,
-                    "Some transactions are in a foreign currency; amountBase is null without historic FX rates, so the base totals are incomplete.".to_string(),
+                    format!("{fx_historic_missing} transaction(s) are in a foreign currency without a historic FX rate; their amountBase is null and the base totals that include them are null."),
                 )
-                .detail(json!({ "positionIds": fx_positions })),
+                .detail(json!({ "positionIds": fx_positions, "fxHistoricMissing": fx_historic_missing })),
             );
         }
-        let unknown_base = matching.iter().any(|t| t.amount_base.is_none());
         let end = (offset + limit as usize).min(matching.len());
         let next_cursor = (end < matching.len()).then(|| format!("o:{end}"));
         let page: Vec<Transaction> = matching
@@ -453,18 +454,15 @@ impl PortfolioServer {
             .skip(offset)
             .take(limit as usize)
             .collect();
-        let mut meta = self.meta(&portfolio, warnings).await;
-        // Transactions without a base amount (no historic FX, or no price)
-        // leave the base totals incomplete; dataQuality keeps describing the
-        // current valuation.
-        if unknown_base {
-            meta.complete = false;
-        }
+        // `complete` describes current values only (Finance A3); missing
+        // historic FX is reported via fxHistoricMissing and the warning.
+        let meta = self.meta(&portfolio, warnings).await;
         Ok(Json(TransactionsOutput {
             meta,
             source: "synthesized_from_purchases".to_string(),
             transactions: page,
             totals,
+            fx_historic_missing,
             next_cursor,
         }))
     }

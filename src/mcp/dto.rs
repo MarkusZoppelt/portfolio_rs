@@ -241,8 +241,8 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
     (
         "fx_historic_unavailable",
         "data_quality",
-        "info",
-        "Transaction amounts in a foreign currency have no historic FX rate; amountBase is null.",
+        "warning",
+        "Transaction amounts in a foreign currency have no historic FX rate; amountBase is null and fxHistoricMissing counts them. `complete` still describes current values only.",
     ),
     (
         "no_policy",
@@ -620,6 +620,9 @@ pub struct TransactionsOutput {
     pub transactions: Vec<Transaction>,
     /// Totals over all matching transactions (not just this page).
     pub totals: TransactionTotals,
+    /// Matching transactions with an amount but no base amount (no historic
+    /// FX rate). `complete` covers current values only and ignores these.
+    pub fx_historic_missing: usize,
     pub next_cursor: Option<String>,
 }
 
