@@ -193,6 +193,13 @@ impl Portfolio {
 
     // Print the portfolio as a table
     pub fn print(&self, include_sum: bool) {
+        print!("{}", self.render(include_sum));
+    }
+
+    /// The holdings table (and summary when `include_sum`) as printed by [`Self::print`].
+    pub fn render(&self, include_sum: bool) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
         use comfy_table::{
             presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
             ContentArrangement, Table,
@@ -428,7 +435,7 @@ impl Portfolio {
                 colorize_pct(total_day_var),
             ]);
 
-            println!("{overview}");
+            let _ = writeln!(out, "{overview}");
         }
 
         if include_sum {
@@ -485,7 +492,7 @@ impl Portfolio {
             ]);
         }
 
-        println!("{table}");
+        let _ = writeln!(out, "{table}");
 
         let (no_fx, no_price): (Vec<_>, Vec<_>) = self
             .positions_without_price()
@@ -499,7 +506,8 @@ impl Portfolio {
         };
         if !no_price.is_empty() {
             let labels = no_price.iter().map(label).collect::<Vec<_>>().join(", ");
-            println!(
+            let _ = writeln!(
+                out,
                 "Warning: {} position(s) without market price excluded from totals: {}",
                 no_price.len(),
                 labels
@@ -507,26 +515,36 @@ impl Portfolio {
         }
         if !no_fx.is_empty() {
             let labels = no_fx.iter().map(label).collect::<Vec<_>>().join(", ");
-            println!(
+            let _ = writeln!(
+                out,
                 "Warning: {} position(s) without FX rate to the base currency excluded from totals: {}",
                 no_fx.len(),
                 labels
             );
         }
+        out
     }
 
     // Print the allocation in descending order %-wise
     pub fn print_allocation(&self) {
+        print!("{}", self.render_allocation());
+    }
+
+    /// The allocation list as printed by [`Self::print_allocation`].
+    pub fn render_allocation(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
         let allocation = self.get_allocation();
 
         // create a vector and sort it by the %-value of the allocation in descending order
         let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
         allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        println!("====================================");
+        let _ = writeln!(out, "====================================");
         for (asset_class, percentage) in allocation_vec {
-            println!("{asset_class: >12} | {percentage: >10.2}");
+            let _ = writeln!(out, "{asset_class: >12} | {percentage: >10.2}");
         }
+        out
     }
 
     pub fn draw_pie_chart(&self) {
@@ -596,11 +614,6 @@ impl Portfolio {
     }
 
     pub async fn print_performance(&self) {
-        use comfy_table::{
-            presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
-            ContentArrangement, Table,
-        };
-
         let db = match sled::open("database") {
             Ok(db) => db,
             Err(e) => {
@@ -608,13 +621,37 @@ impl Portfolio {
                 return;
             }
         };
+        // Last stored total balance, 0.0 when none.
+        let last_db: f64 = match &db.iter().last() {
+            Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
+            _ => 0.0,
+        };
+        print!(
+            "{}",
+            self.render_performance_with(&YahooProvider, last_db, Utc::now())
+                .await
+        );
+    }
+
+    /// The performance tables printed by [`Self::print_performance`], with an
+    /// explicit quote provider, last stored balance (`0.0` = none) and clock.
+    pub async fn render_performance_with<P: QuoteProvider>(
+        &self,
+        provider: &P,
+        last_db: f64,
+        now: DateTime<Utc>,
+    ) -> String {
+        use comfy_table::{
+            presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
+            ContentArrangement, Table,
+        };
+        use std::fmt::Write as _;
+        let mut out = String::new();
 
         // Reference points — Jan 1 and first of month are never ambiguous
-        let start_year = Utc
-            .with_ymd_and_hms(Utc::now().year(), 1, 1, 0, 0, 0)
-            .unwrap();
+        let start_year = Utc.with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0).unwrap();
         let start_month = Utc
-            .with_ymd_and_hms(Utc::now().year(), Utc::now().month(), 1, 0, 0, 0)
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
             .unwrap();
 
         let current_value = self.get_total_value();
@@ -653,7 +690,6 @@ impl Portfolio {
         // priced ticker positions at current quantities and FX. Cash and
         // ticker-less holdings are excluded on both sides, and deposits,
         // withdrawals and trades during the period are not accounted for.
-        let now = Utc::now();
         let start_week = now - chrono::Duration::days(7);
         let start_1m_roll = now - chrono::Duration::days(30);
         let start_3m_roll = now - chrono::Duration::days(90);
@@ -670,7 +706,10 @@ impl Portfolio {
             start_1y_roll,
         ] {
             market_returns.push(
-                match self.historic_and_current_securities_value(start).await {
+                match self
+                    .historic_and_current_securities_value_with(provider, start)
+                    .await
+                {
                     Ok((historic, current)) => period_return_percent(current, historic),
                     Err(_) => None,
                 },
@@ -692,10 +731,6 @@ impl Portfolio {
 
         // "Since": total (incl. cash) vs. the last stored total balance; both
         // are totals, but deposits and withdrawals in between are not accounted for.
-        let last_db: f64 = match &db.iter().last() {
-            Some(Ok(last)) => String::from_utf8_lossy(&last.1).parse().unwrap_or(0.0),
-            _ => 0.0,
-        };
         let since_last_check_percent = if last_db > 0.0 {
             (current_value - last_db) / last_db * 100.0
         } else {
@@ -866,14 +901,15 @@ impl Portfolio {
         }
 
         // Print sections
-        println!("{overview}");
-        println!("{periods}");
+        let _ = writeln!(out, "{overview}");
+        let _ = writeln!(out, "{periods}");
         if !gainers.is_empty() {
-            println!("{top_gainers}");
+            let _ = writeln!(out, "{top_gainers}");
         }
         if !losers.is_empty() {
-            println!("{top_losers}");
+            let _ = writeln!(out, "{top_losers}");
         }
+        out
     }
 }
 
@@ -1079,5 +1115,101 @@ mod tests {
             PriceStatus::Live,
         ));
         assert_eq!(cash_only.cost_basis_totals(), (0.0, 0.0));
+    }
+
+    /// Fake holdings: a winner, a loser, cash and one position without a quote.
+    fn snapshot_portfolio() -> Portfolio {
+        let mut up = with_purchase(
+            PortfolioPosition::for_test(Some("FAKEUP"), "Stocks", 10.0, 110.0, PriceStatus::Live),
+            10.0,
+            100.0,
+        );
+        up.previous_close = Some(105.0);
+        let mut down = with_purchase(
+            PortfolioPosition::for_test(Some("FAKEDN"), "Bonds", 5.0, 180.0, PriceStatus::Live),
+            5.0,
+            200.0,
+        );
+        down.previous_close = Some(180.0);
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(up);
+        portfolio.add_position(down);
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            500.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("FAKEGONE"),
+            "Stocks",
+            3.0,
+            0.0,
+            PriceStatus::Unavailable,
+        ));
+        portfolio.sort_positions_by_value_desc();
+        portfolio
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Compare with `tests/snapshots/<name>.snap`; `UPDATE_SNAPSHOTS=1` rewrites it.
+    fn assert_snapshot(name: &str, actual: &str) {
+        let actual = strip_ansi(actual);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots")
+            .join(format!("{name}.snap"));
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("missing snapshot {}: {e}", path.display()));
+        assert_eq!(
+            actual, expected,
+            "snapshot {name} differs; UPDATE_SNAPSHOTS=1 to accept"
+        );
+    }
+
+    #[test]
+    fn snapshot_holdings_table() {
+        assert_snapshot("holdings", &snapshot_portfolio().render(true));
+    }
+
+    #[test]
+    fn snapshot_allocation() {
+        assert_snapshot("allocation", &snapshot_portfolio().render_allocation());
+    }
+
+    #[tokio::test]
+    async fn snapshot_performance() {
+        let provider = crate::services::quotes::FixtureProvider {
+            close_on: [("FAKEUP".to_string(), 100.0), ("FAKEDN".to_string(), 190.0)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let now = Utc.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap();
+        let rendered = snapshot_portfolio()
+            .render_performance_with(&provider, 2000.0, now)
+            .await;
+        assert_snapshot("performance", &rendered);
     }
 }
