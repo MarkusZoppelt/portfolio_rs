@@ -14,6 +14,7 @@ use eyre::{bail, eyre, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::money::{dec, percent_change, to_f64, Decimal};
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::{
     context::PortfolioContext,
@@ -305,72 +306,41 @@ impl AppState {
 
     pub async fn get_portfolio_summary(&self) -> PortfolioSummaryDto {
         let portfolio = self.portfolio().await;
-        let total_value = portfolio.get_total_value();
+        let breakdown = portfolio.value_breakdown();
         let allocation = portfolio.get_allocation();
 
-        let mut total_invested = 0.0_f64;
-        let mut total_pnl = 0.0_f64;
-        let mut cash_value = 0.0_f64;
-        let mut securities_value = 0.0_f64;
-        let mut total_prev_value_for_day = 0.0_f64;
-
+        // Summed over every position with a cost basis (unlike
+        // `cost_basis_totals`, which skips cash and unpriced holdings).
+        let mut total_invested = Decimal::ZERO;
+        let mut total_pnl = Decimal::ZERO;
         let positions: Vec<PositionDto> = portfolio
             .positions
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                if let Some(inv) = p.total_invested() {
+                if let Some(inv) = p.total_invested_dec() {
                     total_invested += inv;
                 }
-                if let Some(pnl) = p.pnl() {
+                if let Some(pnl) = p.pnl_dec() {
                     total_pnl += pnl;
                 }
-
-                let is_cash = p.is_cash();
-                let value = p.market_value();
-                if is_cash {
-                    cash_value += value;
-                } else {
-                    securities_value += value;
-                }
-
-                if let Some(dv) = p.daily_variation_percent() {
-                    let ratio = dv / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON {
-                        total_prev_value_for_day += value / (1.0 + ratio);
-                    } else {
-                        total_prev_value_for_day += value;
-                    }
-                } else {
-                    total_prev_value_for_day += value;
-                }
-
                 position_to_dto(i, p)
             })
             .collect();
 
-        let pnl_percent = if total_invested > 0.0 {
-            (total_value - total_invested) / total_invested * 100.0
-        } else {
-            0.0
-        };
-
-        let day_pnl = total_value - total_prev_value_for_day;
-        let day_change_percent = if total_prev_value_for_day > 0.0 {
-            (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-        } else {
-            0.0
-        };
+        let pnl_percent = percent_change(breakdown.total, total_invested)
+            .map(to_f64)
+            .unwrap_or(0.0);
 
         PortfolioSummaryDto {
-            total_value,
-            total_invested,
-            total_pnl,
+            total_value: to_f64(breakdown.total),
+            total_invested: to_f64(total_invested),
+            total_pnl: to_f64(total_pnl),
             pnl_percent,
-            day_change: day_pnl,
-            day_change_percent,
-            cash_value,
-            securities_value,
+            day_change: breakdown.day_pnl(),
+            day_change_percent: breakdown.day_percent(),
+            cash_value: to_f64(breakdown.cash),
+            securities_value: to_f64(breakdown.securities),
             allocation,
             positions,
         }
@@ -378,14 +348,14 @@ impl AppState {
 
     pub async fn get_allocation(&self) -> Vec<AllocationItemDto> {
         let portfolio = self.portfolio().await;
-        let total = portfolio.get_total_value();
+        let total = portfolio.total_value_dec();
         let mut items: Vec<AllocationItemDto> = portfolio
             .get_allocation()
             .into_iter()
             .map(|(asset_class, percent)| AllocationItemDto {
                 asset_class,
                 percent,
-                value: total * percent / 100.0,
+                value: to_f64(total * dec(percent) / Decimal::ONE_HUNDRED),
             })
             .collect();
         items.sort_by(|a, b| b.percent.partial_cmp(&a.percent).unwrap_or(Ordering::Equal));
@@ -394,64 +364,19 @@ impl AppState {
 
     pub async fn get_performance(&self) -> PerformanceDto {
         let portfolio = self.portfolio().await;
-        let current_value = portfolio.get_total_value();
+        let breakdown = portfolio.value_breakdown();
+        let current_value = to_f64(breakdown.total);
+        let cash_value = to_f64(breakdown.cash);
+        let securities_value = to_f64(breakdown.securities);
 
         // Cash is neither a gain nor a loss: do not subtract invested from
         // total value (which includes cash).
         let (total_invested, unrealized_pnl) = portfolio.cost_basis_totals();
-        let pnl_percent = if total_invested > 0.0 {
-            (unrealized_pnl / total_invested) * 100.0
-        } else {
-            0.0
-        };
+        let pnl_percent = portfolio.hist_percent();
 
-        let mut total_prev_value_for_day = 0.0_f64;
-        let mut cash_value = 0.0_f64;
-        let mut securities_value = 0.0_f64;
-        for p in &portfolio.positions {
-            let value = p.market_value();
-            if let Some(dv) = p.daily_variation_percent() {
-                let ratio = dv / 100.0;
-                if (1.0 + ratio).abs() > f64::EPSILON {
-                    total_prev_value_for_day += value / (1.0 + ratio);
-                } else {
-                    total_prev_value_for_day += value;
-                }
-            } else {
-                total_prev_value_for_day += value;
-            }
-
-            let is_cash = p.is_cash();
-            if is_cash {
-                cash_value += value;
-            } else {
-                securities_value += value;
-            }
-        }
-
-        let day_pnl = current_value - total_prev_value_for_day;
-        let day_percent = if total_prev_value_for_day > 0.0 {
-            (current_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-        } else {
-            0.0
-        };
-
-        let mut movers: Vec<(String, f64, f64)> = Vec::new();
-        for p in &portfolio.positions {
-            if let Some(pct) = p.daily_variation_percent() {
-                let value = p.market_value();
-                let prev = {
-                    let ratio = pct / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON {
-                        value / (1.0 + ratio)
-                    } else {
-                        value
-                    }
-                };
-                let day_pnl = value - prev;
-                movers.push((p.get_name().to_string(), pct, day_pnl));
-            }
-        }
+        let day_pnl = breakdown.day_pnl();
+        let day_percent = breakdown.day_percent();
+        let movers = portfolio.day_movers();
 
         let to_dto = |(name, percent, pnl): (String, f64, f64)| TopMoverDto { name, percent, pnl };
         let (gainers, losers) = crate::portfolio::top_movers(movers, 3);
