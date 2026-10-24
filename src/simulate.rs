@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::money::{dec, to_f64, Decimal};
 use crate::policy::Policy;
 use crate::portfolio::Portfolio;
 
@@ -78,7 +79,7 @@ pub fn simulate_rebalance(
 
         if drift.abs() > 0.5 {
             let action = if drift > 0.0 { "Reduce" } else { "Increase" };
-            let amount = (drift.abs() / 100.0) * portfolio_value;
+            let amount = to_f64(dec(drift.abs()) * dec(portfolio_value) / Decimal::ONE_HUNDRED);
             trades.push(Trade {
                 asset_class: target.asset_class.clone(),
                 action: action.to_string(),
@@ -115,7 +116,7 @@ pub fn simulate_rebalance(
         if drift.abs() > tolerance {
             let action = if drift > 0.0 { "Reduce" } else { "Increase" };
             // Only rebalance half the drift
-            let amount = (drift.abs() / 200.0) * portfolio_value;
+            let amount = to_f64(dec(drift.abs()) * dec(portfolio_value) / dec(200.0));
             trades.push(Trade {
                 asset_class: target.asset_class.clone(),
                 action: action.to_string(),

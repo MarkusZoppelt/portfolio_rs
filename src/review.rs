@@ -1,3 +1,4 @@
+use crate::money::{dec, percent_of, to_f64, Decimal};
 use crate::policy::Policy;
 use crate::portfolio::Portfolio;
 use crate::position::PriceStatus;
@@ -84,7 +85,7 @@ impl Review {
             let tolerance = target.tolerance_percent.unwrap_or(5.0);
             let within_tolerance = drift.abs() <= tolerance;
 
-            let value = portfolio_value * actual_percent / 100.0;
+            let value = to_f64(dec(portfolio_value) * dec(actual_percent) / Decimal::ONE_HUNDRED);
 
             allocations.push(AllocationReview {
                 asset_class: target.asset_class.clone(),
@@ -313,11 +314,9 @@ fn check_constraints(
     // Single position concentration
     if let Some(limit) = policy.constraints.single_position_limit_percent {
         for position in &portfolio.positions {
-            let weight = if total_value > 0.0 {
-                position.market_value() / total_value * 100.0
-            } else {
-                0.0
-            };
+            let weight = percent_of(position.balance_dec(), dec(total_value))
+                .map(to_f64)
+                .unwrap_or(0.0);
 
             if weight > limit {
                 checks.push(ConstraintCheck {
