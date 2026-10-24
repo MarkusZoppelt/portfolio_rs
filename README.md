@@ -198,7 +198,7 @@ Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
 `internalTransfers` (between tracked positions: a buy paid from tracked cash is
 internal for both the security's class and Cash), `externalFlows` (into or out
 of the portfolio) and `externalUnknown` (positions that appeared or vanished
-without a transaction). With `insufficient_history`, `endValue` still holds a known end value.
+without a transaction). The split is computed per snapshot step and summed; a same-step deposit and buy without dated cash deposits goes to `externalUnknown`. With `insufficient_history`, `endValue` still holds a known end value.
 
 The start value is the last stored snapshot dated before `from`
 (`dataCoverage.startPointDate`), at most `maxStartAgeDays` days before the
@@ -226,7 +226,11 @@ for every day, otherwise Modified Dietz over the stored points
 weighted at its transaction date and each cash change (or flow without a dated
 transaction) at the snapshot that shows it. A buy or sell without a recorded
 price is valued at the historic close of its date, also flagged by a
-`performance_approximate` note (`detail.reason: estimated_transaction_price`). Dates (`from`, `to` and every
+`performance_approximate` note (`detail.reason: estimated_transaction_price`).
+A manual-position transaction without a price is valued at the last snapshot's
+unit value (or Amount/Quantity) when the snapshot quantities agree, otherwise
+booked as `externalUnknown`, flagged by a `performance_approximate` note
+(`detail.reason: estimated_manual_value`). Dates (`from`, `to` and every
 snapshot `date`) must be strict `YYYY-MM-DD`. Snapshot lines with bad JSON, a
 looser date, a missing field (such as a null `totalBase`), a negative position
 `valueBase`, or a `totalBase` more than 0.05 off the sum of the positions are
@@ -329,7 +333,9 @@ is; a cost-basis estimate is first multiplied by its class's plausible-gain
 factor (default 3 for funds, ETFs, bonds, gold and commodities; crypto, stocks
 and other classes have none, so their cost-basis estimate is never immaterial
 and they get the certain-breach/`possible_breach` treatment). Override per
-class with `--gain-factor CLASS=FACTOR` or `CLASS=never` (repeatable); the
+class with `--gain-factor CLASS=FACTOR` or `CLASS=never` (repeatable; the last
+flag for a class wins; FACTOR must be a finite number >= 1; a class with no
+holding is an `unknown_gain_factor_class` note). The
 note reports `detail.materialityShare` and `detail.gainFactors` (a class
 holding the unpriced position that is below its band is then a
 `possible_breach`). `checks_incomplete` summarizes what

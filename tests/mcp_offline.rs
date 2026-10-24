@@ -3321,9 +3321,9 @@ async fn sell_without_price_uses_historic_close() {
     priceless_tx_uses_historic_close(0.4, -0.05, "sell").await;
 }
 
-/// Finance S6: a manual add-on buy without a price is valued the same way.
+/// Finance S6: a ticker add-on buy without a price is valued the same way.
 #[tokio::test]
-async fn add_on_buy_without_price_uses_historic_close() {
+async fn ticker_add_on_buy_without_price_uses_historic_close() {
     priceless_tx_uses_historic_close(0.5, 0.05, "buy").await;
 }
 
@@ -3407,6 +3407,218 @@ async fn priceless_tx_uses_historic_close(amount: f64, qty: f64, ty: &str) {
         json!({"period": "week", "groupBy": "assetClass"}),
     )
     .await;
+    for r in v["breakdown"].as_array().unwrap() {
+        let parts: f64 = ["internalTransfers", "externalFlows", "externalUnknown"]
+            .iter()
+            .map(|k| r[*k].as_f64().unwrap())
+            .sum();
+        assert!(
+            (parts - r["netContributions"].as_f64().unwrap()).abs() < 0.02,
+            "{r}"
+        );
+    }
+    client.cancel().await.unwrap();
+}
+
+/// A deposit on one snapshot step and a buy from that cash on the next match
+/// as internal transfers. Over the whole span both external flows are positive,
+/// so a single split would leave the buy external.
+#[tokio::test]
+async fn stepwise_split_matches_deposit_then_buy_from_cash() {
+    let tmp = TempDir::new().unwrap();
+    let buy_day = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+    let data = tmp.path().join("positions.json");
+    let positions = json!([
+        {
+            "Name": "Index",
+            "AssetClass": "Stocks",
+            "Amount": 3940.0,
+            "Purchases": [
+                {"Date": "2020/01/02", "Quantity": 1, "Price": 100.0},
+                {"Date": buy_day.format("%Y/%m/%d").to_string(), "Quantity": 1, "Price": 3840.0}
+            ]
+        },
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 6160.0}
+    ]);
+    std::fs::write(&data, positions.to_string()).unwrap();
+    let data = data.to_string_lossy().into_owned();
+    let (path, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
+        file: Some(data.clone()),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await
+    .unwrap();
+    let today: Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    let retarget = |date: &str, cash: f64, stock: f64| {
+        let mut snap = today.clone();
+        snap["date"] = json!(date);
+        let mut total = 0.0;
+        for p in snap["positions"].as_array_mut().unwrap() {
+            p["ledgerBase"] = Value::Null;
+            if p["kind"] == "cash" {
+                p["valueBase"] = json!(cash);
+                p["quantity"] = json!(cash);
+            } else if p["assetClass"] == "Stocks" {
+                p["valueBase"] = json!(stock);
+            }
+            total += p["valueBase"].as_f64().unwrap();
+        }
+        snap["cashBase"] = json!(cash);
+        snap["totalBase"] = json!(total);
+        snap
+    };
+    let start = retarget(&day(-7), 0.0, 100.0);
+    let mid = retarget(&day(-3), 10_000.0, 100.0);
+    std::fs::write(&path, format!("{start}\n{mid}\n")).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "week", "groupBy": "assetClass"}),
+    )
+    .await;
+    assert!(
+        v["change"].is_number() && v["netContributions"].is_number(),
+        "{v}"
+    );
+    // Totals are the deposit, not the buy: the buy is internal.
+    assert!(
+        (v["netContributions"].as_f64().unwrap() - 10_000.0).abs() < 0.02,
+        "{v}"
+    );
+    assert!(v["marketEffect"].as_f64().unwrap().abs() < 0.02, "{v}");
+    assert!(v["manualRevaluation"].as_f64().unwrap().abs() < 0.02, "{v}");
+    let row = |key: &str| {
+        v["breakdown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["key"] == key)
+            .unwrap_or_else(|| panic!("no {key} in {v}"))
+            .clone()
+    };
+    let stocks = row("Stocks");
+    let cash = row("Cash");
+    assert!(
+        (stocks["internalTransfers"].as_f64().unwrap() - 3_840.0).abs() < 0.02,
+        "{stocks}"
+    );
+    assert!(
+        stocks["externalFlows"].as_f64().unwrap().abs() < 0.02,
+        "{stocks}"
+    );
+    assert!(
+        (cash["internalTransfers"].as_f64().unwrap() + 3_840.0).abs() < 0.02,
+        "{cash}"
+    );
+    assert!(
+        (cash["externalFlows"].as_f64().unwrap() - 10_000.0).abs() < 0.02,
+        "{cash}"
+    );
+    let internal: f64 = v["breakdown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["internalTransfers"].as_f64().unwrap())
+        .sum();
+    assert!(internal.abs() < 0.02, "{v}");
+    for r in v["breakdown"].as_array().unwrap() {
+        let parts: f64 = ["internalTransfers", "externalFlows", "externalUnknown"]
+            .iter()
+            .map(|k| r[*k].as_f64().unwrap())
+            .sum();
+        assert!(
+            (parts - r["netContributions"].as_f64().unwrap()).abs() < 0.02,
+            "{r}"
+        );
+    }
+    client.cancel().await.unwrap();
+}
+
+/// A manual add-on without a price must not null the whole period.
+#[tokio::test]
+async fn manual_add_on_without_price_does_not_null_performance() {
+    let tmp = TempDir::new().unwrap();
+    let open = chrono::Local::now().date_naive() - chrono::Duration::days(8);
+    let addon = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+    let data = tmp.path().join("positions.json");
+    let positions = json!([{
+        "Name": "Apartment",
+        "AssetClass": "RealEstate",
+        "Amount": 215000,
+        "Purchases": [
+            {"Date": open.format("%Y/%m/%d").to_string(), "Quantity": 1, "Price": 200000.0},
+            {"Date": addon.format("%Y/%m/%d").to_string(), "Quantity": 5000}
+        ]
+    }]);
+    std::fs::write(&data, positions.to_string()).unwrap();
+    let data = data.to_string_lossy().into_owned();
+    let (path, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
+        file: Some(data.clone()),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await
+    .unwrap();
+    let today: Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut before = today;
+    before["date"] = json!(day(-7));
+    for p in before["positions"].as_array_mut().unwrap() {
+        p["valueBase"] = json!(200000.0);
+        p["quantity"] = json!(1.0);
+        p["ledgerBase"] = Value::Null;
+    }
+    before["totalBase"] = json!(200000.0);
+    before["cashBase"] = json!(0.0);
+    std::fs::write(&path, format!("{before}\n")).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "week", "groupBy": "assetClass"}),
+    )
+    .await;
+    assert!(
+        v["change"].is_number() && v["netContributions"].is_number(),
+        "{v}"
+    );
+    let notes: Vec<&Value> = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "performance_approximate")
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|w| w["detail"]["reason"] == "estimated_manual_value"),
+        "{v}"
+    );
     for r in v["breakdown"].as_array().unwrap() {
         let parts: f64 = ["internalTransfers", "externalFlows", "externalUnknown"]
             .iter()
