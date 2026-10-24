@@ -3318,6 +3318,16 @@ async fn snapshot_cash_quantity_is_the_balance() {
 /// buy, with a performance_approximate note and no spurious ledger_changed.
 #[tokio::test]
 async fn sell_without_price_uses_historic_close() {
+    priceless_tx_uses_historic_close(0.4, -0.05, "sell").await;
+}
+
+/// Finance S6: a manual add-on buy without a price is valued the same way.
+#[tokio::test]
+async fn add_on_buy_without_price_uses_historic_close() {
+    priceless_tx_uses_historic_close(0.5, 0.05, "buy").await;
+}
+
+async fn priceless_tx_uses_historic_close(amount: f64, qty: f64, ty: &str) {
     let tmp = TempDir::new().unwrap();
     let (path, original) = seed_today(tmp.path()).await;
     let sell_day = chrono::Local::now().date_naive() - chrono::Duration::days(1);
@@ -3330,11 +3340,11 @@ async fn sell_without_price_uses_historic_close() {
         .iter_mut()
         .find(|p| p["Ticker"] == "BTC-USD")
         .expect("BTC in example data");
-    btc["Amount"] = json!(0.4);
+    btc["Amount"] = json!(amount);
     btc["Purchases"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"Date": sell_day.format("%Y/%m/%d").to_string(), "Quantity": -0.05}));
+        .push(json!({"Date": sell_day.format("%Y/%m/%d").to_string(), "Quantity": qty}));
     let text = positions.to_string();
     std::fs::write(&data, text).unwrap();
     let data = data.to_string_lossy().into_owned();
@@ -3363,8 +3373,13 @@ async fn sell_without_price_uses_historic_close() {
         ..opts()
     })
     .await;
-    let t = ok(&client, "get_transactions", json!({"types": ["sell"]})).await;
-    let sell = &t["transactions"][0];
+    let t = ok(&client, "get_transactions", json!({"types": [ty]})).await;
+    let sell = t["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["date"] == json!(day(-1)))
+        .unwrap_or_else(|| panic!("{t}"));
     assert_eq!(sell["priceSource"], "historic_close", "{t}");
     assert!(sell["amount"].is_number(), "{t}");
     let v = ok(&client, "get_performance", json!({"period": "week"})).await;
@@ -3385,6 +3400,23 @@ async fn sell_without_price_uses_historic_close() {
             .any(|w| w["detail"]["reason"] == "estimated_transaction_price"),
         "{v}"
     );
+    // Item 6: per-class contributions split into internal/external/unknown.
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "week", "groupBy": "assetClass"}),
+    )
+    .await;
+    for r in v["breakdown"].as_array().unwrap() {
+        let parts: f64 = ["internalTransfers", "externalFlows", "externalUnknown"]
+            .iter()
+            .map(|k| r[*k].as_f64().unwrap())
+            .sum();
+        assert!(
+            (parts - r["netContributions"].as_f64().unwrap()).abs() < 0.02,
+            "{r}"
+        );
+    }
     client.cancel().await.unwrap();
 }
 

@@ -21,6 +21,14 @@ pub struct Effects {
     pub net_contributions: f64,
     pub market_effect: f64,
     pub manual_revaluation: f64,
+    /// Part of `net_contributions` moved between tracked positions (a buy
+    /// paid from tracked cash, a sell into it); sums to 0 over the portfolio.
+    pub internal_transfers: f64,
+    /// Part of `net_contributions` that entered or left the portfolio.
+    pub external_flows: f64,
+    /// Part of `net_contributions` from positions that appeared or vanished
+    /// without a transaction: external, of unknown origin.
+    pub external_unknown: f64,
 }
 
 impl Effects {
@@ -30,6 +38,9 @@ impl Effects {
         self.net_contributions += o.net_contributions;
         self.market_effect += o.market_effect;
         self.manual_revaluation += o.manual_revaluation;
+        self.internal_transfers += o.internal_transfers;
+        self.external_flows += o.external_flows;
+        self.external_unknown += o.external_unknown;
     }
     pub fn change(&self) -> f64 {
         self.end_value - self.start_value
@@ -95,6 +106,7 @@ pub fn position_effects(
     txs: &[Transaction],
 ) -> Option<BTreeMap<String, (String, Effects)>> {
     let mut out: BTreeMap<String, (String, Effects)> = BTreeMap::new();
+    let mut cash_ids: Vec<String> = Vec::new();
     let mut ids: Vec<&str> = start
         .positions
         .iter()
@@ -123,11 +135,14 @@ pub fn position_effects(
         };
         if any.kind == "cash" {
             eff.net_contributions = ev - sv;
+            eff.external_flows = ev - sv;
+            cash_ids.push(id.to_string());
         } else if (e.is_none() || s.is_none()) && !has_tx_in(txs, id, start, end) {
             // Vanished without a sell entry, or appeared without a buy
             // dated in the interval: an unknown external flow, never a loss
             // or a gain (see [`vanished`] and [`appeared`]).
             eff.net_contributions = ev - sv;
+            eff.external_unknown = ev - sv;
         } else {
             let mut flows = 0.0;
             for tx in txs
@@ -137,6 +152,7 @@ pub fn position_effects(
                 flows += tx_flow(tx, fx)?;
             }
             eff.net_contributions = flows;
+            eff.external_flows = flows;
             if any.kind == "manual" {
                 eff.manual_revaluation = ev - sv - flows;
             } else {
@@ -145,7 +161,36 @@ pub fn position_effects(
         }
         out.insert(id.to_string(), (any.asset_class.clone(), eff));
     }
+    split_internal(&mut out, &cash_ids);
     Some(out)
+}
+
+/// Net security flows (buys − sells) matched by an opposite change of the
+/// tracked cash balances are internal transfers, for both sides; the rest
+/// stays external. Matched proportionally to each position's flow.
+fn split_internal(out: &mut BTreeMap<String, (String, Effects)>, cash_ids: &[String]) {
+    let is_cash = |id: &String| cash_ids.contains(id);
+    let securities: f64 = out
+        .iter()
+        .filter(|(id, _)| !is_cash(id))
+        .map(|(_, (_, e))| e.external_flows)
+        .sum();
+    let cash: f64 = out
+        .iter()
+        .filter(|(id, _)| is_cash(id))
+        .map(|(_, (_, e))| e.external_flows)
+        .sum();
+    if securities == 0.0 || cash == 0.0 || securities.signum() == cash.signum() {
+        return;
+    }
+    let matched = securities.abs().min(cash.abs());
+    let sec_share = matched / securities.abs();
+    let cash_share = matched / cash.abs();
+    for (id, (_, e)) in out.iter_mut() {
+        let share = if is_cash(id) { cash_share } else { sec_share };
+        e.internal_transfers = e.external_flows * share;
+        e.external_flows -= e.internal_transfers;
+    }
 }
 
 fn has_tx_in(txs: &[Transaction], id: &str, start: &Snapshot, end: &Snapshot) -> bool {
@@ -365,6 +410,27 @@ mod tests {
     }
 
     /// Finding 4 regression: a cash deposit is a contribution, never return.
+    #[test]
+    fn buy_from_tracked_cash_is_internal_for_both_classes() {
+        // a: 100 → 200 with a 100 buy; cash 500 → 450: 50 came from cash,
+        // 50 from outside.
+        let txs = vec![buy("2026-01-02", 100.0)];
+        let fx = position_effects(
+            &snap("2026-01-01", 100.0, 500.0),
+            &snap("2026-01-10", 200.0, 450.0),
+            &txs,
+        )
+        .unwrap();
+        let c = group_by_class(&fx);
+        let st = &c["Stocks"];
+        assert_eq!((st.internal_transfers, st.external_flows), (50.0, 50.0));
+        let ca = &c["Cash"];
+        assert_eq!((ca.internal_transfers, ca.external_flows), (-50.0, 0.0));
+        let t = total(&fx);
+        assert_eq!(t.internal_transfers, 0.0);
+        assert_eq!(t.external_flows, t.net_contributions);
+    }
+
     #[test]
     fn cash_deposit_is_not_return() {
         let s = snap("2026-01-01", 100.0, 0.0);
