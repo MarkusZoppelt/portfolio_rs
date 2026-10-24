@@ -611,6 +611,12 @@ pub fn allocation(
             .total_cmp(&key(a))
             .then_with(|| a.asset_class.cmp(&b.asset_class))
     });
+    // Same order as `classes` (value descending, then name).
+    let untargeted: Vec<String> = classes
+        .iter()
+        .map(|c| c.asset_class.clone())
+        .filter(|c| untargeted.contains(c))
+        .collect();
     let estimates: Option<Vec<(Decimal, ExcludedBasis)>> =
         excluded.iter().map(|p| p.excluded_estimate()).collect();
     let (excluded_value_share, excluded_value_basis) = match estimates {
