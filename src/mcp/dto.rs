@@ -806,6 +806,15 @@ pub struct PerformanceBreakdown {
     pub net_contributions: f64,
     pub market_effect: f64,
     pub manual_revaluation: f64,
+    /// `netContributions = internalTransfers + externalFlows +
+    /// externalUnknown`. Internal: moved between tracked positions (a buy
+    /// paid from tracked cash counts here for both classes).
+    pub internal_transfers: f64,
+    /// Entered or left the portfolio (a deposit, or a buy not paid from
+    /// tracked cash).
+    pub external_flows: f64,
+    /// Positions that appeared or vanished without a transaction.
+    pub external_unknown: f64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -951,6 +951,9 @@ impl PortfolioServer {
             net_contributions: perf::r2(e.net_contributions),
             market_effect: perf::r2(e.market_effect),
             manual_revaluation: perf::r2(e.manual_revaluation),
+            internal_transfers: perf::r2(e.internal_transfers),
+            external_flows: perf::r2(e.external_flows),
+            external_unknown: perf::r2(e.external_unknown),
         };
         out.breakdown = match input.group_by.unwrap_or_default() {
             GroupBy::None => Vec::new(),

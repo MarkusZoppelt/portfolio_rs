@@ -194,7 +194,11 @@ pattern is in the workspace `.gitignore` template and checked by `doctor`.
 Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
 `1y`, `since_inception` and `custom` (with `from` and `to`, YYYY-MM-DD).
 `groupBy` is `none`, `assetClass` or `position` (position rows carry `name` and
-`ticker`). With `insufficient_history`, `endValue` still holds a known end value.
+`ticker`). Breakdown rows also split `netContributions` into
+`internalTransfers` (between tracked positions: a buy paid from tracked cash is
+internal for both the security's class and Cash), `externalFlows` (into or out
+of the portfolio) and `externalUnknown` (positions that appeared or vanished
+without a transaction). With `insufficient_history`, `endValue` still holds a known end value.
 
 The start value is the last stored snapshot dated before `from`
 (`dataCoverage.startPointDate`), at most `maxStartAgeDays` days before the
