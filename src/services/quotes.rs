@@ -125,6 +125,10 @@ pub trait QuoteProvider: Send + Sync + 'static {
     fn last_known(&self, _symbol: &str) -> Option<(f64, Option<String>)> {
         None
     }
+    /// As-of (else fetched-at) of [`Self::last_known`]'s entry.
+    fn last_known_as_of(&self, _symbol: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Yahoo Finance, using the process-wide caches in [`crate::position`].
@@ -383,6 +387,12 @@ impl QuoteProvider for AnyProvider {
     fn last_known(&self, symbol: &str) -> Option<(f64, Option<String>)> {
         match self {
             Self::Cached(c) => c.last_known_entry(symbol),
+            _ => None,
+        }
+    }
+    fn last_known_as_of(&self, symbol: &str) -> Option<String> {
+        match self {
+            Self::Cached(c) => c.last_known_as_of(symbol),
             _ => None,
         }
     }

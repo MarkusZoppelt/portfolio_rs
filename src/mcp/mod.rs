@@ -42,6 +42,11 @@ pub struct McpOptions {
     pub cache: CacheMode,
     /// Max age of cached prices in days (default 7).
     pub cache_max_age_days: Option<i64>,
+    /// Prices older than this many days are stale (default 3).
+    pub stale_after_days: Option<i64>,
+    /// Drop possible_breach findings when the excluded positions can be at
+    /// most this percent of the total (default 0.5).
+    pub possible_breach_min_share: Option<f64>,
 }
 
 /// Whether the server uses the last-known-price cache.
@@ -72,6 +77,7 @@ pub struct ServedPortfolio {
     pub quote_source: &'static str,
     /// The last-known-price cache file, when enabled.
     pub cache_path: Option<PathBuf>,
+    pub policy_options: analytics::PolicyOptions,
 }
 
 impl ServedPortfolio {
@@ -143,7 +149,10 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
         }
         None => provider,
     };
-    let state = AppState::with_quotes(opts.currency.clone(), provider);
+    let state = AppState::with_quotes(opts.currency.clone(), provider).with_stale_after(
+        opts.stale_after_days
+            .unwrap_or(crate::position::DEFAULT_STALE_AFTER_DAYS),
+    );
     let mut policy_error = None;
     let (mode, path, workspace_dir) = if let Some(dir) = &opts.workspace {
         let positions = Path::new(dir).join("positions.json");
@@ -201,6 +210,11 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
         network,
         quote_source,
         cache_path,
+        policy_options: analytics::PolicyOptions {
+            possible_breach_min_share: opts
+                .possible_breach_min_share
+                .unwrap_or(analytics::DEFAULT_POSSIBLE_BREACH_MIN_SHARE),
+        },
     })
 }
 

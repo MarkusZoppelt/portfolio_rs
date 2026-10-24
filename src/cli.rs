@@ -500,6 +500,20 @@ pub fn build_cli() -> Command {
                         .value_name("DAYS")
                         .value_parser(clap::value_parser!(i64).range(0..))
                         .help("Cached prices older than DAYS do not count (default: 7)"),
+                )
+                .arg(
+                    Arg::new("stale-after")
+                        .long("stale-after")
+                        .value_name("DAYS")
+                        .value_parser(clap::value_parser!(i64).range(0..))
+                        .help("Prices or FX rates whose as-of is older than DAYS are stale (default: 3)"),
+                )
+                .arg(
+                    Arg::new("possible-breach-min-share")
+                        .long("possible-breach-min-share")
+                        .value_name("PERCENT")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("No possible_breach when unpriced positions can be at most PERCENT of the total (default: 0.5)"),
                 ),
         )
         .subcommand(

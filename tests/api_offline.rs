@@ -524,7 +524,8 @@ async fn test_context_reads_quote_cache_read_only() {
        "Purchases": [{"Date": "2025/04/15", "Quantity": 2, "Price": 400}]}
     ]"#;
     std::fs::write(&file, positions).unwrap();
-    let now = chrono::Utc::now().to_rfc3339();
+    // Five days old: within the cache max-age (7) but past --stale-after (3).
+    let now = (chrono::Utc::now() - chrono::Duration::days(5)).to_rfc3339();
     let cache = tmp.path().join(".positions.json.quotes-cache.json");
     let cache_json = serde_json::json!({
         "version": 1,
@@ -547,7 +548,7 @@ async fn test_context_reads_quote_cache_read_only() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["summary"]["totalValue"], 2000.0, "{json}");
-    // A cached price is served but marked stale.
+    // A cached price older than the stale threshold is stale (Answer 3).
     assert_eq!(json["summary"]["dataStatus"], "stale", "{json}");
     assert_eq!(json["positions"][1]["price"], 500.0);
     // A recorded purchase Price needs no historic lookup (retest B7).

@@ -189,6 +189,19 @@ impl CachedProvider {
             .map(|e| (e.price, e.currency.clone()))
     }
 
+    /// As-of (else fetched-at) of the entry [`Self::last_known_entry`] returns.
+    pub fn last_known_as_of(&self, symbol: &str) -> Option<String> {
+        let st = self.lock();
+        let map = if is_fx(symbol) {
+            &st.file.fx
+        } else {
+            &st.file.quotes
+        };
+        map.get(symbol)
+            .filter(|e| usable(symbol, e))
+            .map(|e| e.as_of.clone().unwrap_or_else(|| e.fetched_at.clone()))
+    }
+
     async fn cached_close(
         &self,
         symbol: &str,
@@ -346,6 +359,9 @@ impl QuoteProvider for CachedProvider {
 
     fn last_known(&self, symbol: &str) -> Option<(f64, Option<String>)> {
         self.last_known_entry(symbol)
+    }
+    fn last_known_as_of(&self, symbol: &str) -> Option<String> {
+        CachedProvider::last_known_as_of(self, symbol)
     }
 
     async fn name(&self, symbol: &str) -> Option<String> {

@@ -152,13 +152,18 @@ atomically with mode `0600`. It holds, per symbol, the price, previous close,
 currency, `asOf` and `fetchedAt`, plus the FX pairs (`EURUSD=X`, ...) in a
 separate `fx` map; no quantities or other portfolio data. When a fetch fails,
 the cached value is used if it is younger than the max age (default 7 days,
-measured from `asOf`): the position gets `priceSource: "cache"`,
-`isStale: true`, `priceStatus: "stale"` and the cached `priceAsOf`. Stale prices
-count toward `complete`; every response adds `hasStale`, `stalePositions` and
-`priceAsOf` (the oldest price used).
+measured from `asOf`): the position gets `priceSource: "cache"` and the cached
+`priceAsOf`. Coming from the cache is informational only: a price (or FX
+rate) is stale when its `asOf` is older than `--stale-after` days (default 3,
+which covers a weekend), wherever it came from; stale positions get
+`isStale: true` and `priceStatus: "stale"`. An unknown `asOf` is not stale.
+Stale prices count toward `complete`; every response adds `hasStale`,
+`stalePositions` and `priceAsOf` (the oldest price used).
 
 The cache also keeps the historic closes used to fill missing purchase prices,
-so cost basis and PnL survive offline runs. Entries are only served with a
+so cost basis and PnL survive offline runs. Their keys are
+`SYMBOL|on|YYYY-MM-DD` / `SYMBOL|before|YYYY-MM-DD`, so the cache file reveals
+purchase dates (no quantities); treat it like the data file. Entries are only served with a
 positive price, a timestamp at most one day in the future and (for quotes) a
 currency; a cache file with an unknown `version` is ignored with a warning.
 The HTTP API (`portfolio_rs api`, including `/api/context`) reads the same
@@ -171,6 +176,7 @@ only base-currency values (`valueBase`, `weightPercent`, ...) are null. Its
 `priceSource` and `isStale` still describe that native price.
 
     portfolio_rs mcp --cache-max-age 3 example_data.json   # days, 0 disables fallback
+    portfolio_rs mcp --stale-after 1 example_data.json     # asOf older than 1 day is stale
     portfolio_rs mcp --no-cache example_data.json          # neither read nor write
     portfolio_rs mcp --offline example_data.json           # read the cache, never fetch
 
@@ -213,22 +219,35 @@ Totals then cover only priced positions; a class with an unpriced position has
 a `null` value. No percentage (position `weightPercent`, context class and cash
 percentages), drift or `amountToTarget` is derived from such a partial total; each class gets `actualPercentMin`/`actualPercentMax` instead:
 its possible share whatever the excluded positions are worth, from 0 up to
-their maximum plausible value (twice the last cached price; unbounded when a
-position is only known at cost basis or not at all). A band status
+their maximum plausible value (twice their estimate: the last cached price,
+else the cost basis; unbounded only when a position has neither). A band status
 (`above_band`, `below_band`, `within_band`) is set only when it holds for the
 whole range, otherwise `unknown`. `get_allocation` lists the left-out
 positions in `excludedPositions` and their estimated share in
 `excludedValueShare` (last cached price at any age, else cost basis;
-`excludedValueBasis`: `last_price` | `cost_basis`; null without an estimate).
+`excludedValueBasis`: `last_price` | `cost_basis` | `cost_basis_assumed_base`;
+null without an estimate). The cost basis is converted from the quote
+currency, the cached currency or the position's optional recorded
+`"Currency"`; with none of them it is assumed to be in the base currency
+(`cost_basis_assumed_base`).
 `check_policy` reports a breach only when it is certain (`detail.basis:
 "partial"`); a band or limit that might be violated is a `possible_breach`
-warning, and `checks_incomplete` summarizes what was judged on a partial basis.
+warning (at most one per class and limit, with the priced-only percent in the
+message; none when the excluded positions can be at most
+`--possible-breach-min-share` percent of the total, default 0.5).
+A bound from a cache entry past max-age (or with `--cache-max-age 0`) is an
+assumption: such a breach names it with its as-of date
+(`detail.assumptions`) and is capped at `warning`
+(`detail.severityCappedFrom: "critical"`). `checks_incomplete` summarizes what
+was judged on a partial basis; it is a data-quality warning (top-level
+`warnings` only), so `policyStatus` is `warnings` only for real policy
+findings such as a `possible_breach`.
 `networkStatus` (in every tool response and in `get_context`, also via `/api/context`) is `connected` (every market position has a fresh quote and FX
 rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
 fresh quotes; cached prices do not count as connected). Each position row
 carries `priceSource` (`live`, `cache`, `fixture` or `none`) and `isStale`.
 Every response also carries `dataStatus`: `complete`, `partial` (some
-position unpriced) or `stale` (all priced, but some from an expired price; a
+position unpriced) or `stale` (all priced, but some older than `--stale-after`; a
 `stale_prices` data-quality warning lists them and the context table marks
 them `(stale)`). `check_policy` keeps policy and data quality apart:
 `policyStatus` (`ok` | `warnings` | `breaches`), `findings`, `counts` and

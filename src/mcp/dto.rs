@@ -186,7 +186,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "checks_incomplete",
-        "policy",
+        "data_quality",
         "warning",
         "Prices or FX rates are missing; allocation and limits are judged on the priced part and only certain breaches are reported.",
     ),

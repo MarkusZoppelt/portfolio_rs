@@ -97,6 +97,8 @@ fn opts() -> McpOptions {
         file: Some(example_data()),
         currency: "EUR".into(),
         quotes: Some(fixture()),
+        // Fixture asOf dates are fixed (2026-01-02); stale tests set their own.
+        stale_after_days: Some(100_000),
         ..Default::default()
     }
 }
@@ -1229,7 +1231,8 @@ async fn missing_quote_is_visible_everywhere() {
 
     let v = ok(&client, "check_policy", json!({})).await;
     let found = codes(&v["findings"]);
-    assert!(found.contains(&"checks_incomplete".to_string()));
+    assert!(!found.contains(&"checks_incomplete".to_string()));
+    assert!(codes(&v["warnings"]).contains(&"checks_incomplete".to_string()));
     // Data-quality warnings appear once, in the top-level warnings only.
     assert!(!found.contains(&"no_live_price".to_string()));
     assert!(codes(&v["warnings"]).contains(&"no_live_price".to_string()));
@@ -1738,6 +1741,7 @@ async fn last_known_price_cache_fills_and_falls_back() {
         quotes: Some(quotes),
         cache,
         cache_max_age_days: max_age,
+        stale_after_days: Some(100_000),
         ..Default::default()
     };
 
@@ -1777,26 +1781,32 @@ async fn last_known_price_cache_fills_and_falls_back() {
     assert_eq!(std::fs::read(&data).unwrap(), before, "data file untouched");
     drop(client);
 
-    // Offline: every price from the cache, stale; SPY's asOf is older than the
-    // default 7 days, so it does not count.
+    // Offline: every price from the cache; SPY's asOf is older than the
+    // default 7 days, so it does not count. A cached price is informational,
+    // not stale by itself (Answer 3: stale is age-based).
     let client = connect(ws(AnyProvider::Offline, CacheMode::Auto, None)).await;
     let v = ok(&client, "get_positions", json!({})).await;
     let tlt = by_ticker(&v["positions"], "TLT");
     assert_eq!(tlt["priceSource"], "cache");
-    assert_eq!(tlt["isStale"], true);
-    assert_eq!(tlt["priceStatus"], "stale");
+    assert_eq!(tlt["isStale"], false);
+    assert_eq!(tlt["priceStatus"], "live");
     assert_eq!(tlt["price"], 90.0);
     assert!(tlt["priceAsOf"].is_string());
     assert!(tlt["dayChangePercent"].is_number(), "cached previous close");
     assert!(by_ticker(&v["positions"], "SPY")["price"].is_null());
     assert_eq!(by_ticker(&v["positions"], "SPY")["priceSource"], "none");
     assert_eq!(v["complete"], false);
-    assert_eq!(v["hasStale"], true);
+    assert_eq!(v["hasStale"], false);
     assert_eq!(v["networkStatus"], "offline");
     drop(client);
 
-    // A longer max age lets SPY count again: complete, every price stale.
-    let client = connect(ws(AnyProvider::Offline, CacheMode::Auto, Some(3650))).await;
+    // A longer max age lets SPY count again: complete; SPY's asOf is months
+    // old, so with the default --stale-after (3 days) it is stale.
+    let client = connect(McpOptions {
+        stale_after_days: None,
+        ..ws(AnyProvider::Offline, CacheMode::Auto, Some(3650))
+    })
+    .await;
     let v = ok(&client, "get_positions", json!({})).await;
     assert_eq!(v["complete"], true, "{}", v["dataQuality"]);
     assert_eq!(v["hasStale"], true);
@@ -1808,7 +1818,10 @@ async fn last_known_price_cache_fills_and_falls_back() {
         .iter()
         .filter(|p| p["kind"] == "market")
         .count();
-    assert_eq!(v["stalePositions"].as_array().unwrap().len(), market);
+    // Only positions with an old asOf (SPY) are stale; fresh cached prices
+    // without a provider asOf are not (Answer 3).
+    let stale = v["stalePositions"].as_array().unwrap().len();
+    assert!(stale >= 1 && stale < market, "{}", v["stalePositions"]);
     let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
     let text = ctx.to_string();
     assert!(text.contains("\"isStale\":true"), "{text}");
@@ -2239,11 +2252,27 @@ async fn data_quality_does_not_drive_policy_status() {
 #[tokio::test]
 async fn stale_cache_prices_drive_data_status() {
     let (_tmp, data, policy) = seeded_cache("quotes_example.json").await;
+    // Answer 3: a fresh cached price is informational only.
+    let client = connect(McpOptions {
+        file: Some(data.clone()),
+        policy: Some(policy.clone()),
+        quotes: Some(fixture_without(&["TLT"])),
+        cache: CacheMode::On,
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(by_ticker(&v["positions"], "TLT")["priceSource"], "cache");
+    assert_eq!(v["hasStale"], false);
+    assert_eq!(v["dataStatus"], "complete");
+    client.cancel().await.unwrap();
+    // Older than --stale-after: stale.
     let client = connect(McpOptions {
         file: Some(data),
         policy: Some(policy),
         quotes: Some(fixture_without(&["TLT"])),
         cache: CacheMode::On,
+        stale_after_days: Some(0),
         ..opts()
     })
     .await;
@@ -2322,7 +2351,8 @@ async fn price_shown_without_fx_reports_its_source() {
     assert_eq!(tlt["priceStatus"], "fx_unavailable", "{tlt}");
     assert_eq!(tlt["price"], 90.0, "{tlt}");
     assert_eq!(tlt["priceSource"], "cache", "{tlt}");
-    assert_eq!(tlt["isStale"], true, "{tlt}");
+    // Answer 3: a fresh cached price is informational, not stale.
+    assert_eq!(tlt["isStale"], false, "{tlt}");
     let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
     let row = ctx["context"]["positions"]
         .as_array()
@@ -2331,11 +2361,198 @@ async fn price_shown_without_fx_reports_its_source() {
         .find(|p| p["ticker"] == "TLT")
         .unwrap()
         .clone();
-    assert_eq!(row["isStale"], true, "{row}");
+    assert_eq!(row["isStale"], false, "{row}");
     client.cancel().await.unwrap();
 }
 
-/// Finance retest L4: untargetedClasses lists classes in `classes` order.
+/// Finance repro t21 (fake data): BTC is ~86% of the portfolio and only the
+/// small GSG position is unpriced.
+const BIG_POSITIONS: &str = r#"[
+ {"Amount": 10, "AssetClass": "Crypto", "Name": "Bitcoin", "Purchases": [{"Date": "2025/05/28", "Quantity": 10}], "Ticker": "BTC-USD"},
+ {"Amount": 50000, "AssetClass": "Cash", "Name": "Cash", "Purchases": [{"Date": "2025/07/10", "Quantity": 50000}]},
+ {"Amount": 50, "AssetClass": "Stocks", "Name": "Stocks", "Purchases": [{"Date": "2025/04/15", "Quantity": 37}, {"Date": "2025/07/03", "Quantity": 13}], "Ticker": "SPY"},
+ {"Amount": 55, "AssetClass": "Bonds", "Name": "Bonds", "Purchases": [{"Date": "2025/05/10", "Quantity": 55}], "Ticker": "TLT"},
+ {"Amount": 10, "AssetClass": "Gold", "Name": "Gold", "Purchases": [{"Date": "2025/06/18", "Quantity": 10.0}], "Ticker": "GLD"},
+ {"Amount": 3, "AssetClass": "Commodities", "Name": "Diversified Commodities", "Purchases": [{"Date": "2025/03/22", "Quantity": 3.0}], "Ticker": "GSG"GSG_EXTRA}
+]"#;
+
+const BIG_POLICY: &str = r#"version = "1.0"
+name = "Fake"
+base_currency = "EUR"
+time_horizon_years = 15
+risk_profile = "moderate"
+[constraints]
+single_position_limit_percent = 25.0
+asset_class_limit_percent = 60.0
+[[allocations]]
+asset_class = "Stocks"
+target_percent = 55.0
+tolerance_percent = 10.0
+[[allocations]]
+asset_class = "Bonds"
+target_percent = 25.0
+tolerance_percent = 5.0
+[[allocations]]
+asset_class = "Cash"
+target_percent = 10.0
+tolerance_percent = 5.0
+[[allocations]]
+asset_class = "Crypto"
+target_percent = 5.0
+tolerance_percent = 3.0
+[[allocations]]
+asset_class = "Gold"
+target_percent = 5.0
+tolerance_percent = 3.0
+"#;
+
+fn big_files(gsg_extra: &str) -> (TempDir, String, String) {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("positions.json");
+    std::fs::write(&data, BIG_POSITIONS.replace("GSG_EXTRA", gsg_extra)).unwrap();
+    let policy = tmp.path().join("policy.toml");
+    std::fs::write(&policy, BIG_POLICY).unwrap();
+    (
+        tmp,
+        data.to_string_lossy().into_owned(),
+        policy.to_string_lossy().into_owned(),
+    )
+}
+
+fn finding<'a>(v: &'a Value, list: &str, code: &str, class: &str) -> Option<&'a Value> {
+    v[list]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == code && f["assetClass"] == class)
+}
+
+/// Finance N1/N3: an unpriced position with no currency anywhere is sized at
+/// cost basis in the base currency (flagged), so a tiny unpriced GSG cannot
+/// hide BTC's certain breaches.
+#[tokio::test]
+async fn tiny_unpriced_position_keeps_certain_breaches_critical() {
+    let (_tmp, data, policy) = big_files("");
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["GSG"])),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_allocation", json!({})).await;
+    assert_eq!(v["complete"], false);
+    assert_eq!(v["excludedValueBasis"], "cost_basis_assumed_base", "{v}");
+    let v = ok(&client, "check_policy", json!({})).await;
+    for (code, class) in [
+        ("allocation_out_of_band", "Crypto"),
+        ("single_position_limit", "Crypto"),
+        ("asset_class_limit", "Crypto"),
+    ] {
+        let f = finding(&v, "breaches", code, class).unwrap_or_else(|| panic!("{code}: {v}"));
+        assert_eq!(f["severity"], "critical", "{f}");
+    }
+    // N4: GSG is far below 0.5% of the total, so no possible_breach at all.
+    assert!(
+        !codes(&v["findings"]).contains(&"possible_breach".to_string()),
+        "{v}"
+    );
+    assert!(!codes(&v["findings"]).contains(&"checks_incomplete".to_string()));
+    assert!(codes(&v["warnings"]).contains(&"checks_incomplete".to_string()));
+    client.cancel().await.unwrap();
+}
+
+/// Finance N3: a recorded `Currency` converts the cost basis.
+#[tokio::test]
+async fn recorded_currency_converts_cost_basis_of_unpriced_position() {
+    let (_tmp, data, policy) = big_files(r#", "Currency": "USD""#);
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["GSG"])),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_allocation", json!({})).await;
+    assert_eq!(v["excludedValueBasis"], "cost_basis", "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// Finance N4: with the materiality threshold off, possible breaches appear,
+/// at most one per class and limit, with the priced-only percent.
+#[tokio::test]
+async fn possible_breaches_are_one_per_class_and_limit() {
+    let (_tmp, data, policy) = big_files("");
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["GSG", "TLT"])),
+        possible_breach_min_share: Some(0.0),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "check_policy", json!({})).await;
+    let mut seen = std::collections::HashSet::new();
+    for f in v["warnings"].as_array().unwrap() {
+        if f["code"] != "possible_breach" {
+            continue;
+        }
+        let key = (
+            f["detail"]["code"].as_str().unwrap_or("band").to_string(),
+            f["assetClass"].as_str().unwrap_or("").to_string(),
+        );
+        assert!(seen.insert(key), "duplicate possible_breach {f}");
+        assert!(
+            f["message"]
+                .as_str()
+                .unwrap()
+                .contains("of the priced part"),
+            "{f}"
+        );
+    }
+    client.cancel().await.unwrap();
+}
+
+/// Finance N2: a bound from a cache entry past max-age is an assumption:
+/// named with its as-of date, and severity is capped at warning.
+#[tokio::test]
+async fn expired_cache_bounds_cap_severity_at_warning() {
+    let (tmp, data, policy) = big_files("");
+    let seed = McpOptions {
+        file: Some(data.clone()),
+        quotes: Some(fixture()),
+        cache: CacheMode::On,
+        ..opts()
+    };
+    let _ = load(&seed).await.expect("seed load");
+    assert!(tmp
+        .path()
+        .join(".positions.json.quotes-cache.json")
+        .is_file());
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["GSG"])),
+        cache: CacheMode::On,
+        cache_max_age_days: Some(0),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "check_policy", json!({})).await;
+    let f = finding(&v, "warnings", "allocation_out_of_band", "Crypto").expect("capped");
+    assert_eq!(f["severity"], "warning", "{f}");
+    assert_eq!(f["detail"]["severityCappedFrom"], "critical");
+    let a = &f["detail"]["assumptions"][0];
+    assert!(a["asOf"].is_string(), "{f}");
+    assert!(f["message"]
+        .as_str()
+        .unwrap()
+        .contains("last cached price from"));
+    assert!(finding(&v, "breaches", "allocation_out_of_band", "Crypto").is_none());
+    client.cancel().await.unwrap();
+}
+
+/// Finance L4: untargetedClasses lists classes in `classes` order.
 fn assert_untargeted_in_class_order(v: &Value) {
     let untargeted: Vec<&Value> = v["untargetedClasses"].as_array().unwrap().iter().collect();
     let in_order: Vec<&Value> = v["classes"]
@@ -2411,12 +2628,15 @@ async fn partial_allocation_uses_last_price_and_certain_breaches_only() {
             assert_eq!(b["detail"]["basis"], "partial", "{b}");
         }
     }
-    let inc = v["findings"]
+    // Answer 1: checks_incomplete is data quality (top-level warnings only).
+    assert!(!codes(&v["findings"]).contains(&"checks_incomplete".to_string()));
+    let inc = v["warnings"]
         .as_array()
         .unwrap()
         .iter()
         .find(|f| f["code"] == "checks_incomplete")
         .unwrap();
+    assert_eq!(inc["category"], "data_quality");
     assert_eq!(inc["detail"]["excludedValueBasis"], "last_price");
     client.cancel().await.unwrap();
 }
