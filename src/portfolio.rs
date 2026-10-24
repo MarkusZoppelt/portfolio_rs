@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::position::get_historic_price;
 use crate::position::{PortfolioPosition, PriceStatus};
+use crate::services::quotes::{QuoteError, QuoteProvider, YahooProvider};
 
 use chrono::prelude::*;
 use eyre::bail;
@@ -91,11 +91,33 @@ impl Portfolio {
         Ok(self.historic_and_current_securities_value(date).await?.0)
     }
 
+    /// [`Self::get_historic_securities_value`] with an explicit [`QuoteProvider`].
+    pub async fn get_historic_securities_value_with<P: QuoteProvider>(
+        &self,
+        provider: &P,
+        date: DateTime<Utc>,
+    ) -> Result<f64> {
+        Ok(self
+            .historic_and_current_securities_value_with(provider, date)
+            .await?
+            .0)
+    }
+
     /// `(historic, current)` value of the same set of positions: only
     /// positions that have both a current market price and a historic close
     /// at `date` are included on either side, so the two are like for like.
     pub async fn historic_and_current_securities_value(
         &self,
+        date: DateTime<Utc>,
+    ) -> Result<(f64, f64)> {
+        self.historic_and_current_securities_value_with(&YahooProvider, date)
+            .await
+    }
+
+    /// [`Self::historic_and_current_securities_value`] with an explicit [`QuoteProvider`].
+    pub async fn historic_and_current_securities_value_with<P: QuoteProvider>(
+        &self,
+        provider: &P,
         date: DateTime<Utc>,
     ) -> Result<(f64, f64)> {
         use futures::future::join_all;
@@ -104,21 +126,16 @@ impl Portfolio {
         let tasks = positions
             .iter()
             .filter_map(|position| position.get_ticker())
-            .map(|ticker| get_historic_price(ticker, date));
+            .map(|ticker| provider.close_on(ticker, date));
         let results = join_all(tasks).await;
 
         let mut errors = Vec::new();
         let mut closes = Vec::with_capacity(positions.len());
-        for (position, y_response) in positions.iter().zip(results) {
+        for (position, close) in positions.iter().zip(results) {
             let label = position.get_ticker().unwrap_or(position.get_name());
-            let close = match y_response {
-                Ok(response) => match response.last_quote() {
-                    Ok(quote) => Some(quote.close),
-                    Err(e) => {
-                        errors.push(format!("Error getting last quote for {label}: {e}"));
-                        None
-                    }
-                },
+            let close = match close {
+                Ok(close) => Some(close),
+                Err(QuoteError::Unavailable(_)) => None,
                 Err(e) => {
                     let err_str = format!("{e}");
                     // Typically: not listed yet at `date`.

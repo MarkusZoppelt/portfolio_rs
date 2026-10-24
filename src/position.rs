@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
+use crate::services::quotes::{Quote, QuoteError, QuoteProvider, YahooProvider};
+
 // Type alias to reduce type complexity
 type HistoricCacheMap = HashMap<(String, i64), Arc<yahoo::YResponse>>;
 // Caches for Yahoo API requests
@@ -487,12 +489,37 @@ fn usable_close(quote: &yahoo::YResponse) -> Option<f64> {
     None
 }
 
-/// Latest positive close for `symbol` (cached quote lookup; only the symbol is sent).
-pub(crate) async fn latest_close(symbol: &str) -> Option<f64> {
-    get_quote_price(symbol)
+/// Yahoo-backed lookups for [`crate::services::quotes::YahooProvider`].
+pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
+    let quote = get_quote_price(symbol)
         .await
+        .map_err(|e| QuoteError::Provider(e.to_string()))?;
+    let price = usable_close(&quote).ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))?;
+    let currency = quote.metadata().ok().and_then(|m| m.currency);
+    Ok(Quote { price, currency })
+}
+
+pub(crate) async fn yahoo_previous_close(symbol: &str) -> Result<f64, QuoteError> {
+    get_previous_close(symbol)
+        .await
+        .map_err(|e| QuoteError::Provider(e.to_string()))
+}
+
+pub(crate) async fn yahoo_close_on(symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+    let resp = get_historic_price(symbol, date)
+        .await
+        .map_err(|e| QuoteError::Provider(e.to_string()))?;
+    if let Ok(q) = resp.last_quote() {
+        return Ok(q.close);
+    }
+    resp.quotes()
         .ok()
-        .and_then(|quote| usable_close(&quote))
+        .and_then(|quotes| quotes.last().map(|q| q.close))
+        .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
+}
+
+pub(crate) async fn yahoo_name(symbol: &str) -> Option<String> {
+    get_quote_name(symbol).await.ok()
 }
 
 /// Apply a quote lookup to `position` without dropping it.
@@ -522,13 +549,18 @@ pub(crate) fn apply_quote_result(position: &mut PortfolioPosition, close: Option
 pub async fn handle_position(
     position: &mut PortfolioPosition,
 ) -> Result<PortfolioPosition, yahoo::YahooError> {
+    Ok(handle_position_with(&YahooProvider, position).await)
+}
+
+/// [`handle_position`] with an explicit [`QuoteProvider`]. Never drops the position.
+pub async fn handle_position_with<P: QuoteProvider>(
+    provider: &P,
+    position: &mut PortfolioPosition,
+) -> PortfolioPosition {
     if let Some(ticker_owned) = position.ticker.clone() {
         let ticker = ticker_owned.as_str();
-        let (close, currency) = match get_quote_price(ticker).await {
-            Ok(quote) => (
-                usable_close(&quote),
-                quote.metadata().ok().and_then(|m| m.currency),
-            ),
+        let (close, currency) = match provider.latest(ticker).await {
+            Ok(quote) => (Some(quote.price), quote.currency),
             Err(_) => (None, None),
         };
         position.price_currency = currency;
@@ -537,7 +569,7 @@ pub async fn handle_position(
         // Quote-dependent enrichment is useless without a live price, and a
         // failed name lookup must not discard an otherwise valid position.
         if position.price_status == PriceStatus::Live {
-            if let Ok(prev_close) = get_previous_close(ticker).await {
+            if let Ok(prev_close) = provider.previous_close(ticker).await {
                 position.previous_close = Some(prev_close);
             }
 
@@ -546,17 +578,9 @@ pub async fn handle_position(
                 for mut p in position.purchases.clone() {
                     let needs_price = p.price.map(|v| v <= 0.0).unwrap_or(true);
                     if needs_price && p.quantity > 0.0 {
-                        if let Some(date_str) = &p.date {
-                            if let Some(date) = parse_purchase_date(date_str) {
-                                if let Ok(resp) = get_historic_price(ticker, date).await {
-                                    if let Ok(q) = resp.last_quote() {
-                                        p.price = Some(q.close.max(0.0));
-                                    } else if let Ok(quotes) = resp.quotes() {
-                                        if let Some(last) = quotes.last() {
-                                            p.price = Some(last.close.max(0.0));
-                                        }
-                                    }
-                                }
+                        if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
+                            if let Ok(close) = provider.close_on(ticker, date).await {
+                                p.price = Some(close.max(0.0));
                             }
                         }
                     }
@@ -566,14 +590,14 @@ pub async fn handle_position(
             }
 
             if position.name.is_none() {
-                if let Ok(name) = get_quote_name(ticker).await {
+                if let Some(name) = provider.name(ticker).await {
                     position.name = Some(name);
                 }
             }
         }
     }
 
-    Ok(position.clone())
+    position.clone()
 }
 
 #[cfg(test)]

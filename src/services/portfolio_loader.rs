@@ -3,12 +3,14 @@ use std::fs::read_to_string;
 
 use crate::portfolio::Portfolio;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::config::configured_base_currency;
 use crate::position::{
-    apply_quote_result, from_string, fx_symbol, handle_position, latest_close, PortfolioPosition,
+    apply_quote_result, from_string, fx_symbol, handle_position_with, PortfolioPosition,
     PriceStatus,
 };
+use crate::services::quotes::{QuoteProvider, YahooProvider};
 use crate::tui::NetworkStatus;
 
 /// Read a plaintext file or decrypt a `.gpg` file.
@@ -78,6 +80,22 @@ pub async fn create_live_portfolio_in(
     base_currency: &str,
     log_errors: bool,
 ) -> (Portfolio, NetworkStatus) {
+    create_live_portfolio_with(
+        Arc::new(YahooProvider),
+        positions_str,
+        base_currency,
+        log_errors,
+    )
+    .await
+}
+
+/// [`create_live_portfolio_in`] with an explicit [`QuoteProvider`] for quotes and FX.
+pub async fn create_live_portfolio_with<P: QuoteProvider>(
+    provider: Arc<P>,
+    positions_str: String,
+    base_currency: &str,
+    log_errors: bool,
+) -> (Portfolio, NetworkStatus) {
     let positions = match from_string(&positions_str) {
         Ok(p) => p,
         Err(e) => {
@@ -94,15 +112,17 @@ pub async fn create_live_portfolio_in(
         .into_iter()
         .map(|mut position| {
             let fallback = position.clone();
-            let task = tokio::spawn(async move { handle_position(&mut position).await });
+            let provider = Arc::clone(&provider);
+            let task =
+                tokio::spawn(async move { handle_position_with(&*provider, &mut position).await });
             (fallback, task)
         })
         .collect();
 
     for (mut fallback, task) in tasks {
         match task.await {
-            Ok(Ok(position)) => portfolio.add_position(position),
-            Ok(Err(_)) | Err(_) => {
+            Ok(position) => portfolio.add_position(position),
+            Err(_) => {
                 apply_quote_result(&mut fallback, None);
                 portfolio.add_position(fallback);
             }
@@ -141,7 +161,7 @@ pub async fn create_live_portfolio_in(
         .collect();
     let mut fx_prices = HashMap::new();
     for symbol in symbols {
-        let price = latest_close(&symbol).await;
+        let price = provider.latest(&symbol).await.ok().map(|q| q.price);
         if price.is_none() && log_errors {
             eprintln!("Warning: no FX rate {symbol}; affected positions excluded from totals");
         }
@@ -200,6 +220,7 @@ mod tests {
     use std::fs::read_to_string;
 
     use super::*;
+    use crate::services::quotes::{FixtureProvider, OfflineProvider};
 
     #[tokio::test]
     async fn test_create_live_portfolio() {
@@ -282,5 +303,112 @@ mod tests {
         apply_fx(&mut pence, "GBP", &fx);
         assert_eq!(pence.fx_rate(), Some(0.01));
         assert_eq!(pence.get_balance(), 2.0);
+    }
+
+    const FAKE_POSITIONS: &str = r#"[
+        {"Name": "Fake US", "Ticker": "FAKEUS", "AssetClass": "Stocks", "Amount": 0,
+         "Purchases": [{"Date": "2025-01-02", "Quantity": 10}]},
+        {"Name": "Fake EU", "Ticker": "FAKEEU", "AssetClass": "Stocks", "Amount": 4},
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 1000}
+    ]"#;
+
+    fn fake_provider(with_fx: bool) -> FixtureProvider {
+        let fx = if with_fx {
+            r#", "USDEUR=X": {"price": 0.8, "currency": "EUR"}"#
+        } else {
+            ""
+        };
+        FixtureProvider::from_json(&format!(
+            r#"{{"latest": {{"FAKEUS": {{"price": 12.0, "currency": "USD"}},
+                "FAKEEU": {{"price": 50.0, "currency": "EUR"}}{fx}}},
+               "previous_close": {{"FAKEUS": 11.0}},
+               "close_on": {{"FAKEUS": 10.0}},
+               "names": {{"FAKEUS": "ignored, name already set"}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn by_ticker<'a>(portfolio: &'a Portfolio, ticker: &str) -> &'a PortfolioPosition {
+        portfolio
+            .positions
+            .iter()
+            .find(|p| p.get_ticker() == Some(ticker))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fixture_provider_prices_converts_fx_and_fills_purchases() {
+        let (portfolio, status) = create_live_portfolio_with(
+            Arc::new(fake_provider(true)),
+            FAKE_POSITIONS.to_string(),
+            "USD",
+            false,
+        )
+        .await;
+        assert_eq!(status, NetworkStatus::Connected);
+
+        let us = by_ticker(&portfolio, "FAKEUS");
+        assert_eq!(us.price_status(), PriceStatus::Live);
+        assert!((us.get_balance() - 120.0).abs() < 1e-9);
+        // Missing purchase price filled from the historic close.
+        assert!((us.total_invested().unwrap() - 100.0).abs() < 1e-9);
+        assert!((us.pnl().unwrap() - 20.0).abs() < 1e-9);
+
+        // 4 * 50 EUR at 0.8 EUR per USD = 250 USD.
+        let eu = by_ticker(&portfolio, "FAKEEU");
+        assert!((eu.get_balance() - 250.0).abs() < 1e-9);
+
+        assert!((portfolio.get_total_value() - 1370.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn fixture_provider_missing_fx_flags_position() {
+        let (portfolio, _) = create_live_portfolio_with(
+            Arc::new(fake_provider(false)),
+            FAKE_POSITIONS.to_string(),
+            "USD",
+            false,
+        )
+        .await;
+        let eu = by_ticker(&portfolio, "FAKEEU");
+        assert_eq!(eu.price_status(), PriceStatus::FxUnavailable);
+        assert!((portfolio.get_total_value() - 1120.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn offline_provider_keeps_positions_unavailable() {
+        let (portfolio, status) = create_live_portfolio_with(
+            Arc::new(OfflineProvider),
+            FAKE_POSITIONS.to_string(),
+            "USD",
+            false,
+        )
+        .await;
+        assert_eq!(status, NetworkStatus::Disconnected);
+        assert_eq!(portfolio.positions.len(), 3);
+        assert_eq!(
+            by_ticker(&portfolio, "FAKEUS").price_status(),
+            PriceStatus::Unavailable
+        );
+        assert!((portfolio.get_total_value() - 1000.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn fixture_provider_historic_securities_value() {
+        let provider = fake_provider(true);
+        let (portfolio, _) = create_live_portfolio_with(
+            Arc::new(provider.clone()),
+            FAKE_POSITIONS.to_string(),
+            "USD",
+            false,
+        )
+        .await;
+        // FAKEEU has no historic close, so like-for-like keeps only FAKEUS.
+        let (historic, current) = portfolio
+            .historic_and_current_securities_value_with(&provider, chrono::Utc::now())
+            .await
+            .unwrap();
+        assert!((historic - 100.0).abs() < 1e-9);
+        assert!((current - 120.0).abs() < 1e-9);
     }
 }
