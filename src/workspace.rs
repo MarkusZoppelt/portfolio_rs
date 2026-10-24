@@ -22,6 +22,9 @@ database/
 /portfolio/reports/
 /portfolio/theses/
 /portfolio/watchlist.json
+/portfolio/history/
+snapshots.jsonl
+.snapshots.jsonl.tmp-*
 ";
 
 pub fn init_workspace(dir: &str, dry_run: bool) -> Result<()> {

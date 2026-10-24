@@ -28,12 +28,16 @@ pub struct WorkspaceHealth {
     pub warning_count: usize,
 }
 
-/// `.gitignore` patterns that must cover backups, temp files and the database.
-pub const PRIVATE_ARTIFACT_PATTERNS: [&str; 4] = [
+/// `.gitignore` patterns that must cover backups, temp files, the database
+/// and the performance snapshots (history dir, files and their temp files).
+pub const PRIVATE_ARTIFACT_PATTERNS: [&str; 7] = [
     "positions.json.bak",
     ".positions.json.tmp-*",
     ".positions.json.quotes-cache.json",
     "database/",
+    "portfolio/history/",
+    "snapshots.jsonl",
+    ".snapshots.jsonl.tmp-*",
 ];
 
 /// Warn when private artifacts are not ignored, or are already tracked by git.
@@ -83,6 +87,9 @@ fn tracked_private_artifacts(dir: &Path) -> Vec<String> {
             ".positions.json.tmp-*",
             ".positions.json.quotes-cache.json",
             "database",
+            "portfolio/history",
+            ":(glob)**/snapshots.jsonl",
+            ":(glob)**/.snapshots.jsonl.tmp-*",
         ])
         .stderr(std::process::Stdio::null())
         .output();
@@ -272,6 +279,8 @@ mod tests {
         assert_eq!(status, HealthStatus::Warning);
         assert!(message.contains("positions.json.bak"));
         assert!(message.contains("database/"));
+        assert!(message.contains("portfolio/history/"), "{message}");
+        assert!(message.contains(".snapshots.jsonl.tmp-*"), "{message}");
 
         let all = PRIVATE_ARTIFACT_PATTERNS.join("\n");
         std::fs::write(tmp.path().join(".gitignore"), all).unwrap();
@@ -292,5 +301,22 @@ mod tests {
         assert_eq!(status, HealthStatus::Warning);
         assert!(message.contains("tracked by git"), "{message}");
         assert!(message.contains("positions.json.bak"));
+
+        std::fs::create_dir_all(dir.join("portfolio/history/main")).unwrap();
+        std::fs::write(dir.join("portfolio/history/main/snapshots.jsonl"), "").unwrap();
+        assert!(git(
+            dir,
+            &["add", "-f", "portfolio/history/main/snapshots.jsonl"]
+        ));
+        let (_, message) = private_artifacts_check(dir);
+        assert!(message.contains("snapshots.jsonl"), "{message}");
+    }
+
+    /// Finance B6: the workspace template satisfies the check.
+    #[test]
+    fn test_workspace_template_ignores_snapshots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::workspace::init_workspace(tmp.path().to_str().unwrap(), false).unwrap();
+        assert_eq!(private_artifacts_check(tmp.path()).0, HealthStatus::Ok);
     }
 }

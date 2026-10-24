@@ -687,6 +687,8 @@ fn test_workspace_gitignore_protects_private_data() {
     let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
     assert!(gitignore.contains("positions.json"));
     assert!(gitignore.contains("/portfolio/"));
+    assert!(gitignore.contains("/portfolio/history/"));
+    assert!(gitignore.contains(".snapshots.jsonl.tmp-*"));
 }
 
 #[test]
