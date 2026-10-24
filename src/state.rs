@@ -317,8 +317,7 @@ impl AppState {
                     total_pnl += pnl;
                 }
 
-                let is_cash =
-                    p.get_ticker().is_none() && p.get_asset_class().to_lowercase() == "cash";
+                let is_cash = p.is_cash();
                 let value = p.market_value();
                 if is_cash {
                     cash_value += value;
@@ -388,14 +387,9 @@ impl AppState {
         let portfolio = self.portfolio().await;
         let current_value = portfolio.get_total_value();
 
-        let mut total_invested = 0.0_f64;
-        for p in &portfolio.positions {
-            if let Some(inv) = p.total_invested() {
-                total_invested += inv;
-            }
-        }
-
-        let unrealized_pnl = current_value - total_invested;
+        // Cash is neither a gain nor a loss: do not subtract invested from
+        // total value (which includes cash).
+        let (total_invested, unrealized_pnl) = portfolio.cost_basis_totals();
         let pnl_percent = if total_invested > 0.0 {
             (unrealized_pnl / total_invested) * 100.0
         } else {
@@ -418,7 +412,7 @@ impl AppState {
                 total_prev_value_for_day += value;
             }
 
-            let is_cash = p.get_ticker().is_none() && p.get_asset_class().to_lowercase() == "cash";
+            let is_cash = p.is_cash();
             if is_cash {
                 cash_value += value;
             } else {
@@ -1213,5 +1207,46 @@ mod tests {
 
         state.delete_position(0).await.unwrap();
         assert!(state.delete_position(0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_performance_cash_is_neither_gain_nor_loss() {
+        use crate::position::PriceStatus;
+
+        let mut stock =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 10.0, 80.0, PriceStatus::Live);
+        stock.purchases.push(Purchase {
+            date: None,
+            quantity: 10.0,
+            price: Some(100.0),
+            fees: None,
+        });
+        // Balance would count as profit under total-value-minus-invested; the
+        // purchase would count as a loss if cash cost basis were included.
+        let mut cash = PortfolioPosition::for_test(None, "Cash", 5_000.0, 0.0, PriceStatus::Live);
+        cash.purchases.push(Purchase {
+            date: None,
+            quantity: 1.0,
+            price: Some(8_000.0),
+            fees: None,
+        });
+
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(stock);
+        portfolio.add_position(cash);
+
+        let state = AppState::new("EUR".to_string());
+        *state.portfolio_cache.write().await = Some(CachedPortfolio {
+            portfolio,
+            fetched_at: Instant::now(),
+        });
+
+        let perf = state.get_performance().await;
+        assert_eq!(perf.total_value, 5_800.0);
+        assert_eq!(perf.cash_value, 5_000.0);
+        assert_eq!(perf.securities_value, 800.0);
+        assert_eq!(perf.invested, 1_000.0);
+        assert_eq!(perf.unrealized_pnl, -200.0);
+        assert!((perf.pnl_percent - (-20.0)).abs() < 1e-9);
     }
 }
