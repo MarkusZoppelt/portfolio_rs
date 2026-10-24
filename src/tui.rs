@@ -279,7 +279,7 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
         for purchase in position.get_purchases() {
             if let Some(date_str) = &purchase.date {
                 if let Some(date) = parse_purchase_date(date_str) {
-                    if let Some(price) = purchase.price {
+                    if let Some(price) = purchase.effective_price() {
                         if price > Decimal::ZERO && purchase.quantity > Decimal::ZERO {
                             let days_ago = (now - date).num_days() as f64;
                             purchase_events.push((
@@ -1843,9 +1843,10 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
         // Add existing purchases (sorted by date, newest first)
         for (display_index, (_original_index, purchase)) in purchase_list.iter().enumerate() {
             let date = purchase.date.as_deref().unwrap_or("No date");
-            let total = to_f64(purchase.quantity * purchase.price.unwrap_or(Decimal::ZERO));
+            let total =
+                to_f64(purchase.quantity * purchase.effective_price().unwrap_or(Decimal::ZERO));
             let quantity = to_f64(purchase.quantity);
-            let price = purchase.price.map(to_f64).unwrap_or(0.0);
+            let price = purchase.effective_price().map(to_f64).unwrap_or(0.0);
 
             // selected_purchase: 0 = Add New, 1+ = existing purchases
             let style = if (display_index + 1) == app.selected_purchase {

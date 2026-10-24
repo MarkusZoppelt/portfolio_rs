@@ -53,7 +53,9 @@ pub use services::portfolio_loader::{
     create_live_portfolio, create_live_portfolio_in, create_live_portfolio_with,
     load_portfolio_file,
 };
-pub use services::quotes::{FixtureProvider, OfflineProvider, Quote, QuoteProvider, YahooProvider};
+pub use services::quotes::{
+    AnyProvider, FixtureProvider, OfflineProvider, Quote, QuoteProvider, YahooProvider,
+};
 pub use simulate::{simulate_rebalance, RebalanceSimulation};
 pub use state::AppState;
 pub use tui::NetworkStatus;

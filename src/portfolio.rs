@@ -920,6 +920,7 @@ mod tests {
             quantity: dec(quantity),
             price: Some(dec(price)),
             fees: None,
+            estimated_price: None,
         });
         position
     }
