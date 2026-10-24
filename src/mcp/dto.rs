@@ -47,6 +47,9 @@ pub struct Meta {
     /// cache (see `stalePositions`). Cached prices within the max age count
     /// towards `complete`.
     pub has_stale: bool,
+    /// connected | partial | offline, derived from the quotes actually
+    /// present; identical across all tools and `get_context`.
+    pub network_status: String,
     /// Oldest `priceAsOf` among the priced market positions; null when none
     /// reports one.
     pub price_as_of: Option<String>,
@@ -433,8 +436,6 @@ pub struct PositionsOutput {
     /// any market position lacks a price or previous close.
     pub day_pnl: Option<f64>,
     pub positions: Vec<PositionRow>,
-    /// connected | partial | offline, derived from the quotes actually present.
-    pub network_status: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

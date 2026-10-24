@@ -97,6 +97,7 @@ impl PortfolioServer {
             complete: data_quality.affected_positions.is_empty(),
             data_quality,
             has_stale: !stale_positions.is_empty(),
+            network_status: analytics::network_status(portfolio).to_string(),
             price_as_of,
             stale_positions,
             warnings,
@@ -173,7 +174,6 @@ impl PortfolioServer {
             unrealized_pnl_percent: pnl.unrealized_pnl_percent.map(pct),
             day_pnl: pnl.day_pnl.map(money),
             positions,
-            network_status: analytics::network_status(&portfolio).to_string(),
         }))
     }
 
