@@ -242,7 +242,7 @@ async fn get_positions_matches_the_fixture_quotes() {
     assert_envelope(&v, "main");
     assert_eq!(v["totalValue"], 97208.0);
     assert_eq!(v["cashValue"], 50000.0);
-    assert_eq!(v["networkStatus"], "connected");
+    assert_eq!(v["networkStatus"], "fixture");
     let positions = &v["positions"];
     assert_eq!(positions.as_array().unwrap().len(), 6);
     // Sorted by value, descending.
@@ -1196,7 +1196,8 @@ async fn missing_quote_is_visible_everywhere() {
         );
     }
     let v = ok(&client, "get_positions", json!({})).await;
-    assert_eq!(v["networkStatus"], "partial");
+    assert_eq!(v["networkStatus"], "fixture");
+    assert_eq!(v["dataStatus"], "partial");
     let gsg = by_ticker(&v["positions"], "GSG");
     assert!(gsg["valueBase"].is_null());
     assert!(gsg["weightPercent"].is_null());
@@ -1863,12 +1864,13 @@ async fn network_status_is_shared_across_tools() {
         assert!(md.contains(&format!("Network Status: {}", out[0])), "{md}");
         out
     }
+    // Under a quote fixture the status is always "fixture" (Finance item 6).
     let (_t, client) = connect_partial("quotes_no_fx.json").await;
-    assert_eq!(statuses(&client).await, vec!["partial"; 6]);
+    assert_eq!(statuses(&client).await, vec!["fixture"; 6]);
     let (_t, client) = connect_partial("quotes_no_gsg.json").await;
-    assert_eq!(statuses(&client).await, vec!["partial"; 6]);
+    assert_eq!(statuses(&client).await, vec!["fixture"; 6]);
     let client = connect(opts()).await;
-    assert_eq!(statuses(&client).await, vec!["connected"; 6]);
+    assert_eq!(statuses(&client).await, vec!["fixture"; 6]);
     let client = connect(McpOptions {
         quotes: Some(AnyProvider::Offline),
         ..opts()

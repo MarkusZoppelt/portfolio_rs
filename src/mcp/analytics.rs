@@ -421,11 +421,14 @@ pub fn data_quality_summary(portfolio: &Portfolio, base: &str) -> DataQuality {
     dq
 }
 
-/// connected | partial | offline, from the quotes actually present: offline
+/// connected | partial | offline (fixture under a quote fixture), from the quotes actually present: offline
 /// when no market position has a fresh (non-cached) quote, connected when
 /// every market position has a fresh quote and FX rate, partial otherwise
 /// (including quotes without FX).
 pub fn network_status(portfolio: &Portfolio) -> &'static str {
+    if portfolio.quotes_fixture {
+        return "fixture";
+    }
     let market: Vec<_> = portfolio
         .positions
         .iter()

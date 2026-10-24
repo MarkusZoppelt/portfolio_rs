@@ -12,6 +12,8 @@ use piechart::{Chart, Color};
 #[derive(Debug, Clone)]
 pub struct Portfolio {
     pub positions: Vec<PortfolioPosition>,
+    /// Quotes came from a fixture provider (`networkStatus: "fixture"`).
+    pub quotes_fixture: bool,
 }
 
 impl Default for Portfolio {
@@ -24,6 +26,7 @@ impl Portfolio {
     pub fn new() -> Portfolio {
         Portfolio {
             positions: Vec::new(),
+            quotes_fixture: false,
         }
     }
 

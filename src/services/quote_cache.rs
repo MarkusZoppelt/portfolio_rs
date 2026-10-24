@@ -363,6 +363,9 @@ impl QuoteProvider for CachedProvider {
     fn last_known_as_of(&self, symbol: &str) -> Option<String> {
         CachedProvider::last_known_as_of(self, symbol)
     }
+    fn is_fixture(&self) -> bool {
+        self.inner.is_fixture()
+    }
 
     async fn name(&self, symbol: &str) -> Option<String> {
         self.inner.base_name(symbol).await

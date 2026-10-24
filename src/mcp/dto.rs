@@ -47,7 +47,7 @@ pub struct Meta {
     /// cache (see `stalePositions`). Cached prices within the max age count
     /// towards `complete`.
     pub has_stale: bool,
-    /// connected | partial | offline, derived from the quotes actually
+    /// connected | partial | offline | fixture, derived from the quotes actually
     /// present; identical across all tools and `get_context`.
     pub network_status: String,
     /// Oldest `priceAsOf` among the priced market positions; null when none

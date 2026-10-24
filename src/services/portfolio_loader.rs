@@ -108,6 +108,7 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
         }
     };
     let mut portfolio = Portfolio::new();
+    portfolio.quotes_fixture = provider.is_fixture();
 
     // Keep a clone so a panicked task (JoinError) can still be added as Unavailable.
     let tasks: Vec<_> = positions

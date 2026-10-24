@@ -334,7 +334,8 @@ was judged on a partial basis; it is a data-quality warning (top-level
 findings such as a `possible_breach`.
 `networkStatus` (in every tool response and in `get_context`, also via `/api/context`) is `connected` (every market position has a fresh quote and FX
 rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
-fresh quotes; cached prices do not count as connected). Each position row
+fresh quotes; cached prices do not count as connected); under a quote fixture
+(`PORTFOLIO_RS_QUOTES=fixture:<path>`) it is always `fixture`. Each position row
 carries `priceSource` (`live`, `cache`, `fixture` or `none`) and `isStale`.
 Every response also carries `dataStatus`: `complete`, `partial` (some
 position unpriced) or `stale` (all priced, but some older than `--stale-after`; a
