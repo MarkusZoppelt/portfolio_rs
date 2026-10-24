@@ -917,8 +917,8 @@ mod tests {
     ) -> PortfolioPosition {
         position.purchases.push(Purchase {
             date: None,
-            quantity,
-            price: Some(price),
+            quantity: dec(quantity),
+            price: Some(dec(price)),
             fees: None,
         });
         position

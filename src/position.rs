@@ -26,10 +26,13 @@ static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::ne
 pub struct Purchase {
     // Optional ISO date string (e.g., 2024-01-15)
     pub date: Option<String>,
-    pub quantity: f64,
-    #[serde(default)]
-    pub price: Option<f64>,
-    pub fees: Option<f64>,
+    /// Money and quantities are [`Decimal`], read and written as JSON numbers.
+    #[serde(with = "rust_decimal::serde::float")]
+    pub quantity: Decimal,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    pub price: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    pub fees: Option<Decimal>,
 }
 
 /// Whether a ticker position has a usable market quote.
@@ -91,7 +94,8 @@ pub struct PortfolioPosition {
     pub(crate) name: Option<String>,
     pub(crate) ticker: Option<String>,
     pub(crate) asset_class: String,
-    pub(crate) amount: f64,
+    #[serde(with = "rust_decimal::serde::float")]
+    pub(crate) amount: Decimal,
 
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) last_spot: Decimal,
@@ -187,7 +191,7 @@ impl PortfolioPosition {
             // Use purchased quantity if available, otherwise fall back to amount
             self.last_spot * self.quantity_dec() * self.fx_factor_dec()
         } else {
-            dec(self.amount)
+            self.amount
         }
     }
 
@@ -198,9 +202,9 @@ impl PortfolioPosition {
     /// Held quantity: sum of purchase quantities, or `Amount` without purchases.
     pub fn quantity_dec(&self) -> Decimal {
         if !self.purchases.is_empty() {
-            self.purchases.iter().map(|p| dec(p.quantity)).sum()
+            self.purchases.iter().map(|p| p.quantity).sum()
         } else {
-            dec(self.amount)
+            self.amount
         }
     }
 
@@ -218,7 +222,7 @@ impl PortfolioPosition {
     }
 
     pub fn set_amount(&mut self, amount: f64) {
-        self.amount = amount;
+        self.amount = dec(amount);
     }
 
     /// Latest price in the quote currency ([`Self::price_currency`]), not converted.
@@ -270,10 +274,10 @@ impl PortfolioPosition {
         self.purchases
             .iter()
             .filter_map(|p| p.price.map(|price| (price, p)))
-            .filter(|(price, _)| *price > 0.0)
+            .filter(|(price, _)| *price > Decimal::ZERO)
             .map(|(price, p)| {
-                let quantity = dec(p.quantity);
-                (quantity, quantity * dec(price) + dec(p.fees.unwrap_or(0.0)))
+                let quantity = p.quantity;
+                (quantity, quantity * price + p.fees.unwrap_or(Decimal::ZERO))
             })
     }
 
@@ -380,7 +384,7 @@ impl PortfolioPosition {
             name: None,
             ticker: ticker.map(str::to_string),
             asset_class: asset_class.to_string(),
-            amount,
+            amount: dec(amount),
             last_spot: dec(last_spot),
             purchases: Vec::new(),
             previous_close: None,
@@ -640,11 +644,11 @@ pub async fn handle_position_with<P: QuoteProvider>(
             if !position.purchases.is_empty() {
                 let mut filled_purchases = Vec::with_capacity(position.purchases.len());
                 for mut p in position.purchases.clone() {
-                    let needs_price = p.price.map(|v| v <= 0.0).unwrap_or(true);
-                    if needs_price && p.quantity > 0.0 {
+                    let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
+                    if needs_price && p.quantity > Decimal::ZERO {
                         if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
                             if let Ok(close) = provider.close_on(ticker, date).await {
-                                p.price = Some(close.max(0.0));
+                                p.price = Some(dec(close.max(0.0)));
                             }
                         }
                     }
@@ -747,7 +751,7 @@ mod tests {
             name: None,
             ticker: Some("AAPL".to_string()),
             asset_class: "Stock".to_string(),
-            amount: 1.0,
+            amount: dec(1.0),
             last_spot: Decimal::ZERO,
             price_status: PriceStatus::Live,
             price_currency: None,
@@ -783,15 +787,15 @@ mod tests {
             name: Some("S&P 500".to_string()),
             ticker: Some("SPY".to_string()),
             asset_class: "Stocks".to_string(),
-            amount: 4.0,
+            amount: dec(4.0),
             last_spot: dec(500.0),
             price_status: PriceStatus::Live,
             price_currency: None,
             fx_rate: None,
             purchases: vec![Purchase {
                 date: Some("2024-01-15".to_string()),
-                quantity: 4.0,
-                price: Some(400.0),
+                quantity: dec(4.0),
+                price: Some(dec(400.0)),
                 fees: None,
             }],
             previous_close: Some(dec(490.0)),
@@ -917,8 +921,8 @@ mod tests {
         position.fx_rate = Some(dec(0.5));
         position.purchases = vec![Purchase {
             date: None,
-            quantity: 3.0,
-            price: Some(80.0),
+            quantity: dec(3.0),
+            price: Some(dec(80.0)),
             fees: None,
         }];
         assert_eq!(position.market_price(), 100.0);
@@ -952,9 +956,9 @@ mod tests {
         position.purchases = (0..3)
             .map(|_| Purchase {
                 date: None,
-                quantity: 0.1,
-                price: Some(10.0),
-                fees: Some(0.1),
+                quantity: dec(0.1),
+                price: Some(dec(10.0)),
+                fees: Some(dec(0.1)),
             })
             .collect();
         // In f64, 0.1 + 0.1 + 0.1 == 0.30000000000000004.
@@ -963,5 +967,23 @@ mod tests {
         assert_eq!(position.total_invested(), Some(1.65));
         assert_eq!(position.previous_day_value_dec(), dec(1.5));
         assert_eq!(position.day_pnl_dec(), Some(dec(0.015)));
+    }
+
+    #[test]
+    fn test_decimal_fields_keep_json_numbers() {
+        let raw = r#"[{"Amount": 0.45, "AssetClass": "Crypto", "Name": "B",
+            "Purchases": [{"Date": "2025/05/28", "Quantity": 0.45, "Price": 100.1, "Fees": 0.3},
+                          {"Quantity": 2}]}]"#;
+        let positions: Vec<PortfolioPosition> = serde_json::from_str(raw).unwrap();
+        assert_eq!(positions[0].amount, dec(0.45));
+        assert_eq!(positions[0].purchases[1].price, None);
+        let out = serde_json::to_value(&positions).unwrap();
+        let p = &out[0];
+        assert_eq!(p["Amount"], serde_json::json!(0.45));
+        assert_eq!(p["Purchases"][0]["Quantity"], serde_json::json!(0.45));
+        assert_eq!(p["Purchases"][0]["Price"], serde_json::json!(100.1));
+        assert_eq!(p["Purchases"][0]["Fees"], serde_json::json!(0.3));
+        assert_eq!(p["Purchases"][1]["Quantity"], serde_json::json!(2.0));
+        assert!(p["Purchases"][1]["Price"].is_null());
     }
 }
