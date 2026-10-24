@@ -236,7 +236,9 @@ entry:
 (`--offline` uses cached prices; drop it to fetch quotes.) Each line is
 `{date, baseCurrency, positions: [{positionId, kind, assetClass, quantity,
 price, priceCurrency, fxRate, valueBase}], cashBase, totalBase, netFlowsBase,
-complete, dataStatus}`; `snapshots.jsonl` is in `.gitignore`.
+complete, dataStatus}`. The workspace `.gitignore` template covers
+`/portfolio/history/`, `snapshots.jsonl` and `.snapshots.jsonl.tmp-*`, and
+`doctor` warns when they are missing or tracked by git.
 
 ### Client configuration
 
