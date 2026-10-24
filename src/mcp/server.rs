@@ -113,6 +113,10 @@ impl PortfolioServer {
         self.served.state.portfolio().await
     }
 
+    fn policy_options(&self) -> analytics::PolicyOptions {
+        self.served.policy_options
+    }
+
     fn policy_finding(&self) -> Option<Finding> {
         self.served.policy_error.as_ref().map(|_| {
             Finding::new(
@@ -240,7 +244,7 @@ impl PortfolioServer {
         let policy = self.served.state.policy().await;
         let (mut findings, checks) = match &policy {
             Some(p) => {
-                let c = analytics::check_policy(&portfolio, p);
+                let c = analytics::check_policy_with(&portfolio, p, self.policy_options());
                 (c.findings, c.checks)
             }
             None => (
@@ -261,6 +265,13 @@ impl PortfolioServer {
                 && a.asset_class == b.asset_class
         };
         let mut policy_findings: Vec<Finding> = Vec::new();
+        // Answer 1: checks_incomplete is data quality, not a policy finding.
+        let check_quality: Vec<Finding> = findings
+            .iter()
+            .filter(|f| f.category == Category::DataQuality)
+            .cloned()
+            .collect();
+        findings.retain(|f| f.category != Category::DataQuality);
         for f in findings.drain(..) {
             if f.severity >= min && !policy_findings.iter().any(|u| same(u, &f)) {
                 policy_findings.push(f);
@@ -285,8 +296,9 @@ impl PortfolioServer {
             .cloned()
             .collect();
         if min <= Severity::Warning {
-            for q in analytics::data_quality(&portfolio)
+            for q in check_quality
                 .into_iter()
+                .chain(analytics::data_quality(&portfolio))
                 .filter(|q| q.severity == Severity::Warning)
             {
                 if !warnings.iter().any(|u| same(u, &q)) {

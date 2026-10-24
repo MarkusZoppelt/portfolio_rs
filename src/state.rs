@@ -53,6 +53,8 @@ pub struct AppState {
     pub network_status: RwLock<NetworkStatus>,
     portfolio_cache: RwLock<Option<CachedPortfolio>>,
     quotes: AnyProvider,
+    /// Prices (and FX rates) older than this many days are stale.
+    stale_after_days: i64,
 }
 
 fn path_to_string(path: &Path) -> Result<String> {
@@ -72,6 +74,7 @@ impl AppState {
             network_status: RwLock::new(NetworkStatus::Disconnected),
             portfolio_cache: RwLock::new(None),
             quotes: AnyProvider::configured().clone(),
+            stale_after_days: crate::position::DEFAULT_STALE_AFTER_DAYS,
         }
     }
 
@@ -81,6 +84,16 @@ impl AppState {
             quotes,
             ..Self::new(currency)
         }
+    }
+
+    /// Set the stale threshold in days (default 3).
+    pub fn with_stale_after(mut self, days: i64) -> Self {
+        self.stale_after_days = days;
+        self
+    }
+
+    pub fn stale_after_days(&self) -> i64 {
+        self.stale_after_days
     }
 
     /// Load a portfolio file (plaintext or `.gpg`) into state.
@@ -223,8 +236,9 @@ impl AppState {
     async fn fetch_portfolio(&self) -> Portfolio {
         let json = self.positions_json.read().await.clone();
         let currency = self.currency().await;
-        let (portfolio, status) =
+        let (mut portfolio, status) =
             create_live_portfolio_with(Arc::new(self.quotes.clone()), json, &currency, false).await;
+        crate::position::mark_stale(&mut portfolio, self.stale_after_days);
         self.quotes.flush_cache();
         *self.network_status.write().await = status;
         *self.portfolio_cache.write().await = Some(CachedPortfolio {
@@ -419,6 +433,8 @@ impl AppState {
             price_source: None,
             fx_from_cache: false,
             excluded_estimate: None,
+            currency: None,
+            runtime: Default::default(),
             fx_rate: None,
             purchases: req
                 .purchases

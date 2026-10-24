@@ -164,7 +164,7 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
         .filter(|symbol| !symbol.is_empty())
         .collect();
     let mut fx_prices = HashMap::new();
-    let mut fx_cached = HashSet::new();
+    let mut fx_cached: HashMap<String, Option<String>> = HashMap::new();
     for symbol in symbols {
         let quote = provider.latest(&symbol).await.ok();
         if quote.is_none() && log_errors {
@@ -174,17 +174,24 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
             .as_ref()
             .is_some_and(|q| q.source == crate::services::quotes::PriceSource::Cache)
         {
-            fx_cached.insert(symbol.clone());
+            fx_cached.insert(
+                symbol.clone(),
+                quote
+                    .as_ref()
+                    .and_then(|q| q.as_of.clone())
+                    .or_else(|| provider.last_known_as_of(&symbol)),
+            );
         }
         fx_prices.insert(symbol, quote.map(|q| q.price));
     }
     for position in &mut portfolio.positions {
         apply_fx(position, base_currency, &fx_prices);
-        position.fx_from_cache = position.fx_rate.is_some()
-            && position
-                .price_currency()
-                .and_then(|ccy| fx_symbol(base_currency, ccy))
-                .is_some_and(|(symbol, _)| fx_cached.contains(&symbol));
+        let cached = position
+            .price_currency()
+            .and_then(|ccy| fx_symbol(base_currency, ccy))
+            .and_then(|(symbol, _)| fx_cached.get(&symbol).cloned());
+        position.fx_from_cache = position.fx_rate.is_some() && cached.is_some();
+        position.runtime.fx_as_of = cached.flatten();
     }
 
     // Size what is excluded from totals: last cached price (any age), else
@@ -220,22 +227,44 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
                 .and_then(|(p, c)| Some((dec(p), c?)))
         };
         let from_last = last.and_then(|(price, ccy)| Some(price * qty * fx_for(&ccy)?));
+        // A cached last price (never served as current: past max-age or the
+        // fallback is disabled) is an assumption; remember its as-of.
+        let assumed = (!position.has_native_price()).then(|| {
+            provider
+                .last_known_as_of(&ticker)
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+        position.runtime.estimate_assumed_as_of = None;
         position.excluded_estimate = match from_last {
-            Some(v) if v > crate::money::Decimal::ZERO => Some((v, ExcludedBasis::LastPrice)),
+            Some(v) if v > crate::money::Decimal::ZERO => {
+                position.runtime.estimate_assumed_as_of = assumed;
+                Some((v, ExcludedBasis::LastPrice))
+            }
             _ => {
+                // Currency: quote, cache entry, recorded `Currency`, else
+                // assume the base currency (flagged).
                 let ccy = position
                     .price_currency()
                     .map(str::to_string)
-                    .or_else(|| provider.last_known(&ticker).and_then(|(_, c)| c));
+                    .or_else(|| provider.last_known(&ticker).and_then(|(_, c)| c))
+                    .or_else(|| position.currency.clone());
+                let (fx, basis) = match ccy {
+                    Some(c) => (fx_for(&c), ExcludedBasis::CostBasis),
+                    None => (
+                        Some(crate::money::Decimal::ONE),
+                        ExcludedBasis::CostBasisAssumedBase,
+                    ),
+                };
                 position
                     .average_cost_dec()
-                    .zip(ccy.and_then(|c| fx_for(&c)))
+                    .zip(fx)
                     .map(|(cost, fx)| cost * qty * fx)
                     .filter(|v| *v > crate::money::Decimal::ZERO)
-                    .map(|v| (v, ExcludedBasis::CostBasis))
+                    .map(|v| (v, basis))
             }
         };
     }
+    crate::position::mark_stale(&mut portfolio, crate::position::DEFAULT_STALE_AFTER_DAYS);
 
     if log_errors {
         for position in portfolio.positions_without_price() {

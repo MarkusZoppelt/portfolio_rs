@@ -26,6 +26,9 @@ static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::ne
 pub enum ExcludedBasis {
     LastPrice,
     CostBasis,
+    /// Cost basis with no currency anywhere (no quote, no cache entry, no
+    /// recorded `Currency`): assumed to be in the base currency.
+    CostBasisAssumedBase,
 }
 
 impl ExcludedBasis {
@@ -33,6 +36,7 @@ impl ExcludedBasis {
         match self {
             Self::LastPrice => "last_price",
             Self::CostBasis => "cost_basis",
+            Self::CostBasisAssumedBase => "cost_basis_assumed_base",
         }
     }
 }
@@ -125,6 +129,18 @@ pub fn fx_symbol(base: &str, quote_ccy: &str) -> Option<(String, f64)> {
     Some((format!("{base}{major}=X"), scale))
 }
 
+/// Derived, never persisted.
+#[derive(Debug, Clone, Default)]
+pub struct PositionRuntime {
+    /// Price (or FX rate) as-of older than the stale threshold.
+    pub stale: bool,
+    /// As-of of the FX rate used, when it came from the cache.
+    pub fx_as_of: Option<String>,
+    /// The excluded estimate uses a cache entry past max-age (or with the
+    /// cache fallback disabled); its as-of date (or "unknown").
+    pub estimate_assumed_as_of: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortfolioPosition {
@@ -137,6 +153,15 @@ pub struct PortfolioPosition {
     pub(crate) asset_class: String,
     #[serde(with = "rust_decimal::serde::float")]
     pub(crate) amount: Decimal,
+
+    /// Optional recorded quote currency (e.g. `USD`). Only used to convert
+    /// the cost basis of a position that has no price at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) currency: Option<String>,
+
+    // Not persisted. Derived flags (staleness, estimate assumptions).
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) runtime: PositionRuntime,
 
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) last_spot: Decimal,
@@ -415,8 +440,15 @@ impl PortfolioPosition {
     }
 
     /// Whether the price or its FX rate came from the last-known-price cache.
+    /// The price or FX rate is older than the stale threshold (see
+    /// [`mark_stale`]). Coming from the cache alone is not stale.
     pub fn is_stale(&self) -> bool {
-        self.price_source == Some(crate::services::quotes::PriceSource::Cache) || self.fx_from_cache
+        self.runtime.stale
+    }
+
+    /// As-of date of an assumed (expired-cache) excluded estimate.
+    pub fn estimate_assumed_as_of(&self) -> Option<&str> {
+        self.runtime.estimate_assumed_as_of.as_deref()
     }
 
     /// Base-currency units per 1 unit of the quote currency, if a conversion applies.
@@ -621,6 +653,8 @@ impl PortfolioPosition {
             price_source: None,
             fx_from_cache: false,
             excluded_estimate: None,
+            currency: None,
+            runtime: Default::default(),
             fx_rate: None,
         }
     }
@@ -893,27 +927,29 @@ pub async fn handle_position_with<P: QuoteProvider>(
         position.fx_from_cache = false;
         apply_quote_result(position, close);
 
+        // Purchase prices are needed even without a current price: the cost
+        // basis sizes an excluded position (Finance N1/N3).
+        if !position.purchases.is_empty() {
+            let mut filled_purchases = Vec::with_capacity(position.purchases.len());
+            for mut p in position.purchases.clone() {
+                let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
+                if needs_price && p.quantity > Decimal::ZERO {
+                    if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
+                        if let Ok(close) = provider.close_on(ticker, date).await {
+                            p.estimated_price = Some(dec(close.max(0.0)));
+                        }
+                    }
+                }
+                filled_purchases.push(p);
+            }
+            position.purchases = filled_purchases;
+        }
+
         // Quote-dependent enrichment is useless without a live price, and a
         // failed name lookup must not discard an otherwise valid position.
         if position.price_status == PriceStatus::Live {
             if let Ok(prev_close) = provider.previous_close(ticker).await {
                 position.previous_close = Some(dec(prev_close));
-            }
-
-            if !position.purchases.is_empty() {
-                let mut filled_purchases = Vec::with_capacity(position.purchases.len());
-                for mut p in position.purchases.clone() {
-                    let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
-                    if needs_price && p.quantity > Decimal::ZERO {
-                        if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
-                            if let Ok(close) = provider.close_on(ticker, date).await {
-                                p.estimated_price = Some(dec(close.max(0.0)));
-                            }
-                        }
-                    }
-                    filled_purchases.push(p);
-                }
-                position.purchases = filled_purchases;
             }
 
             if position.name.is_none() {
@@ -925,6 +961,25 @@ pub async fn handle_position_with<P: QuoteProvider>(
     }
 
     position.clone()
+}
+
+/// Default stale threshold: covers a weekend plus a holiday.
+pub const DEFAULT_STALE_AFTER_DAYS: i64 = 3;
+
+fn older_than(ts: Option<&str>, now: chrono::DateTime<chrono::Utc>, days: i64) -> bool {
+    ts.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|t| now - t.with_timezone(&chrono::Utc) > chrono::Duration::days(days))
+}
+
+/// Set each position's stale flag: a native price whose as-of (or a cached FX
+/// rate whose as-of) is more than `days` old. Unknown as-of is not stale.
+pub fn mark_stale(portfolio: &mut crate::portfolio::Portfolio, days: i64) {
+    let now = chrono::Utc::now();
+    for p in &mut portfolio.positions {
+        p.runtime.stale = p.has_native_price()
+            && (older_than(p.price_as_of.as_deref(), now, days)
+                || (p.fx_from_cache && older_than(p.runtime.fx_as_of.as_deref(), now, days)));
+    }
 }
 
 #[cfg(test)]
@@ -1075,6 +1130,8 @@ mod tests {
             price_source: None,
             fx_from_cache: false,
             excluded_estimate: None,
+            currency: None,
+            runtime: Default::default(),
             fx_rate: None,
             purchases: vec![],
             previous_close: None,
@@ -1115,6 +1172,8 @@ mod tests {
             price_source: None,
             fx_from_cache: false,
             excluded_estimate: None,
+            currency: None,
+            runtime: Default::default(),
             fx_rate: None,
             purchases: vec![Purchase {
                 date: Some("2024-01-15".to_string()),

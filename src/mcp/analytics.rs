@@ -443,16 +443,14 @@ pub fn no_policy_finding() -> Finding {
     )
 }
 
-/// An excluded position's maximum plausible base value: twice its last
-/// cached price (the price may have moved since), unbounded (`None`) when it
-/// is only known at cost basis or not at all.
+/// An excluded position's maximum plausible base value: twice its estimate
+/// (last cached price, else cost basis; the price may have moved since),
+/// unbounded (`None`) when it has no estimate at all.
 pub const PLAUSIBLE_PRICE_FACTOR: f64 = 2.0;
 
 fn excluded_max(p: &PortfolioPosition) -> Option<Decimal> {
-    match p.excluded_estimate() {
-        Some((v, ExcludedBasis::LastPrice)) => Some(v * dec(PLAUSIBLE_PRICE_FACTOR)),
-        _ => None,
-    }
+    p.excluded_estimate()
+        .map(|(v, _)| v * dec(PLAUSIBLE_PRICE_FACTOR))
 }
 
 /// Sum of maximum plausible values; `None` (unbounded) if any is unbounded.
@@ -624,7 +622,12 @@ pub fn allocation(
         None => (None, None),
         Some(est) => {
             let e: Decimal = est.iter().map(|(v, _)| *v).sum();
-            let basis = if est.iter().any(|(_, b)| *b == ExcludedBasis::CostBasis) {
+            let basis = if est
+                .iter()
+                .any(|(_, b)| *b == ExcludedBasis::CostBasisAssumedBase)
+            {
+                ExcludedBasis::CostBasisAssumedBase
+            } else if est.iter().any(|(_, b)| *b == ExcludedBasis::CostBasis) {
                 ExcludedBasis::CostBasis
             } else {
                 ExcludedBasis::LastPrice
@@ -724,7 +727,34 @@ pub struct PolicyCheck {
     pub checks: Vec<ConstraintCheckRow>,
 }
 
+/// Tuning for [`check_policy_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyOptions {
+    /// Drop a possible_breach when the excluded positions' maximum share is
+    /// below this percent of the total: they cannot change the outcome
+    /// materially.
+    pub possible_breach_min_share: f64,
+}
+
+pub const DEFAULT_POSSIBLE_BREACH_MIN_SHARE: f64 = 0.5;
+
+impl Default for PolicyOptions {
+    fn default() -> Self {
+        Self {
+            possible_breach_min_share: DEFAULT_POSSIBLE_BREACH_MIN_SHARE,
+        }
+    }
+}
+
 pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
+    check_policy_with(portfolio, policy, PolicyOptions::default())
+}
+
+pub fn check_policy_with(
+    portfolio: &Portfolio,
+    policy: &Policy,
+    opts: PolicyOptions,
+) -> PolicyCheck {
     let mut findings = Vec::new();
     let mut checks = Vec::new();
     if let Err(e) = policy.validate() {
@@ -736,6 +766,16 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
         ));
     }
     let alloc = allocation(portfolio, Some(policy), true, true);
+    // Share of the priced positions only (what the priced part alone says).
+    let priced_only = |v: Decimal| percent_of(v, alloc.total).map(pct).unwrap_or(0.0);
+    let class_priced = |class: &str| -> Decimal {
+        portfolio
+            .positions
+            .iter()
+            .filter(|p| p.get_asset_class().eq_ignore_ascii_case(class))
+            .filter_map(value_base)
+            .sum()
+    };
     let range_detail = |c: &ClassAllocation| {
         json!({ "actualPercentMin": c.actual_percent_min, "actualPercentMax": c.actual_percent_max,
                 "excludedValueShare": alloc.excluded_value_share, "basis": "partial" })
@@ -768,7 +808,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
             } else if c.status == "unknown" && (min < low || max > high) {
                 findings.push(
                     Finding::new("possible_breach", Severity::Warning, Category::Allocation,
-                        format!("{} may be outside its band ({:.2}–{:.2}% possible vs {:.2}–{:.2}%); checked on a partial basis because prices are missing.", c.asset_class, min, max, low, high))
+                        format!("{} may be outside its band ({:.2}–{:.2}% possible vs {:.2}–{:.2}%; {:.2}% of the priced part); checked on a partial basis because prices are missing.", c.asset_class, min, max, low, high, priced_only(class_priced(&c.asset_class))))
                         .class(&c.asset_class)
                         .detail(range_detail(c)),
                 );
@@ -882,10 +922,10 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                 possible.push(json!({ "code": "single_position_limit", "positionId": p.id() }));
                 findings.push(
                     Finding::new("possible_breach", Severity::Warning, Category::Constraint,
-                        format!("{} may exceed the {limit:.2}% position limit ({min:.2}–{max:.2}% possible); checked on a partial basis because prices are missing.", p.get_name()))
+                        format!("{} may exceed the {limit:.2}% position limit ({min:.2}–{max:.2}% possible; {:.2}% of the priced part); checked on a partial basis because prices are missing.", p.get_name(), priced_only(v)))
                         .position(p.id())
                         .class(p.get_asset_class())
-                        .detail(json!({ "code": "single_position_limit", "limitPercent": limit, "actualPercentMin": min, "actualPercentMax": max, "basis": "partial" })),
+                        .detail(json!({ "code": "single_position_limit", "limitPercent": limit, "actualPercentMin": min, "actualPercentMax": max, "pricedOnlyPercent": priced_only(v), "basis": "partial" })),
                 );
                 continue;
             }
@@ -937,7 +977,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                 possible.push(json!({ "code": "asset_class_limit", "assetClass": cl.asset_class }));
                 findings.push(
                     Finding::new("possible_breach", Severity::Warning, Category::Constraint,
-                        format!("{} may exceed the {limit:.2}% asset class limit ({min:.2}–{max:.2}% possible); checked on a partial basis because prices are missing.", cl.asset_class))
+                        format!("{} may exceed the {limit:.2}% asset class limit ({min:.2}–{max:.2}% possible; {:.2}% of the priced part); checked on a partial basis because prices are missing.", cl.asset_class, priced_only(class_priced(&cl.asset_class))))
                         .class(&cl.asset_class)
                         .detail(json!({ "code": "asset_class_limit", "limitPercent": limit, "actualPercentMin": min, "actualPercentMax": max, "basis": "partial" })),
                 );
@@ -967,6 +1007,100 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
         }
     }
     if partial {
+        // N4: excluded positions too small to matter: no possible_breach.
+        let excluded_max_share = alloc
+            .excluded_max
+            .and_then(|m| percent_of(m, total + m))
+            .map(pct);
+        if excluded_max_share.is_some_and(|s| s < opts.possible_breach_min_share) {
+            findings.retain(|f| f.code != "possible_breach");
+            possible.clear();
+        }
+        // N4: at most one possible_breach per class and limit; the others'
+        // positions are listed on the first.
+        let key = |f: &Finding| {
+            let code = f
+                .detail
+                .as_ref()
+                .and_then(|d| d.get("code"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("allocation_band")
+                .to_string();
+            (
+                code,
+                f.asset_class.clone().unwrap_or_default().to_lowercase(),
+            )
+        };
+        let mut merged: Vec<Finding> = Vec::new();
+        for f in findings.drain(..) {
+            if f.code == "possible_breach" {
+                if let Some(first) = merged
+                    .iter_mut()
+                    .find(|m| m.code == "possible_breach" && key(m) == key(&f))
+                {
+                    if let (Some(d), Some(id)) = (first.detail.as_mut(), f.position_id.clone()) {
+                        let ids = d
+                            .as_object_mut()
+                            .map(|o| o.entry("positionIds").or_insert_with(|| json!([])));
+                        if let Some(serde_json::Value::Array(a)) = ids {
+                            if a.is_empty() {
+                                if let Some(own) = &first.position_id {
+                                    a.push(json!(own));
+                                }
+                            }
+                            a.push(json!(id));
+                        }
+                    }
+                    continue;
+                }
+            }
+            merged.push(f);
+        }
+        findings = merged;
+        // N2: bounds from an expired cache entry (or with the fallback
+        // disabled) are assumptions: name them and cap severity at warning.
+        let assumptions: Vec<serde_json::Value> = portfolio
+            .positions
+            .iter()
+            .filter(|p| value_base(p).is_none())
+            .filter_map(|p| {
+                p.estimate_assumed_as_of().map(|asof| {
+                    json!({ "positionId": pid(p), "name": p.get_name(), "asOf": asof,
+                            "assumption": format!("worth at most {PLAUSIBLE_PRICE_FACTOR}× its last cached price") })
+                })
+            })
+            .collect();
+        if !assumptions.is_empty() {
+            let named: Vec<String> = assumptions
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{} at most {PLAUSIBLE_PRICE_FACTOR}× its last cached price from {}",
+                        a["name"].as_str().unwrap_or("?"),
+                        a["asOf"].as_str().unwrap_or("unknown")
+                    )
+                })
+                .collect();
+            for f in findings.iter_mut().filter(|f| {
+                f.severity == Severity::Critical
+                    && matches!(
+                        f.code.as_str(),
+                        "allocation_out_of_band" | "single_position_limit" | "asset_class_limit"
+                    )
+            }) {
+                f.severity = Severity::Warning;
+                f.message = format!(
+                    "{} Assumes {} (expired cache entry); capped at warning.",
+                    f.message,
+                    named.join(", ")
+                );
+                let d = f.detail.get_or_insert_with(|| json!({}));
+                if let Some(o) = d.as_object_mut() {
+                    o.insert("assumptions".into(), json!(assumptions));
+                    o.insert("severityCappedFrom".into(), json!("critical"));
+                }
+            }
+        }
         let unknown: Vec<&str> = alloc
             .classes
             .iter()
@@ -977,7 +1111,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
             Finding::new(
                 "checks_incomplete",
                 Severity::Warning,
-                Category::Policy,
+                Category::DataQuality,
                 format!(
                     "{} position(s) have no price or FX rate (excluded value share {}). Allocation and limits are \
                      judged on the priced part: only breaches that hold whatever the excluded positions are worth are \

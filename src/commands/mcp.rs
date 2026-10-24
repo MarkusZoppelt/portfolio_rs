@@ -34,6 +34,8 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
             crate::mcp::CacheMode::Auto
         },
         cache_max_age_days: matches.get_one::<i64>("cache-max-age").copied(),
+        stale_after_days: matches.get_one::<i64>("stale-after").copied(),
+        possible_breach_min_share: matches.get_one::<f64>("possible-breach-min-share").copied(),
     })
     .await
 }
