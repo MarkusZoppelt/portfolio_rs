@@ -26,10 +26,6 @@ fn now_rfc3339() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
 }
 
-fn network_status(status: &crate::tui::NetworkStatus) -> String {
-    format!("{status:?}").to_lowercase()
-}
-
 fn parse_day(field: &str, value: &Option<String>) -> Result<Option<String>, ToolError> {
     match value {
         None => Ok(None),
@@ -63,12 +59,16 @@ impl PortfolioServer {
         self.served.state.currency().await
     }
 
-    async fn meta(&self, warnings: Vec<Finding>) -> Meta {
+    async fn meta(&self, portfolio: &Portfolio, warnings: Vec<Finding>) -> Meta {
+        let base_currency = self.base_currency().await;
+        let data_quality = analytics::data_quality_summary(portfolio, &base_currency);
         Meta {
             schema_version: SCHEMA_VERSION,
             portfolio_id: self.served.id.clone(),
             as_of: now_rfc3339(),
-            base_currency: self.base_currency().await,
+            base_currency,
+            complete: data_quality.affected_positions.is_empty(),
+            data_quality,
             warnings,
         }
     }
@@ -115,13 +115,14 @@ impl PortfolioServer {
             input.asset_class.as_deref(),
             input.sort_by.unwrap_or_default(),
         );
-        let status = *self.served.state.network_status.read().await;
         Ok(Json(PositionsOutput {
-            meta: self.meta(analytics::data_quality(&portfolio)).await,
+            meta: self
+                .meta(&portfolio, analytics::data_quality(&portfolio))
+                .await,
             total_value: money(total),
             cash_value: money(cash),
             positions,
-            network_status: network_status(&status),
+            network_status: analytics::network_status(&portfolio).to_string(),
         }))
     }
 
@@ -155,7 +156,7 @@ impl PortfolioServer {
             );
         }
         Ok(Json(AllocationOutput {
-            meta: self.meta(warnings).await,
+            meta: self.meta(&portfolio, warnings).await,
             policy: policy.as_ref().map(|p| PolicyRef {
                 name: p.name.clone(),
                 source: self.uri("policy"),
@@ -192,7 +193,7 @@ impl PortfolioServer {
                 Vec::new(),
             ),
         };
-        findings.extend(analytics::data_quality(&portfolio));
+        // Data-quality warnings live once, in the top-level warnings.
         findings.retain(|f| f.severity >= min);
         let mut counts = SeverityCounts::default();
         for f in &findings {
@@ -215,7 +216,9 @@ impl PortfolioServer {
             "ok"
         };
         Ok(Json(PolicyCheckOutput {
-            meta: self.meta(Vec::new()).await,
+            meta: self
+                .meta(&portfolio, analytics::data_quality(&portfolio))
+                .await,
             policy_name: policy.map(|p| p.name),
             status: status.to_string(),
             breaches,
@@ -333,7 +336,7 @@ impl PortfolioServer {
             .take(limit as usize)
             .collect();
         Ok(Json(TransactionsOutput {
-            meta: self.meta(warnings).await,
+            meta: self.meta(&portfolio, warnings).await,
             source: "synthesized_from_purchases".to_string(),
             transactions: page,
             totals,
@@ -401,7 +404,9 @@ impl PortfolioServer {
         };
         let portfolio = self.portfolio(false).await;
         Ok(Json(ContextOutput {
-            meta: self.meta(analytics::data_quality(&portfolio)).await,
+            meta: self
+                .meta(&portfolio, analytics::data_quality(&portfolio))
+                .await,
             format: match format {
                 ContextFormat::Markdown => "markdown",
                 ContextFormat::Json => "json",

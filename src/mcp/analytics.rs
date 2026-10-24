@@ -213,6 +213,55 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
     out
 }
 
+/// Missing prices / FX for the `dataQuality` block. `complete` is
+/// `affected_positions.is_empty()`.
+pub fn data_quality_summary(portfolio: &Portfolio, base: &str) -> DataQuality {
+    let mut dq = DataQuality::default();
+    for p in portfolio
+        .positions
+        .iter()
+        .filter(|p| value_base(p).is_none())
+    {
+        let ticker = p.get_ticker().unwrap_or_default().to_string();
+        if matches!(p.price_status(), PriceStatus::FxUnavailable) {
+            let from = p.price_currency().unwrap_or("?").to_uppercase();
+            let pair = format!("{from}/{}", base.to_uppercase());
+            if !dq.missing_fx.contains(&pair) {
+                dq.missing_fx.push(pair);
+            }
+        } else if !dq.missing_prices.contains(&ticker) {
+            dq.missing_prices.push(ticker);
+        }
+        dq.affected_positions.push(pid(p));
+        let class = p.get_asset_class().to_string();
+        if !dq
+            .affected_classes
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&class))
+        {
+            dq.affected_classes.push(class);
+        }
+    }
+    dq
+}
+
+/// connected | partial | offline, from the quotes actually present.
+pub fn network_status(portfolio: &Portfolio) -> &'static str {
+    let market: Vec<_> = portfolio
+        .positions
+        .iter()
+        .filter(|p| kind(p) == "market")
+        .collect();
+    let priced = market.iter().filter(|p| value_base(p).is_some()).count();
+    if priced == market.len() {
+        "connected"
+    } else if priced == 0 {
+        "offline"
+    } else {
+        "partial"
+    }
+}
+
 pub fn no_policy_finding() -> Finding {
     Finding::new(
         "no_policy",
@@ -223,7 +272,10 @@ pub fn no_policy_finding() -> Finding {
 }
 
 pub struct Allocation {
+    /// Sum of the priced positions only.
     pub total: Decimal,
+    /// Every included position has a value.
+    pub complete: bool,
     pub classes: Vec<ClassAllocation>,
     pub untargeted: Vec<String>,
     pub missing: Vec<String>,
@@ -242,41 +294,39 @@ pub fn allocation(
         .filter(|p| include_manual || kind(p) != "manual")
         .collect();
     let total = total_known(&included);
-    // Group case-insensitively, keeping the first spelling seen.
+    let complete = included.iter().all(|p| value_base(p).is_some());
+    // Group case-insensitively, keeping the first spelling seen. A class with
+    // any unpriced position has an unknown value (never a partial sum or 0).
     let mut order: Vec<String> = Vec::new();
-    let mut values: HashMap<String, (String, Decimal)> = HashMap::new();
+    let mut values: HashMap<String, (String, Option<Decimal>)> = HashMap::new();
     for p in &included {
-        let Some(v) = value_base(p) else { continue };
         let key = p.get_asset_class().to_lowercase();
         if !values.contains_key(&key) {
             order.push(key.clone());
         }
-        values
+        let entry = values
             .entry(key)
-            .or_insert_with(|| (p.get_asset_class().to_string(), Decimal::ZERO))
-            .1 += v;
+            .or_insert_with(|| (p.get_asset_class().to_string(), Some(Decimal::ZERO)));
+        entry.1 = match (entry.1, value_base(p)) {
+            (Some(sum), Some(v)) => Some(sum + v),
+            _ => None,
+        };
     }
+    let band = |t: &crate::policy::AllocationTarget| {
+        (
+            t.target_percent,
+            t.tolerance_percent.unwrap_or(DEFAULT_TOLERANCE),
+        )
+    };
     let mut classes = Vec::new();
     let mut untargeted = Vec::new();
     for key in &order {
         let (label, value) = &values[key];
-        let actual = percent_of(*value, total).unwrap_or(Decimal::ZERO);
         let target = policy.and_then(|pol| pol.get_allocation(label));
         if policy.is_some() && target.is_none() {
             untargeted.push(label.clone());
         }
-        classes.push(class_row(
-            label,
-            *value,
-            actual,
-            total,
-            target.map(|t| {
-                (
-                    t.target_percent,
-                    t.tolerance_percent.unwrap_or(DEFAULT_TOLERANCE),
-                )
-            }),
-        ));
+        classes.push(class_row(label, *value, total, target.map(band), complete));
     }
     let mut missing = Vec::new();
     if let Some(pol) = policy {
@@ -285,24 +335,23 @@ pub fn allocation(
                 missing.push(t.asset_class.clone());
                 classes.push(class_row(
                     &t.asset_class,
-                    Decimal::ZERO,
-                    Decimal::ZERO,
+                    Some(Decimal::ZERO),
                     total,
-                    Some((
-                        t.target_percent,
-                        t.tolerance_percent.unwrap_or(DEFAULT_TOLERANCE),
-                    )),
+                    Some(band(t)),
+                    complete,
                 ));
             }
         }
     }
+    let key = |c: &ClassAllocation| c.value.unwrap_or(f64::NEG_INFINITY);
     classes.sort_by(|a, b| {
-        b.value
-            .total_cmp(&a.value)
+        key(b)
+            .total_cmp(&key(a))
             .then_with(|| a.asset_class.cmp(&b.asset_class))
     });
     Allocation {
         total,
+        complete,
         classes,
         untargeted,
         missing,
@@ -311,48 +360,48 @@ pub fn allocation(
 
 fn class_row(
     label: &str,
-    value: Decimal,
-    actual: Decimal,
+    value: Option<Decimal>,
     total: Decimal,
     target: Option<(f64, f64)>,
+    complete: bool,
 ) -> ClassAllocation {
-    let actual_f = pct(actual);
-    match target {
-        None => ClassAllocation {
-            asset_class: label.to_string(),
-            value: money(value),
-            actual_percent: actual_f,
-            target_percent: None,
-            tolerance_percent: None,
-            band_low: None,
-            band_high: None,
-            drift_points: None,
-            status: "untargeted".to_string(),
-            amount_to_target: None,
-        },
-        Some((t, tol)) => {
-            let drift = actual - dec(t);
-            let status = if drift.abs() <= dec(tol) {
-                "within_band"
-            } else if drift < Decimal::ZERO {
-                "below_band"
-            } else {
-                "above_band"
-            };
-            ClassAllocation {
-                asset_class: label.to_string(),
-                value: money(value),
-                actual_percent: actual_f,
-                target_percent: Some(t),
-                tolerance_percent: Some(tol),
-                band_low: Some(money_f((t - tol).max(0.0))),
-                band_high: Some(money_f((t + tol).min(100.0))),
-                drift_points: Some(pct(drift)),
-                status: status.to_string(),
-                amount_to_target: Some(money(total * dec(t) / dec(100.0) - value)),
-            }
+    let actual = value.map(|v| percent_of(v, total).unwrap_or(Decimal::ZERO));
+    let mut row = ClassAllocation {
+        asset_class: label.to_string(),
+        value: value.map(money),
+        actual_percent: actual.map(pct),
+        target_percent: None,
+        tolerance_percent: None,
+        band_low: None,
+        band_high: None,
+        drift_points: None,
+        status: "untargeted".to_string(),
+        amount_to_target: None,
+    };
+    let Some((t, tol)) = target else {
+        return row;
+    };
+    row.target_percent = Some(t);
+    row.tolerance_percent = Some(tol);
+    row.band_low = Some(money_f((t - tol).max(0.0)));
+    row.band_high = Some(money_f((t + tol).min(100.0)));
+    row.status = "unknown".to_string();
+    // Drift and buy/sell amounts from a partial total would be wrong: only
+    // judge them when every position is priced.
+    if let (true, Some(v), Some(actual)) = (complete, value, actual) {
+        let drift = actual - dec(t);
+        row.status = if drift.abs() <= dec(tol) {
+            "within_band"
+        } else if drift < Decimal::ZERO {
+            "below_band"
+        } else {
+            "above_band"
         }
+        .to_string();
+        row.drift_points = Some(pct(drift));
+        row.amount_to_target = Some(money(total * dec(t) / dec(100.0) - v));
     }
+    row
 }
 
 pub struct PolicyCheck {
@@ -383,7 +432,10 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
     let alloc = allocation(portfolio, Some(policy), true, true);
     for c in &alloc.classes {
         match (c.target_percent, c.tolerance_percent, c.drift_points) {
-            (Some(t), Some(tol), Some(drift)) if c.status != "within_band" && c.value > 0.0 => {
+            (Some(t), Some(tol), Some(drift))
+                if (c.status == "below_band" || c.status == "above_band")
+                    && c.value.is_some_and(|v| v > 0.0) =>
+            {
                 let severity = if drift.abs() > 2.0 * tol {
                     Severity::Critical
                 } else {
@@ -391,7 +443,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                 };
                 findings.push(
                     Finding::new("allocation_out_of_band", severity, Category::Allocation,
-                        format!("{} is {:.2}% vs target {:.2}% ±{:.2} (drift {:+.2} pts).", c.asset_class, c.actual_percent, t, tol, drift))
+                        format!("{} is {:.2}% vs target {:.2}% ±{:.2} (drift {:+.2} pts).", c.asset_class, c.actual_percent.unwrap_or_default(), t, tol, drift))
                         .class(&c.asset_class)
                         .detail(json!({ "actualPercent": c.actual_percent, "targetPercent": t, "tolerancePercent": tol, "driftPoints": drift })),
                 );
@@ -430,6 +482,9 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
 
     let total = alloc.total;
     let c = &policy.constraints;
+    // With partial data a weight against the priced total is an upper bound:
+    // a pass is certain, a failure is not. Uncertain checks are skipped.
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
     if let Some(min) = c.minimum_cash_amount {
         let cash: Decimal = portfolio
             .positions
@@ -470,6 +525,10 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
             let Some(v) = value_base(p) else { continue };
             let w = percent_of(v, total).unwrap_or(Decimal::ZERO);
             let passed = w <= dec(limit);
+            if !passed && !alloc.complete {
+                skipped.push(json!({ "code": "single_position_limit", "positionId": p.id() }));
+                continue;
+            }
             checks.push(ConstraintCheckRow {
                 code: "single_position_limit".into(),
                 limit_percent: Some(limit),
@@ -499,12 +558,23 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
         }
     }
     if let Some(limit) = c.asset_class_limit_percent {
-        for cl in alloc.classes.iter().filter(|c| c.value > 0.0) {
-            let passed = cl.actual_percent <= limit;
+        for cl in alloc.classes.iter() {
+            let (Some(value), Some(actual)) = (cl.value, cl.actual_percent) else {
+                skipped.push(json!({ "code": "asset_class_limit", "assetClass": cl.asset_class }));
+                continue;
+            };
+            if value <= 0.0 {
+                continue;
+            }
+            let passed = actual <= limit;
+            if !passed && !alloc.complete {
+                skipped.push(json!({ "code": "asset_class_limit", "assetClass": cl.asset_class }));
+                continue;
+            }
             checks.push(ConstraintCheckRow {
                 code: "asset_class_limit".into(),
                 limit_percent: Some(limit),
-                actual_percent: Some(cl.actual_percent),
+                actual_percent: Some(actual),
                 limit_amount: None,
                 actual_amount: None,
                 position_id: None,
@@ -519,13 +589,32 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                         Category::Constraint,
                         format!(
                             "{} is {:.2}% of the portfolio (limit {limit:.2}%).",
-                            cl.asset_class, cl.actual_percent
+                            cl.asset_class, actual
                         ),
                     )
                     .class(&cl.asset_class),
                 );
             }
         }
+    }
+    if !alloc.complete {
+        let unknown: Vec<&str> = alloc
+            .classes
+            .iter()
+            .filter(|c| c.status == "unknown")
+            .map(|c| c.asset_class.as_str())
+            .collect();
+        findings.push(
+            Finding::new(
+                "checks_incomplete",
+                Severity::Warning,
+                Category::Policy,
+                "Prices or FX rates are missing: allocation drift is not judged and \
+                 percentage limits that could be breached are skipped."
+                    .into(),
+            )
+            .detail(json!({ "unknownClasses": unknown, "skippedChecks": skipped })),
+        );
     }
     PolicyCheck { findings, checks }
 }
