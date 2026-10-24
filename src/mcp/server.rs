@@ -332,7 +332,15 @@ impl PortfolioServer {
         let portfolio = self.portfolio(false).await;
         let base = self.base_currency().await;
         self.check_class(&portfolio, &input.asset_class).await?;
-        let all = analytics::transactions(&portfolio, &base);
+        let file_date = std::fs::metadata(&self.served.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| {
+                chrono::DateTime::<chrono::Local>::from(t)
+                    .format("%Y-%m-%d")
+                    .to_string()
+            });
+        let all = analytics::transactions(&portfolio, &base, file_date);
         if let Some(id) = &input.position_id {
             if !portfolio
                 .positions

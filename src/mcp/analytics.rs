@@ -732,8 +732,24 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
 }
 
 /// Synthesized transactions (one per purchase), sorted by date then id.
-pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
+///
+/// A cash position without entries gets one opening deposit dated at the
+/// earliest purchase date in the portfolio, else `file_date` (the data
+/// file's modification date), with fees 0 and `synthesized: true`.
+pub fn transactions(
+    portfolio: &Portfolio,
+    base: &str,
+    file_date: Option<String>,
+) -> Vec<Transaction> {
     let mut out = Vec::new();
+    let opening_date = portfolio
+        .positions
+        .iter()
+        .flat_map(|p| p.get_purchases())
+        .filter_map(|pur| pur.date.as_deref().and_then(parse_purchase_date))
+        .min()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .or(file_date);
     for p in &portfolio.positions {
         let id = pid(p);
         let currency = if kind(p) == "market" {
@@ -745,7 +761,8 @@ pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
             let balance = p.balance_dec();
             out.push(Transaction {
                 id: format!("tx_{id}_opening"),
-                date: None,
+                date: opening_date.clone(),
+                synthesized: true,
                 tx_type: TxType::Deposit,
                 position_id: id.clone(),
                 ticker: None,
@@ -753,7 +770,7 @@ pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
                 quantity: qty(balance),
                 price: Some(1.0),
                 price_source: "cash".to_string(),
-                fees: None,
+                fees: Some(0.0),
                 amount: Some(money(balance)),
                 currency: currency.clone(),
                 amount_base: Some(money(balance)),
@@ -777,6 +794,7 @@ pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
                 .is_some_and(|c| c.eq_ignore_ascii_case(base));
             out.push(Transaction {
                 id: format!("tx_{id}_{i}"),
+                synthesized: false,
                 date: pur
                     .date
                     .as_deref()
@@ -801,6 +819,12 @@ pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
             });
         }
     }
-    out.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| a.id.cmp(&b.id)));
+    // Opening deposits first on their date.
+    out.sort_by(|a, b| {
+        a.date
+            .cmp(&b.date)
+            .then_with(|| b.synthesized.cmp(&a.synthesized))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     out
 }

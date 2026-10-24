@@ -1927,3 +1927,61 @@ async fn context_json_is_rounded_to_two_decimals() {
         assert!(saw_fraction, "fixture should yield fractional weights");
     }
 }
+
+/// t12 / item 9: the synthesized opening deposit is dated (earliest purchase,
+/// else the file date), has fees 0, and survives date filters.
+#[tokio::test]
+async fn opening_deposit_is_dated_and_filterable() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    let data = json!([
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 50000, "Purchases": []},
+        {"Name": "Stocks", "AssetClass": "Stocks", "Ticker": "SPY", "Amount": 50,
+         "Purchases": [{"Date": "2025/07/03", "Quantity": 13}, {"Date": "2025/04/15", "Quantity": 37}]}
+    ]);
+    std::fs::write(&file, data.to_string()).unwrap();
+    let client = connect(McpOptions {
+        file: Some(file.to_string_lossy().into_owned()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_transactions", json!({"types": ["deposit"]})).await;
+    let tx = &v["transactions"][0];
+    assert_eq!(tx["date"], "2025-04-15", "{v}");
+    assert_eq!(tx["fees"], 0.0);
+    assert_eq!(tx["synthesized"], true);
+    assert_eq!(tx["amount"], 50000.0);
+    let v = ok(&client, "get_transactions", json!({})).await;
+    assert_eq!(v["transactions"][0]["type"], "deposit", "opening first");
+    assert_eq!(v["transactions"][1]["synthesized"], false);
+    let from = ok(&client, "get_transactions", json!({"from": "2025-01-01"})).await;
+    assert!(from["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["type"] == "deposit"));
+    let v = ok(
+        &client,
+        "get_transactions",
+        json!({"to": "2025-12-31", "types": ["deposit"]}),
+    )
+    .await;
+    assert_eq!(v["totals"]["depositAmountBase"], 50000.0);
+    let v = ok(&client, "get_transactions", json!({"to": "2025-01-01"})).await;
+    assert_eq!(v["transactions"], json!([]));
+
+    // Without any dated purchase the file date is used.
+    std::fs::write(
+        &file,
+        json!([{"Name": "Cash", "AssetClass": "Cash", "Amount": 10, "Purchases": []}]).to_string(),
+    )
+    .unwrap();
+    let client = connect(McpOptions {
+        file: Some(file.to_string_lossy().into_owned()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_transactions", json!({})).await;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    assert_eq!(v["transactions"][0]["date"], today);
+}
