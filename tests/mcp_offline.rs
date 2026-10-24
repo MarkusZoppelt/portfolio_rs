@@ -2952,6 +2952,7 @@ async fn performance_start_point_has_a_maximum_age() {
     let v = ok(&client, "get_performance", json!({"period": "week"})).await;
     assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
     assert!(v["change"].is_null(), "{v}");
+    assert!(v["endValue"].is_number(), "live end kept: {v}");
     let v = ok(
         &client,
         "get_performance",
@@ -3104,6 +3105,16 @@ async fn late_recorded_position_is_a_flow_not_a_gain() {
     let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k}: {v}"));
     assert!((f("netContributions") - value).abs() < 0.01, "{v}");
     assert!(f("marketEffect").abs() < 0.01, "{v}");
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "day", "groupBy": "position"}),
+    )
+    .await;
+    let rows = v["breakdown"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{v}");
+    assert!(rows.iter().all(|r| r["name"].is_string()), "{v}");
+    assert!(rows.iter().any(|r| r["ticker"].is_string()), "{v}");
     client.cancel().await.unwrap();
 }
 
@@ -3156,4 +3167,24 @@ async fn edited_ledger_contradicting_snapshots_warns() {
     assert_eq!(w["detail"]["snapshotDates"][0], day(-1), "{w}");
     assert_eq!(v["dataStatus"], "partial", "{v}");
     client.cancel().await.unwrap();
+}
+
+/// Finance LOW: a snapshot's cash quantity is the balance (`Amount`).
+#[tokio::test]
+async fn snapshot_cash_quantity_is_the_balance() {
+    let tmp = TempDir::new().unwrap();
+    let (_, today) = seed_today(tmp.path()).await;
+    let cash: Vec<&Value> = today["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["kind"] == "cash")
+        .collect();
+    assert!(!cash.is_empty(), "{today}");
+    for p in cash {
+        let fx = p["fxRate"].as_f64().unwrap_or(1.0);
+        let q = p["quantity"].as_f64().unwrap();
+        let v = p["valueBase"].as_f64().unwrap();
+        assert!((q * fx - v).abs() < 0.01, "{p}");
+    }
 }

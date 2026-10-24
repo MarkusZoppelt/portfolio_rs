@@ -793,6 +793,12 @@ pub struct DataCoverage {
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceBreakdown {
     pub key: String,
+    /// Position name and ticker (`groupBy: position`; absent for a position
+    /// no longer in the data file).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticker: Option<String>,
     pub start_value: f64,
     pub end_value: f64,
     pub change: f64,

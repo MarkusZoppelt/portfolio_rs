@@ -153,20 +153,39 @@ pub fn from_portfolio(portfolio: &Portfolio, base: &str, date: &str, stale: bool
     let (rows, _, _) =
         analytics::position_rows(portfolio, base, true, None, super::dto::SortBy::Name);
     let txs = analytics::transactions(portfolio, base, None);
+    // Cash quantity is the account balance (`Amount`), not a purchase sum.
+    let cash_qty: std::collections::HashMap<String, f64> = portfolio
+        .positions
+        .iter()
+        .filter(|p| p.is_cash())
+        .map(|p| {
+            (
+                p.id().unwrap_or_default().to_string(),
+                super::dto::qty(p.balance_dec()),
+            )
+        })
+        .collect();
     let positions: Vec<SnapshotPosition> = rows
         .into_iter()
-        .map(|r| SnapshotPosition {
-            ledger_base: (r.kind != "cash")
-                .then(|| super::performance::ledger_to_date(&txs, &r.id, date, r.fx_rate))
-                .flatten(),
-            position_id: r.id,
-            kind: r.kind,
-            asset_class: r.asset_class,
-            quantity: r.quantity,
-            price: r.price,
-            price_currency: r.price_currency,
-            fx_rate: r.fx_rate,
-            value_base: r.value_base,
+        .map(|r| {
+            let quantity = if r.kind == "cash" {
+                cash_qty.get(&r.id).copied().unwrap_or(r.quantity)
+            } else {
+                r.quantity
+            };
+            SnapshotPosition {
+                ledger_base: (r.kind != "cash")
+                    .then(|| super::performance::ledger_to_date(&txs, &r.id, date, r.fx_rate))
+                    .flatten(),
+                position_id: r.id,
+                kind: r.kind,
+                asset_class: r.asset_class,
+                quantity,
+                price: r.price,
+                price_currency: r.price_currency,
+                fx_rate: r.fx_rate,
+                value_base: r.value_base,
+            }
         })
         .collect();
     let complete = positions.iter().all(|p| p.value_base.is_some());
@@ -200,11 +219,24 @@ pub fn upsert(path: &Path, snap: &Snapshot) -> Result<Upsert> {
     let dir = path
         .parent()
         .ok_or_else(|| eyre::eyre!("bad snapshot path"))?;
+    // Directories this call creates (the data dir and its parents too) get
+    // 0700; existing ones keep their mode, except the per-portfolio dir.
+    let created: Vec<PathBuf> = dir
+        .ancestors()
+        .take_while(|d| !d.as_os_str().is_empty() && !d.exists())
+        .map(Path::to_path_buf)
+        .collect();
     std::fs::create_dir_all(dir).wrap_err("cannot create the snapshot directory")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        for d in created
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(std::iter::once(dir))
+        {
+            let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let (mut all, _) = read(path);
     if !snap.complete && all.iter().any(|s| s.date == snap.date && s.complete) {
@@ -257,6 +289,19 @@ mod tests {
             net_flows_base: 0.0,
             complete: true,
             data_status: "complete".into(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upsert_creates_private_parents() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("a/b");
+        upsert(&snapshots_path(&data, "main"), &snap("2026-01-01", 1.0)).unwrap();
+        for d in [dir.path().join("a"), data.clone(), data.join("main")] {
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", d.display());
         }
     }
 
