@@ -218,7 +218,7 @@ impl PortfolioContext {
                 ));
             }
 
-            if position.get_ticker().is_some() && position.has_market_price() && position.is_stale()
+            if position.get_ticker().is_some() && position.has_native_price() && position.is_stale()
             {
                 data_quality_flags.push(format!(
                     "Price for {} is the last known value from the quote cache (as of {}).",
@@ -261,7 +261,7 @@ impl PortfolioContext {
                     .then(|| position.price_as_of().map(String::from))
                     .flatten(),
                 is_stale: position.get_ticker().is_some()
-                    && position.has_market_price()
+                    && position.has_native_price()
                     && position.is_stale(),
                 value: value_dec.map(to_f64),
                 weight_percent: value_dec.map(|v| percent(v, total)),
