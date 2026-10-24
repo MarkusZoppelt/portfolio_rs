@@ -25,6 +25,36 @@ pub fn parse_error_line(err: &serde_json::Error) -> Vec<u8> {
     out
 }
 
+/// Required string parameter per method. rmcp cannot route a request that
+/// lacks it and would answer -32601 (method not found); clients expect
+/// -32602 (invalid params).
+const REQUIRED_PARAM: &[(&str, &str)] = &[("tools/call", "name"), ("resources/read", "uri")];
+
+/// `-32602` response for a request missing a required parameter, if any.
+fn missing_param_reply(line: &str) -> Option<Vec<u8>> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let id = v.get("id")?.clone();
+    let method = v.get("method")?.as_str()?;
+    let (_, param) = REQUIRED_PARAM.iter().find(|(m, _)| *m == method)?;
+    if v.get("params")
+        .and_then(|p| p.get(*param))
+        .is_some_and(|x| x.is_string())
+    {
+        return None;
+    }
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32602,
+            "message": format!("Invalid params: {method} requires a string \"{param}\"")
+        }
+    });
+    let mut out = serde_json::to_vec(&msg).expect("JSON serializes");
+    out.push(b'\n');
+    Some(out)
+}
+
 /// Classify one incoming line: `Ok(true)` forward to rmcp, `Ok(false)` skip
 /// (blank), `Err` answer with -32700.
 fn check_line(line: &str) -> Result<bool, serde_json::Error> {
@@ -96,6 +126,12 @@ where
             match check_line(&text) {
                 Ok(false) => {}
                 Ok(true) => {
+                    if let Some(reply) = missing_param_reply(&text) {
+                        if tx.send(reply).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
                     if !buf.ends_with(b"\n") {
                         buf.push(b'\n');
                     }
@@ -132,5 +168,20 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&parse_error_line(&e)).unwrap();
         assert_eq!(v["error"]["code"], -32700);
         assert!(v["id"].is_null());
+    }
+
+    #[test]
+    fn missing_tool_name_is_invalid_params() {
+        let r =
+            missing_param_reply(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{}}"#)
+                .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&r).unwrap();
+        assert_eq!(v["error"]["code"], -32602);
+        assert_eq!(v["id"], 7);
+        assert!(missing_param_reply(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#
+        )
+        .is_none());
+        assert!(missing_param_reply(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).is_none());
     }
 }
