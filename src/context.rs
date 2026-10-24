@@ -46,6 +46,37 @@ pub struct PortfolioContext {
     /// False when a position has no price or FX rate: totals cover only the
     /// priced positions and their values/weights are null.
     complete: bool,
+    cash_buffer: CashBuffer,
+}
+
+/// Cash against the policy's `minimum_cash_amount`, in the base currency.
+/// `surplus` is `actual - minimum` (negative = shortfall); `minimum` and
+/// `surplus` are null without a policy minimum.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CashBuffer {
+    pub minimum: Option<f64>,
+    pub actual: f64,
+    pub surplus: Option<f64>,
+}
+
+impl CashBuffer {
+    pub fn new(portfolio: &Portfolio, policy: Option<&Policy>) -> Self {
+        let actual: Decimal = portfolio
+            .positions
+            .iter()
+            .filter(|p| p.is_cash())
+            .map(|p| p.balance_dec())
+            .sum();
+        let minimum = policy
+            .and_then(|p| p.constraints.minimum_cash_amount)
+            .and_then(Decimal::from_f64_retain);
+        Self {
+            minimum: minimum.map(|m| to_f64(m.round_dp(2))),
+            actual: to_f64(actual.round_dp(2)),
+            surplus: minimum.map(|m| to_f64((actual - m).round_dp(2))),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -264,6 +295,7 @@ impl PortfolioContext {
             risk_flags,
             data_quality_flags,
             complete,
+            cash_buffer: CashBuffer::new(portfolio, policy),
             follow_up_commands: vec![
                 "portfolio_rs balances [JSON_FILE]".to_string(),
                 "portfolio_rs allocation [JSON_FILE]".to_string(),
@@ -307,6 +339,18 @@ impl PortfolioContext {
             money(self.summary.cash_value, &self.currency),
             pct(self.summary.cash_percent)
         ));
+        if let (Some(min), Some(surplus)) = (self.cash_buffer.minimum, self.cash_buffer.surplus) {
+            out.push_str(&format!(
+                "- Cash Buffer: minimum {}, {} {}\n",
+                money(min, &self.currency),
+                if surplus < 0.0 {
+                    "shortfall"
+                } else {
+                    "surplus"
+                },
+                money(surplus.abs(), &self.currency)
+            ));
+        }
         out.push_str(&format!(
             "- Securities: {}\n",
             money(self.summary.securities_value, &self.currency)
