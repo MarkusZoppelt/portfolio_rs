@@ -583,36 +583,6 @@ impl Portfolio {
             .draw(&data);
     }
 
-    fn flow_metrics_since(&self, start: DateTime<Utc>) -> (f64, f64, f64, f64) {
-        use crate::position::parse_purchase_date;
-        let mut invested = 0.0_f64;
-        let mut current = 0.0_f64;
-        for position in &self.positions {
-            let price_now = position.get_balance() / position.get_amount().max(1e-12);
-            for p in position.get_purchases() {
-                if let Some(date_str) = &p.date {
-                    if let Some(date) = parse_purchase_date(date_str) {
-                        if date >= start {
-                            if let Some(price) = p.price {
-                                if price > 0.0 && p.quantity > 0.0 {
-                                    invested += p.quantity * price + p.fees.unwrap_or(0.0);
-                                    current += p.quantity * price_now;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let pnl = current - invested;
-        let pct = if invested > 0.0 {
-            (pnl / invested) * 100.0
-        } else {
-            0.0
-        };
-        (invested, current, pnl, pct)
-    }
-
     pub async fn print_performance(&self) {
         let db = match sled::open("database") {
             Ok(db) => db,
@@ -650,9 +620,6 @@ impl Portfolio {
 
         // Reference points — Jan 1 and first of month are never ambiguous
         let start_year = Utc.with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0).unwrap();
-        let start_month = Utc
-            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
-            .unwrap();
 
         let current_value = self.get_total_value();
 
@@ -720,14 +687,6 @@ impl Portfolio {
         else {
             unreachable!("six periods requested")
         };
-
-        // Flow-based (our data) YTD / MTD and rolling periods
-        let (_ytd_invested, _ytd_value, _ytd_pnl, _ytd_pct) = self.flow_metrics_since(start_year);
-        let (_mtd_invested, _mtd_value, _mtd_pnl, _mtd_pct) = self.flow_metrics_since(start_month);
-        let (_w1_invested, _w1_value, _w1_pnl, _w1_pct) = self.flow_metrics_since(start_week);
-        let (_m1_invested, _m1_value, _m1_pnl, _m1_pct) = self.flow_metrics_since(start_1m_roll);
-        let (_m6_invested, _m6_value, _m6_pnl, _m6_pct) = self.flow_metrics_since(start_6m_roll);
-        let (_y1_invested, _y1_value, _y1_pnl, _y1_pct) = self.flow_metrics_since(start_1y_roll);
 
         // "Since": total (incl. cash) vs. the last stored total balance; both
         // are totals, but deposits and withdrawals in between are not accounted for.
