@@ -449,6 +449,7 @@ impl PortfolioServer {
                 encrypted: s.encrypted(),
                 has_policy,
                 is_default: true,
+                quote_source: s.quote_source.to_string(),
                 path: input.include_paths.unwrap_or(false).then(|| s.path.clone()),
             }],
         }))

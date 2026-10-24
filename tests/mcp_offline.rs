@@ -1823,3 +1823,19 @@ async fn network_status_is_shared_across_tools() {
     .await;
     assert_eq!(statuses(&client).await, vec!["offline"; 6]);
 }
+
+/// (d) list_portfolios names the quote source, without complete/dataQuality.
+#[tokio::test]
+async fn list_portfolios_reports_quote_source() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "list_portfolios", json!({})).await;
+    assert_eq!(v["portfolios"][0]["quoteSource"], "fixture");
+    assert!(v.get("complete").is_none() && v.get("dataQuality").is_none());
+    let client = connect(McpOptions {
+        quotes: Some(AnyProvider::Offline),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "list_portfolios", json!({})).await;
+    assert_eq!(v["portfolios"][0]["quoteSource"], "offline");
+}
