@@ -744,6 +744,40 @@ impl PortfolioServer {
                 .detail(json!({ "positionIds": appeared })),
             );
         }
+        // Finance B8: the purchase list must agree with what each snapshot
+        // recorded; an edit after the fact moves contributions silently.
+        let checked: Vec<&snapshots::Snapshot> = std::iter::once(&start)
+            .chain(
+                snaps
+                    .iter()
+                    .filter(|s| s.date > start.date && s.date < end.date),
+            )
+            .chain(std::iter::once(&end).filter(|_| !end_is_live))
+            .collect();
+        let mismatches = perf::ledger_mismatches(&checked, &txs);
+        if !mismatches.is_empty() {
+            meta.complete = false;
+            meta.data_status = analytics::data_status(false, has_stale).to_string();
+            let mut ids: Vec<&str> = mismatches.iter().map(|(_, id)| id.as_str()).collect();
+            ids.sort();
+            ids.dedup();
+            let mut dates: Vec<&str> = mismatches.iter().map(|(d, _)| d.as_str()).collect();
+            dates.sort();
+            dates.dedup();
+            warnings.push(
+                Finding::new(
+                    "ledger_changed",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    format!(
+                        "The purchase list of {} position(s) no longer matches what the snapshots recorded (first on {}); purchases were edited afterwards, so contributions and market effect may be wrong and the figures are partial.",
+                        ids.len(),
+                        dates[0]
+                    ),
+                )
+                .detail(json!({ "positionIds": ids, "snapshotDates": dates })),
+            );
+        }
         // Finance B7: values in different base currencies cannot be compared.
         let mut currencies: Vec<String> = std::iter::once(&start)
             .chain(

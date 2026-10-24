@@ -27,6 +27,11 @@ pub struct SnapshotPosition {
     /// null when the position had no price or FX rate that day.
     #[serde(default)]
     pub value_base: Option<f64>,
+    /// Net buys minus sells (base currency) dated on or before the snapshot
+    /// date, as the purchase list said when the snapshot was taken (Finance
+    /// B8). Lets `get_performance` notice a ledger edited afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_base: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -147,9 +152,13 @@ pub fn read(path: &Path) -> (Vec<Snapshot>, usize) {
 pub fn from_portfolio(portfolio: &Portfolio, base: &str, date: &str, stale: bool) -> Snapshot {
     let (rows, _, _) =
         analytics::position_rows(portfolio, base, true, None, super::dto::SortBy::Name);
+    let txs = analytics::transactions(portfolio, base, None);
     let positions: Vec<SnapshotPosition> = rows
         .into_iter()
         .map(|r| SnapshotPosition {
+            ledger_base: (r.kind != "cash")
+                .then(|| super::performance::ledger_to_date(&txs, &r.id, date, r.fx_rate))
+                .flatten(),
             position_id: r.id,
             kind: r.kind,
             asset_class: r.asset_class,
