@@ -33,7 +33,8 @@
             filter = path: type:
               (craneLib.filterCargoSources path type)
               || (pkgs.lib.hasSuffix ".json" path)
-              || (pkgs.lib.hasSuffix ".md" path);
+              || (pkgs.lib.hasSuffix ".md" path)
+              || (pkgs.lib.hasSuffix ".snap" path);
           };
           strictDeps = true;
 
