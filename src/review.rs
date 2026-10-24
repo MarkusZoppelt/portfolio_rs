@@ -298,7 +298,9 @@ fn check_constraints(
             .iter()
             .filter(|p| p.is_cash())
             .map(|p| p.market_value())
-            .sum();
+            .sum::<f64>()
+            // An empty f64 sum is -0.0, which would print as "-0.00".
+            + 0.0;
 
         let passed = cash_value >= min_cash_amount;
         checks.push(ConstraintCheck {
@@ -442,6 +444,15 @@ mod tests {
 
         assert_eq!(review.portfolio_value, 0.0);
         assert!(!review.findings.is_empty());
+    }
+
+    #[test]
+    fn test_cash_buffer_without_cash_is_not_negative_zero() {
+        let review =
+            Review::from_portfolio_and_policy(&Portfolio::new(), &create_test_policy(), "EUR");
+        let md = review.to_markdown();
+        assert!(md.contains("Cash buffer: 0.00 EUR"), "{md}");
+        assert!(!md.contains("-0.00"), "{md}");
     }
 
     #[test]
