@@ -1,8 +1,8 @@
 use crate::create_live_portfolio;
 use crate::error::ValidationError;
-use crate::money::{percent_change, percent_of, to_f64, Decimal};
+use crate::money::{percent_of, to_f64, Decimal};
 use crate::portfolio::Portfolio;
-use crate::position::{PortfolioPosition, Purchase};
+use crate::position::Purchase;
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::services::portfolio_loader::create_live_portfolio_with_logging;
 
@@ -2553,8 +2553,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             total_cells.push(Cell::from(""));
         }
         if !app.disabled_components.is_disabled(Component::Invested) {
-            // Sum invested where available
-            let invested_sum = to_f64(invested_sum_dec(portfolio));
+            let invested_sum = to_f64(portfolio.cost_basis_totals_dec().0);
             total_cells.push(Cell::from(format!("{invested_sum:.2}")));
         }
         if !app.disabled_components.is_disabled(Component::Balance) {
@@ -2567,9 +2566,8 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::PnL) {
-            // Securities-only PnL: exclude cash from value side
-            let pnl_total =
-                to_f64(portfolio.value_breakdown().securities - invested_sum_dec(portfolio));
+            // Same scope as the CLI and API: priced securities with a cost basis.
+            let pnl_total = to_f64(portfolio.cost_basis_totals_dec().1);
             let color = if pnl_total >= 0.0 {
                 Color::Green
             } else {
@@ -2581,12 +2579,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         if !app.disabled_components.is_disabled(Component::Hist) {
-            let hist_pct = percent_change(
-                portfolio.value_breakdown().securities,
-                invested_sum_dec(portfolio),
-            )
-            .map(to_f64)
-            .unwrap_or(0.0);
+            let hist_pct = portfolio.hist_percent();
             let color = if hist_pct >= 0.0 {
                 Color::Green
             } else {
@@ -2902,15 +2895,4 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
         .style(Style::default().fg(Color::White));
 
     f.render_widget(list, area);
-}
-
-/// Invested amount summed over every position with a cost basis (the TUI
-/// totals row; unlike `Portfolio::cost_basis_totals` it does not skip cash or
-/// unpriced holdings).
-fn invested_sum_dec(portfolio: &Portfolio) -> Decimal {
-    portfolio
-        .positions
-        .iter()
-        .filter_map(PortfolioPosition::total_invested_dec)
-        .sum()
 }

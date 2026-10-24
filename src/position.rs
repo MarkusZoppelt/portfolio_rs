@@ -283,33 +283,40 @@ impl PortfolioPosition {
         self.average_cost_dec().map(to_f64)
     }
 
-    /// Purchases with a positive price, as `(quantity, cost incl. fees)`.
-    fn priced_purchases(&self) -> impl Iterator<Item = (Decimal, Decimal)> + '_ {
-        self.purchases
+    /// True when there are purchases and every buy (positive quantity) has a
+    /// positive recorded or estimated price. Without that, cost basis and PnL
+    /// are unknown rather than partial.
+    pub fn has_complete_cost_basis(&self) -> bool {
+        let mut buys = self
+            .purchases
             .iter()
-            .filter_map(|p| p.effective_price().map(|price| (price, p)))
-            .filter(|(price, _)| *price > Decimal::ZERO)
-            .map(|(price, p)| {
-                let quantity = p.quantity;
-                (quantity, quantity * price + p.fees.unwrap_or(Decimal::ZERO))
+            .filter(|p| p.quantity > Decimal::ZERO)
+            .peekable();
+        buys.peek().is_some()
+            && buys.all(|p| {
+                p.effective_price()
+                    .is_some_and(|price| price > Decimal::ZERO)
             })
     }
 
-    /// [`Self::average_cost`] as a [`Decimal`].
+    /// [`Self::average_cost`] as a [`Decimal`]: buy cost (incl. fees) over
+    /// bought quantity. Sells (negative quantities) leave it unchanged.
     pub fn average_cost_dec(&self) -> Option<Decimal> {
-        if self.purchases.is_empty() {
+        if !self.has_complete_cost_basis() {
             return None;
         }
         let (quantity, cost) = self
-            .priced_purchases()
-            .fold((Decimal::ZERO, Decimal::ZERO), |(q, c), (pq, pc)| {
-                (q + pq, c + pc)
+            .purchases
+            .iter()
+            .filter(|p| p.quantity > Decimal::ZERO)
+            .fold((Decimal::ZERO, Decimal::ZERO), |(q, c), p| {
+                let price = p.effective_price().unwrap_or(Decimal::ZERO);
+                (
+                    q + p.quantity,
+                    c + p.quantity * price + p.fees.unwrap_or(Decimal::ZERO),
+                )
             });
-        if quantity > Decimal::ZERO {
-            div(cost, quantity)
-        } else {
-            None
-        }
+        div(cost, quantity)
     }
 
     /// Total invested amount in the base currency.
@@ -321,16 +328,11 @@ impl PortfolioPosition {
         self.total_invested_dec().map(to_f64)
     }
 
-    /// [`Self::total_invested`] as a [`Decimal`].
+    /// [`Self::total_invested`] as a [`Decimal`]: cost basis of the held
+    /// quantity, with sells taken out at average cost. `None` when any buy
+    /// lacks a price (see [`Self::has_complete_cost_basis`]).
     pub fn total_invested_dec(&self) -> Option<Decimal> {
-        if self.purchases.is_empty() {
-            return None;
-        }
-        let invested = self
-            .priced_purchases()
-            .map(|(_, cost)| cost)
-            .sum::<Decimal>()
-            * self.fx_factor_dec();
+        let invested = self.average_cost_dec()? * self.quantity_dec() * self.fx_factor_dec();
         (invested > Decimal::ZERO).then_some(invested)
     }
 
@@ -1016,5 +1018,44 @@ mod tests {
         assert_eq!(p["Purchases"][0]["Fees"], serde_json::json!(0.3));
         assert_eq!(p["Purchases"][1]["Quantity"], serde_json::json!(2.0));
         assert!(p["Purchases"][1]["Price"].is_null());
+    }
+
+    fn buy(quantity: f64, price: Option<f64>) -> Purchase {
+        Purchase {
+            quantity: dec(quantity),
+            price: price.map(dec),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_unpriced_buy_makes_cost_basis_unknown() {
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 3.0, 50.0, PriceStatus::Live);
+        position.purchases = vec![buy(2.0, Some(10.0)), buy(1.0, None)];
+        // Value counts all 3 units; a partial cost basis would overstate PnL.
+        assert_eq!(position.get_balance(), 150.0);
+        assert!(!position.has_complete_cost_basis());
+        assert_eq!(position.total_invested(), None);
+        assert_eq!(position.pnl(), None);
+        assert_eq!(position.average_cost(), None);
+    }
+
+    #[test]
+    fn test_sells_reduce_cost_basis_at_average_cost() {
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 3.0, 50.0, PriceStatus::Live);
+        // Buy 2 @ 10, buy 2 @ 20 (avg 15), sell 1 @ 99 (price irrelevant).
+        position.purchases = vec![
+            buy(2.0, Some(10.0)),
+            buy(2.0, Some(20.0)),
+            buy(-1.0, Some(99.0)),
+        ];
+        assert_eq!(position.average_cost(), Some(15.0));
+        assert_eq!(position.total_invested(), Some(45.0));
+        assert_eq!(position.pnl(), Some(105.0));
+        // A sell without a price does not make the basis unknown.
+        position.purchases[2].price = None;
+        assert_eq!(position.total_invested(), Some(45.0));
     }
 }
