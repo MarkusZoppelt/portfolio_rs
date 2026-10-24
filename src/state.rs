@@ -404,7 +404,7 @@ impl AppState {
             ticker: req.ticker,
             asset_class: req.asset_class,
             amount: req.amount,
-            last_spot: 0.0,
+            last_spot: Decimal::ZERO,
             price_status: crate::position::PriceStatus::Live,
             price_currency: None,
             fx_rate: None,
