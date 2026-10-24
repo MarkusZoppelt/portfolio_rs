@@ -2014,24 +2014,30 @@ async fn opening_deposit_is_dated_and_filterable() {
     assert_eq!(v["transactions"][0]["date"], today);
 }
 
-/// Item 10: get_transactions is incomplete when matching amountBase values are
-/// null (no historic FX), and complete when every base amount is known.
+/// Item 10 / retest A3: `complete` describes current values only; missing
+/// historic FX is counted in fxHistoricMissing and warned about.
 #[tokio::test]
-async fn transactions_complete_reflects_base_amounts() {
+async fn transactions_complete_reflects_current_values_only() {
     let client = connect(opts()).await;
     let v = ok(&client, "get_transactions", json!({})).await;
-    assert_eq!(v["complete"], false);
+    assert_eq!(v["complete"], true, "{v}");
     assert!(v["totals"]["buyAmountBase"].is_null());
+    let n = v["fxHistoricMissing"].as_u64().unwrap();
+    assert!(n > 0);
     let w = v["warnings"]
         .as_array()
         .unwrap()
         .iter()
         .find(|w| w["code"] == "fx_historic_unavailable")
         .unwrap();
+    assert_eq!(w["severity"], "warning");
+    assert_eq!(w["detail"]["fxHistoricMissing"].as_u64().unwrap(), n);
     assert!(!w["detail"]["positionIds"].as_array().unwrap().is_empty());
     let v = ok(&client, "get_transactions", json!({"types": ["deposit"]})).await;
     assert_eq!(v["complete"], true, "{v}");
+    assert_eq!(v["fxHistoricMissing"], 0);
     assert!(v["totals"]["depositAmountBase"].is_number());
+    assert!(!codes(&v["warnings"]).contains(&"fx_historic_unavailable".to_string()));
 }
 
 /// t9 nofx / item 7: without FX the native quote stays (price, priceCurrency,
