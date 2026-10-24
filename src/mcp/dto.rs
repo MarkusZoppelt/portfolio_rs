@@ -584,6 +584,8 @@ pub struct PortfolioEntry {
     pub encrypted: bool,
     pub has_policy: bool,
     pub is_default: bool,
+    /// Where quotes come from: yahoo | offline | fixture.
+    pub quote_source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
