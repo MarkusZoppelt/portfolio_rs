@@ -3357,3 +3357,48 @@ async fn sell_without_price_uses_historic_close() {
     );
     client.cancel().await.unwrap();
 }
+
+/// Finance N2/N3: implausible snapshot lines (a negative valueBase, a
+/// totalBase that is not the sum of the positions) are skipped, and every
+/// skipped line names its real reason.
+#[tokio::test]
+async fn implausible_snapshot_lines_are_skipped_with_reasons() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_history(tmp.path(), &[-7]).await;
+    let mut null_total = today.clone();
+    null_total["date"] = json!(day(-4));
+    null_total["totalBase"] = Value::Null;
+    let mut negative = today.clone();
+    negative["date"] = json!(day(-3));
+    negative["positions"][0]["valueBase"] = json!(-1.0);
+    let mut mismatch = today.clone();
+    mismatch["date"] = json!(day(-2));
+    mismatch["totalBase"] = json!(today["totalBase"].as_f64().unwrap() + 100.0);
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&format!("{null_total}\n{negative}\n{mismatch}\n"));
+    std::fs::write(&path, text).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "week"})).await;
+    assert_eq!(v["dataCoverage"]["skippedLines"], 3, "{v}");
+    assert_eq!(v["dataCoverage"]["startPointDate"], day(-7), "{v}");
+    let w = has_code(&v, "snapshot_lines_skipped").expect("skipped warning");
+    let reasons: Vec<&str> = w["detail"]["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["total_base_null", "negative_value", "total_mismatch"],
+        "{w}"
+    );
+    let msg = w["message"].as_str().unwrap();
+    assert!(!msg.contains("bad JSON"), "{msg}");
+    assert!(msg.contains("total base null"), "{msg}");
+    client.cancel().await.unwrap();
+}

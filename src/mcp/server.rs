@@ -645,8 +645,38 @@ impl PortfolioServer {
             start_point_date: start.as_ref().map(|s| s.date.clone()),
             end_point_date: end.as_ref().map(|s| s.date.clone()),
             end_is_live,
-            skipped_lines: skipped,
+            skipped_lines: skipped.len(),
         };
+        // Finance N2/N3: name why each line was left out.
+        if !skipped.is_empty() {
+            let mut reasons: std::collections::BTreeMap<&str, usize> = Default::default();
+            for b in &skipped {
+                *reasons.entry(b.reason).or_default() += 1;
+            }
+            let summary = reasons
+                .iter()
+                .map(|(r, n)| format!("{n} {}", r.replace('_', " ")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let lines: Vec<serde_json::Value> = skipped
+                .iter()
+                .map(|b| json!({ "line": b.line, "reason": b.reason, "date": b.date }))
+                .collect();
+            warnings.push(
+                Finding::new(
+                    "snapshot_lines_skipped",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    format!(
+                        "{} snapshot line(s) were skipped ({summary}); the start point ({}) may be older than intended.",
+                        skipped.len(),
+                        coverage.start_point_date.as_deref().unwrap_or("none")
+                    ),
+                )
+                .detail(json!({ "skippedLines": skipped.len(), "reasons": reasons, "lines": lines,
+                                "startPointDate": coverage.start_point_date })),
+            );
+        }
         let mut out = PerformanceOutput {
             meta: self.meta(&portfolio, Vec::new()).await,
             period: serde_json::to_value(input.period)
@@ -840,20 +870,6 @@ impl PortfolioServer {
         out.market_effect = Some(perf::r2(t.market_effect));
         out.income_effect = Some(0.0);
         out.manual_revaluation = Some(perf::r2(t.manual_revaluation));
-        if skipped > 0 {
-            warnings.push(
-                Finding::new(
-                    "snapshot_lines_skipped",
-                    Severity::Warning,
-                    Category::DataQuality,
-                    format!(
-                        "{skipped} snapshot line(s) were skipped (bad JSON or a date not in YYYY-MM-DD form); the start point ({}) may be older than intended.",
-                        start.date
-                    ),
-                )
-                .detail(json!({ "skippedLines": skipped, "startPointDate": start.date })),
-            );
-        }
         let mut points = vec![start.clone()];
         points.extend(
             snaps

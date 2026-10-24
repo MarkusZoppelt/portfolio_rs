@@ -117,24 +117,68 @@ pub enum Upsert {
     KeptComplete,
 }
 
-/// Snapshots sorted by date (one per day, the last line wins) and the
-/// number of skipped lines (unparseable JSON or a non-strict date).
-pub fn read(path: &Path) -> (Vec<Snapshot>, usize) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return (Vec::new(), 0);
-    };
-    let mut bad = 0;
-    let mut out: Vec<Snapshot> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| match serde_json::from_str::<Snapshot>(l) {
-            Ok(s) if strict_date(&s.date).is_some() => Some(s),
-            _ => {
-                bad += 1;
-                None
+/// A snapshot line left out by [`read`], with the reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkippedLine {
+    /// 1-based line number in snapshots.jsonl.
+    pub line: usize,
+    /// bad_json | bad_date | total_base_null | incomplete_line |
+    /// negative_value | total_mismatch
+    pub reason: &'static str,
+    /// The line's date when it could be read.
+    pub date: Option<String>,
+}
+
+/// Largest accepted gap between `totalBase` and the sum of the positions'
+/// `valueBase` (rounding to cents per position).
+pub const TOTAL_TOLERANCE: f64 = 0.05;
+
+/// Parse every line; lines that are not a snapshot with a strict date are
+/// returned as skipped. No plausibility checks (see [`validate`]).
+fn parse(text: &str) -> (Vec<(usize, Snapshot)>, Vec<SkippedLine>) {
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    for (i, l) in text.lines().enumerate() {
+        if l.trim().is_empty() {
+            continue;
+        }
+        let line = i + 1;
+        let skip = |reason, date: Option<String>| SkippedLine { line, reason, date };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else {
+            bad.push(skip("bad_json", None));
+            continue;
+        };
+        let date = v.get("date").and_then(|d| d.as_str()).map(String::from);
+        match serde_json::from_value::<Snapshot>(v.clone()) {
+            Ok(s) if strict_date(&s.date).is_some() => ok.push((line, s)),
+            Ok(_) => bad.push(skip("bad_date", date)),
+            Err(_) if v.get("totalBase").is_some_and(|t| t.is_null()) => {
+                bad.push(skip("total_base_null", date))
             }
-        })
-        .collect();
+            Err(_) if date.as_deref().and_then(strict_date).is_none() => {
+                bad.push(skip("bad_date", date))
+            }
+            Err(_) => bad.push(skip("incomplete_line", date)),
+        }
+    }
+    (ok, bad)
+}
+
+/// Why a parsed snapshot is implausible (Finance N2): a negative position
+/// value, or a `totalBase` that is not the sum of the position values.
+pub fn validate(s: &Snapshot) -> Option<&'static str> {
+    if s.positions
+        .iter()
+        .any(|p| p.value_base.is_some_and(|v| v < 0.0 || !v.is_finite()))
+        || !s.total_base.is_finite()
+    {
+        return Some("negative_value");
+    }
+    let sum: f64 = s.positions.iter().filter_map(|p| p.value_base).sum();
+    ((s.total_base - sum).abs() > TOTAL_TOLERANCE).then_some("total_mismatch")
+}
+
+fn sort_dedup(mut out: Vec<Snapshot>) -> Vec<Snapshot> {
     out.sort_by(|a, b| a.date.cmp(&b.date));
     out.dedup_by(|b, a| {
         // Keep the later line for a date (it replaced the earlier one).
@@ -145,7 +189,30 @@ pub fn read(path: &Path) -> (Vec<Snapshot>, usize) {
             false
         }
     });
-    (out, bad)
+    out
+}
+
+/// Snapshots sorted by date (one per day, the last line wins) and the
+/// skipped lines: unreadable (bad JSON, a missing field such as a null
+/// `totalBase`, a non-strict date) or implausible ([`validate`]).
+pub fn read(path: &Path) -> (Vec<Snapshot>, Vec<SkippedLine>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (Vec::new(), Vec::new());
+    };
+    let (parsed, mut bad) = parse(&text);
+    let mut out = Vec::new();
+    for (line, s) in parsed {
+        match validate(&s) {
+            Some(reason) => bad.push(SkippedLine {
+                line,
+                reason,
+                date: Some(s.date.clone()),
+            }),
+            None => out.push(s),
+        }
+    }
+    bad.sort_by_key(|b| b.line);
+    (sort_dedup(out), bad)
 }
 
 /// Build today's (or `date`'s) snapshot from a valued portfolio.
@@ -238,7 +305,12 @@ pub fn upsert(path: &Path, snap: &Snapshot) -> Result<Upsert> {
             let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
         }
     }
-    let (mut all, _) = read(path);
+    // Keep implausible lines as they are (they are only skipped on read).
+    let mut all = sort_dedup(
+        std::fs::read_to_string(path)
+            .map(|t| parse(&t).0.into_iter().map(|(_, s)| s).collect())
+            .unwrap_or_default(),
+    );
     if !snap.complete && all.iter().any(|s| s.date == snap.date && s.complete) {
         return Ok(Upsert::KeptComplete);
     }
@@ -283,8 +355,18 @@ mod tests {
         Snapshot {
             date: date.into(),
             base_currency: "EUR".into(),
-            positions: vec![],
-            cash_base: 0.0,
+            positions: vec![SnapshotPosition {
+                position_id: "pos_cash".into(),
+                kind: "cash".into(),
+                asset_class: "Cash".into(),
+                quantity: total,
+                price: None,
+                price_currency: None,
+                fx_rate: None,
+                value_base: Some(total),
+                ledger_base: None,
+            }],
+            cash_base: total,
             total_base: total,
             net_flows_base: 0.0,
             complete: true,
@@ -332,8 +414,23 @@ mod tests {
         text.push_str(&format!("{loose}\nnot json\n"));
         std::fs::write(&path, text).unwrap();
         let (all, bad) = read(&path);
-        assert_eq!(bad, 2);
+        assert_eq!(bad.len(), 2);
+        assert_eq!(bad[0].reason, "bad_date");
+        assert_eq!(bad[1].reason, "bad_json");
         assert_eq!(all.len(), 1);
+    }
+
+    /// Finance N2: negative values and a total off the positions' sum.
+    #[test]
+    fn validate_flags_implausible_snapshots() {
+        let mut s = snap("2026-01-01", 10.0);
+        assert_eq!(validate(&s), None);
+        s.total_base = 10.04;
+        assert_eq!(validate(&s), None);
+        s.total_base = 11.0;
+        assert_eq!(validate(&s), Some("total_mismatch"));
+        s.positions[0].value_base = Some(-11.0);
+        assert_eq!(validate(&s), Some("negative_value"));
     }
 
     /// Finance B4: an incomplete snapshot never replaces a complete one.
@@ -361,6 +458,7 @@ mod tests {
         p2.date = "2026-01-03".into();
         upsert(&path, &p2).unwrap();
         p2.total_base = 0.7;
+        p2.positions[0].value_base = Some(0.7);
         assert_eq!(upsert(&path, &p2).unwrap(), Upsert::Written);
         let (all, _) = read(&path);
         assert_eq!(
@@ -377,7 +475,7 @@ mod tests {
         upsert(&path, &snap("2026-01-01", 2.0)).unwrap();
         upsert(&path, &snap("2026-01-02", 3.0)).unwrap();
         let (all, bad) = read(&path);
-        assert_eq!(bad, 0);
+        assert!(bad.is_empty());
         assert_eq!(
             all.iter().map(|s| s.total_base).collect::<Vec<_>>(),
             vec![2.0, 3.0]
