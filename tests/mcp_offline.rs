@@ -1546,9 +1546,15 @@ async fn protocol_edges_from_finance_low_items() {
     // Prompts are not advertised, so prompts/list is not served.
     assert!(client.list_prompts(None).await.is_err());
     client.cancel().await.unwrap();
+}
 
+/// Loading with Yahoo fetches quotes, so this one needs the network.
+#[tokio::test]
+#[ignore = "requires network access to Yahoo Finance"]
+async fn live_provider_is_open_world() {
     // A live quote provider is open-world for the tools that price positions.
     let mut live = opts();
+    live.cache = portfolio_rs::mcp::CacheMode::Off;
     live.quotes = Some(AnyProvider::Yahoo);
     let client = connect(live).await;
     for tool in client.list_all_tools().await.unwrap() {
@@ -1676,4 +1682,107 @@ async fn get_transactions_cash_is_a_deposit_and_fees_are_never_mixed_null_zero()
         .iter()
         .all(|t| t["type"] == "buy"));
     client.cancel().await.unwrap();
+}
+
+/// t-cache: a successful fetch fills `.<datafile>.quotes-cache.json` (0600,
+/// data file untouched); a failed fetch falls back to it as stale; the max age
+/// and `--no-cache` are honoured.
+#[tokio::test]
+async fn last_known_price_cache_fills_and_falls_back() {
+    use portfolio_rs::mcp::CacheMode;
+    let (_tmp, dir) = workspace();
+    let data = dir.join("positions.json");
+    let before = std::fs::read(&data).unwrap();
+    let ws = |quotes: AnyProvider, cache: CacheMode, max_age: Option<i64>| McpOptions {
+        workspace: Some(dir.to_string_lossy().into_owned()),
+        currency: "EUR".into(),
+        quotes: Some(quotes),
+        cache,
+        cache_max_age_days: max_age,
+        ..Default::default()
+    };
+
+    // Live (fixture) fetch writes the cache.
+    let client = connect(ws(fixture(), CacheMode::On, None)).await;
+    let live = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(live["hasStale"], false);
+    assert_eq!(live["stalePositions"], json!([]));
+    assert_eq!(live["priceAsOf"], "2026-01-02T21:00:00Z");
+    assert_eq!(
+        by_ticker(&live["positions"], "SPY")["priceSource"],
+        "fixture"
+    );
+    assert_eq!(by_ticker(&live["positions"], "SPY")["isStale"], false);
+    let cash = live["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "cash")
+        .unwrap();
+    assert_eq!(cash["priceSource"], "none");
+    let cache = dir.join(".positions.json.quotes-cache.json");
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(file["version"], 1);
+    assert_eq!(file["quotes"]["SPY"]["price"], 500.0);
+    assert_eq!(file["quotes"]["SPY"]["previousClose"], 495.0);
+    assert_eq!(file["quotes"]["SPY"]["currency"], "USD");
+    assert_eq!(file["quotes"]["SPY"]["asOf"], "2026-01-02T21:00:00Z");
+    assert!(file["fx"]["EURUSD=X"]["price"].is_number());
+    assert!(file["quotes"]["SPY"].get("quantity").is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&cache).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert_eq!(std::fs::read(&data).unwrap(), before, "data file untouched");
+    drop(client);
+
+    // Offline: every price from the cache, stale; SPY's asOf is older than the
+    // default 7 days, so it does not count.
+    let client = connect(ws(AnyProvider::Offline, CacheMode::Auto, None)).await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let tlt = by_ticker(&v["positions"], "TLT");
+    assert_eq!(tlt["priceSource"], "cache");
+    assert_eq!(tlt["isStale"], true);
+    assert_eq!(tlt["priceStatus"], "stale");
+    assert_eq!(tlt["price"], 90.0);
+    assert!(tlt["priceAsOf"].is_string());
+    assert!(tlt["dayChangePercent"].is_number(), "cached previous close");
+    assert!(by_ticker(&v["positions"], "SPY")["price"].is_null());
+    assert_eq!(by_ticker(&v["positions"], "SPY")["priceSource"], "none");
+    assert_eq!(v["complete"], false);
+    assert_eq!(v["hasStale"], true);
+    assert_eq!(v["networkStatus"], "offline");
+    drop(client);
+
+    // A longer max age lets SPY count again: complete, every price stale.
+    let client = connect(ws(AnyProvider::Offline, CacheMode::Auto, Some(3650))).await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["complete"], true, "{}", v["dataQuality"]);
+    assert_eq!(v["hasStale"], true);
+    assert_eq!(v["totalValue"], live["totalValue"]);
+    assert_eq!(v["priceAsOf"], "2026-01-02T21:00:00Z");
+    let market = v["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["kind"] == "market")
+        .count();
+    assert_eq!(v["stalePositions"].as_array().unwrap().len(), market);
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    let text = ctx.to_string();
+    assert!(text.contains("\"isStale\":true"), "{text}");
+    assert!(text.contains("\"priceAsOf\":\"2026-01-02T21:00:00Z\""));
+    drop(client);
+    // Offline never writes.
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(after, file);
+
+    // --no-cache: nothing from the cache.
+    let client = connect(ws(AnyProvider::Offline, CacheMode::Off, Some(3650))).await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert!(by_ticker(&v["positions"], "TLT")["price"].is_null());
+    assert_eq!(v["hasStale"], false);
+    assert_eq!(std::fs::read(&data).unwrap(), before, "data file untouched");
 }

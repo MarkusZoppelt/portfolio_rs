@@ -29,8 +29,12 @@ pub struct WorkspaceHealth {
 }
 
 /// `.gitignore` patterns that must cover backups, temp files and the database.
-pub const PRIVATE_ARTIFACT_PATTERNS: [&str; 3] =
-    ["positions.json.bak", ".positions.json.tmp-*", "database/"];
+pub const PRIVATE_ARTIFACT_PATTERNS: [&str; 4] = [
+    "positions.json.bak",
+    ".positions.json.tmp-*",
+    ".positions.json.quotes-cache.json",
+    "database/",
+];
 
 /// Warn when private artifacts are not ignored, or are already tracked by git.
 fn private_artifacts_check(dir: &Path) -> (HealthStatus, String) {
@@ -77,6 +81,7 @@ fn tracked_private_artifacts(dir: &Path) -> Vec<String> {
             "positions.json",
             "positions.json.bak",
             ".positions.json.tmp-*",
+            ".positions.json.quotes-cache.json",
             "database",
         ])
         .stderr(std::process::Stdio::null())

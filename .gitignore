@@ -6,3 +6,4 @@ database/
 positions.json
 positions.json.bak
 .positions.json.tmp-*
+.*.quotes-cache.json

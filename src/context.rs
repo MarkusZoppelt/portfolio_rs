@@ -111,6 +111,10 @@ struct PositionContext {
     /// Latest price in `priceCurrency` (the quote currency, not the base).
     price: Option<f64>,
     price_currency: Option<String>,
+    /// Provider timestamp of `price` (RFC 3339); null when not reported.
+    price_as_of: Option<String>,
+    /// True when the price or its FX rate came from the last-known-price cache.
+    is_stale: bool,
     /// Base-currency value; null when the price or FX rate is unknown.
     value: Option<f64>,
     weight_percent: Option<f64>,
@@ -180,6 +184,15 @@ impl PortfolioContext {
                 ));
             }
 
+            if position.get_ticker().is_some() && position.has_market_price() && position.is_stale()
+            {
+                data_quality_flags.push(format!(
+                    "Price for {} is the last known value from the quote cache (as of {}).",
+                    position.get_name(),
+                    position.price_as_of().unwrap_or("unknown")
+                ));
+            }
+
             if position.price_status() == PriceStatus::FxUnavailable {
                 data_quality_flags.push(format!(
                     "No FX rate from {} to the base currency for {}; position excluded from totals and invested unknown.",
@@ -209,6 +222,12 @@ impl PortfolioContext {
                 } else {
                     None
                 },
+                price_as_of: (position.get_ticker().is_some() && position.has_market_price())
+                    .then(|| position.price_as_of().map(String::from))
+                    .flatten(),
+                is_stale: position.get_ticker().is_some()
+                    && position.has_market_price()
+                    && position.is_stale(),
                 value: value_dec.map(to_f64),
                 weight_percent: value_dec.map(|v| percent(v, total)),
                 average_cost: position.average_cost(),

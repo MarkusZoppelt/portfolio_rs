@@ -15,6 +15,7 @@ const GITIGNORE_TEMPLATE: &str = r"# Private financial data — never commit the
 positions.json
 positions.json.bak
 .positions.json.tmp-*
+.positions.json.quotes-cache.json
 database/
 /portfolio/diary/
 /portfolio/decisions/

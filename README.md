@@ -129,8 +129,9 @@ JSON-RPC `-32700` parse error (`id: null`) and the server keeps serving; a
 `tools/call` without a `name` gets `-32602`. Wrong argument types and unknown
 fields are tool errors with code `invalid_argument`. Only tools and resources
 are served (no prompts). With `--offline` or a quote fixture every tool reports
-`openWorldHint: false`. It never writes your files or the
-app config, and it has no network listener.
+`openWorldHint: false`. It never writes your positions file or the
+app config (the only file it writes is the quote cache below), and it has no
+network listener.
 
     portfolio_rs mcp example_data.json                    # one positions file
     portfolio_rs mcp example_data.json --policy policy.toml
@@ -140,6 +141,27 @@ app config, and it has no network listener.
 With no FILE or `--workspace`, it serves the configured workspace (if the last
 mode was workspace) or the configured portfolio file. `--policy` has no
 default, so nothing is picked up from the current directory.
+
+### Last-known-price cache
+
+Every successful quote fetch is stored in `.<datafile>.quotes-cache.json` next
+to the positions file (e.g. `.positions.json.quotes-cache.json`), written
+atomically with mode `0600`. It holds, per symbol, the price, previous close,
+currency, `asOf` and `fetchedAt`, plus the FX pairs (`EURUSD=X`, ...) in a
+separate `fx` map; no quantities or other portfolio data. When a fetch fails,
+the cached value is used if it is younger than the max age (default 7 days,
+measured from `asOf`): the position gets `priceSource: "cache"`,
+`isStale: true`, `priceStatus: "stale"` and the cached `priceAsOf`. Stale prices
+count toward `complete`; every response adds `hasStale`, `stalePositions` and
+`priceAsOf` (the oldest price used).
+
+    portfolio_rs mcp --cache-max-age 3 example_data.json   # days, 0 disables fallback
+    portfolio_rs mcp --no-cache example_data.json          # neither read nor write
+    portfolio_rs mcp --offline example_data.json           # read the cache, never fetch
+
+Quote fixtures do not use the cache, and encrypted (`.gpg`) files never get one,
+so no plaintext ticker list ends up next to an encrypted portfolio. The cache
+pattern is in the workspace `.gitignore` template and checked by `doctor`.
 
 ### Client configuration
 
@@ -175,7 +197,10 @@ Missing quotes or FX rates are never hidden: every response carries
 Totals then cover only priced positions; a class with an unpriced position has
 a `null` value, targeted classes get status `unknown`, `amountToTarget` and
 drift findings are suppressed, and `check_policy` adds `checks_incomplete`.
-`networkStatus` is `connected`, `partial` or `offline`.
+`networkStatus` is `connected` (every market position has a fresh quote and FX
+rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
+fresh quotes; cached prices do not count as connected). Each position row
+carries `priceSource` (`live`, `cache`, `fixture` or `none`) and `isStale`.
 
 The policy's `single_position_limit_percent` applies to non-cash positions
 only, identically in `portfolio_rs review`, `check_policy` and the

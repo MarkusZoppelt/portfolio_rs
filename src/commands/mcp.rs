@@ -28,6 +28,12 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
         offline: matches.get_flag("offline"),
         currency: cfg.currency.clone(),
         quotes: None,
+        cache: if matches.get_flag("no-cache") {
+            crate::mcp::CacheMode::Off
+        } else {
+            crate::mcp::CacheMode::Auto
+        },
+        cache_max_age_days: matches.get_one::<i64>("cache-max-age").copied(),
     })
     .await
 }
