@@ -40,7 +40,7 @@ pub fn write_dated_document(
         std::fs::create_dir_all(parent)
             .wrap_err_with(|| format!("failed to create directory: {}", parent.display()))?;
     }
-    std::fs::write(file_path, content)
+    crate::services::atomic_write::write_new_private(file_path, content.as_bytes())
         .wrap_err_with(|| format!("failed to write {}: {}", kind, file_path.display()))?;
 
     Ok(())

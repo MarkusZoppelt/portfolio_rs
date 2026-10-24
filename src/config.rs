@@ -7,7 +7,7 @@
 
 use eyre::{eyre, Result, WrapErr};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use crate::theme::ThemeMode;
 
@@ -17,6 +17,18 @@ const CURRENT_CONFIG_VERSION: u32 = 1;
 
 /// Placeholder default from the legacy config. We treat it as unset.
 const LEGACY_PLACEHOLDER_FILE: &str = "/home/Joe/portfolio.json";
+
+/// Write `cfg` to `path` with owner-only permissions on unix.
+fn store_private(path: &Path, cfg: &AppConfig) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        confy::store_path_perms(path, cfg, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    confy::store_path(path, cfg)?;
+    Ok(())
+}
 
 /// Legacy configuration shape before versioned `AppConfig`.
 #[derive(Debug, Serialize, Deserialize)]
@@ -102,8 +114,25 @@ pub fn configured_base_currency() -> String {
 
 impl AppConfig {
     /// Load the config from disk, migrating from older formats if needed.
+    ///
+    /// A missing file is created with defaults. A file that exists but cannot
+    /// be parsed (as the current or the legacy format) is an error and is left
+    /// untouched, so settings such as `llm_api_key` are never wiped.
     pub fn load() -> Result<Self> {
-        match confy::load::<AppConfig>(APP_NAME, CONFIG_NAME) {
+        let path = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME)
+            .wrap_err("failed to get configuration file path")?;
+        Self::load_from(&path)
+    }
+
+    /// [`AppConfig::load`] for an explicit path.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            let cfg = AppConfig::default();
+            cfg.save_to(path)?;
+            return Ok(cfg);
+        }
+
+        let current_err = match confy::load_path::<AppConfig>(path) {
             Ok(mut cfg) => {
                 let mut dirty = false;
 
@@ -124,37 +153,75 @@ impl AppConfig {
                 cfg.version = CURRENT_CONFIG_VERSION;
 
                 if dirty {
-                    cfg.save()?;
+                    cfg.save_to(path)?;
                 }
 
-                Ok(cfg)
+                return Ok(cfg);
             }
-            Err(_) => {
-                // Try to load a legacy config and migrate it.
-                if let Ok(legacy) = confy::load::<LegacyConfig>(APP_NAME, CONFIG_NAME) {
-                    let mut cfg = AppConfig::default();
-                    cfg.set_currency(legacy.currency);
-                    if !legacy.portfolio_file.is_empty()
-                        && legacy.portfolio_file != LEGACY_PLACEHOLDER_FILE
-                    {
-                        cfg.portfolio_file = Some(legacy.portfolio_file);
-                    }
-                    cfg.save()?;
-                    return Ok(cfg);
-                }
+            Err(err) => err,
+        };
 
-                // Last resort: start fresh.
-                let cfg = AppConfig::default();
-                cfg.save()?;
-                Ok(cfg)
+        // Try to load a legacy config and migrate it.
+        if let Ok(legacy) = confy::load_path::<LegacyConfig>(path) {
+            let mut cfg = AppConfig::default();
+            cfg.set_currency(legacy.currency);
+            if !legacy.portfolio_file.is_empty() && legacy.portfolio_file != LEGACY_PLACEHOLDER_FILE
+            {
+                cfg.portfolio_file = Some(legacy.portfolio_file);
             }
+            cfg.save_to(path)?;
+            return Ok(cfg);
         }
+
+        Err(eyre!(
+            "configuration file {} could not be parsed ({}). It was left unchanged; \
+             fix or move it away and run again",
+            path.display(),
+            current_err
+        ))
     }
 
     /// Persist the config to disk.
     pub fn save(&self) -> Result<()> {
-        confy::store(APP_NAME, CONFIG_NAME, self).wrap_err("failed to save configuration")?;
-        Ok(())
+        let path = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME)
+            .wrap_err("failed to get configuration file path")?;
+        self.save_to(&path)
+    }
+
+    /// [`AppConfig::save`] for an explicit path.
+    ///
+    /// Writes a temp file in the same directory and renames it over `path`,
+    /// so a failed write never truncates the existing config. On unix the
+    /// file is always owner-only (0600) because it can hold an API key.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| eyre!("config path has no parent: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("failed to create config dir: {}", parent.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| eyre!("config path has no file name: {}", path.display()))?;
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        ));
+        // Create the temp file owner-only before any content is written.
+        drop(
+            crate::services::atomic_write::private_options()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .wrap_err_with(|| format!("failed to create {}", tmp.display()))?,
+        );
+        let result = store_private(&tmp, self)
+            .and_then(|()| std::fs::rename(&tmp, path).wrap_err("failed to replace config file"));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.wrap_err("failed to save configuration")
     }
 
     /// Return the path to the configuration file.
@@ -292,5 +359,52 @@ mod tests {
         // Without an actual positions.json we fall back to the file only if set.
         assert!(cfg.portfolio_file.is_none());
         assert_eq!(cfg.last_mode, AppMode::Workspace);
+    }
+
+    #[test]
+    fn test_unparsable_config_is_an_error_and_left_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yml");
+        let broken = "currency: [EUR\nllm_api_key: fake-key-not-real\n";
+        std::fs::write(&path, broken).unwrap();
+        let err = AppConfig::load_from(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("could not be parsed"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip_is_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("config.yml");
+        let cfg = AppConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.currency, "EUR");
+        let mut cfg = cfg;
+        cfg.llm_api_key = Some("fake-key-not-real".to_string());
+        cfg.save_to(&path).unwrap();
+        let loaded = AppConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.llm_api_key.as_deref(), Some("fake-key-not-real"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+    }
+
+    #[test]
+    fn test_legacy_config_is_migrated_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yml");
+        std::fs::write(&path, "portfolio_file: /tmp/fake.json\ncurrency: USD\n").unwrap();
+        let cfg = AppConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.currency, "USD");
+        assert_eq!(cfg.portfolio_file.as_deref(), Some("/tmp/fake.json"));
+        let again = AppConfig::load_from(&path).unwrap();
+        assert_eq!(again.currency, "USD");
     }
 }

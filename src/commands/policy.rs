@@ -70,7 +70,7 @@ pub fn policy_init(strategy: &str, dir: &str, dry_run: bool) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("failed to create directory: {}", parent.display()))?;
         }
-        std::fs::write(&policy_path, toml_content)
+        crate::services::atomic_write::write_new_private(&policy_path, toml_content.as_bytes())
             .wrap_err_with(|| format!("failed to write policy file: {}", policy_path.display()))?;
         println!("Created policy at {}", policy_path.display());
         println!("Strategy: {}", policy.name);

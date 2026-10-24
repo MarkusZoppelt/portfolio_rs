@@ -68,18 +68,30 @@ pub trait QuoteProvider: Send + Sync + 'static {
     fn latest(&self, symbol: &str) -> impl Future<Output = Result<Quote, QuoteError>> + Send;
     /// Previous close, used for the daily change.
     fn previous_close(&self, symbol: &str) -> impl Future<Output = Result<f64, QuoteError>> + Send;
+    /// Close used to fill a purchase on `date` (first trading day on or after it).
+    fn close_on(
+        &self,
+        symbol: &str,
+        date: DateTime<Utc>,
+    ) -> impl Future<Output = Result<f64, QuoteError>> + Send;
     /// Close of the first trading day on or after `date` (purchase prices).
+    /// Defaults to [`Self::close_on`].
     fn close_on_or_after(
         &self,
         symbol: &str,
         date: DateTime<Utc>,
-    ) -> impl Future<Output = Result<f64, QuoteError>> + Send;
+    ) -> impl Future<Output = Result<f64, QuoteError>> + Send {
+        self.close_on(symbol, date)
+    }
     /// Close of the last trading day before `date` (period start values).
+    /// Defaults to [`Self::close_on`].
     fn close_before(
         &self,
         symbol: &str,
         date: DateTime<Utc>,
-    ) -> impl Future<Output = Result<f64, QuoteError>> + Send;
+    ) -> impl Future<Output = Result<f64, QuoteError>> + Send {
+        self.close_on(symbol, date)
+    }
     /// Display name. Never fatal: `None` when unknown.
     fn name(&self, symbol: &str) -> impl Future<Output = Option<String>> + Send;
 }
@@ -97,11 +109,7 @@ impl QuoteProvider for YahooProvider {
         crate::position::yahoo_previous_close(symbol).await
     }
 
-    async fn close_on_or_after(
-        &self,
-        symbol: &str,
-        date: DateTime<Utc>,
-    ) -> Result<f64, QuoteError> {
+    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
         let bars =
             crate::position::yahoo_daily_bars(symbol, date, date + chrono::Duration::days(7))
                 .await?;
@@ -152,6 +160,14 @@ impl FixtureProvider {
     }
 }
 
+impl TryFrom<serde_json::Map<String, serde_json::Value>> for FixtureProvider {
+    type Error = serde_json::Error;
+
+    fn try_from(map: serde_json::Map<String, serde_json::Value>) -> Result<Self, Self::Error> {
+        serde_json::from_value(serde_json::Value::Object(map))
+    }
+}
+
 fn lookup(map: &HashMap<String, f64>, symbol: &str) -> Result<f64, QuoteError> {
     map.get(symbol)
         .copied()
@@ -172,11 +188,7 @@ impl QuoteProvider for FixtureProvider {
         lookup(&self.previous_close, symbol)
     }
 
-    async fn close_on_or_after(
-        &self,
-        symbol: &str,
-        date: DateTime<Utc>,
-    ) -> Result<f64, QuoteError> {
+    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
         match self.history.get(symbol) {
             Some(bars) => first_close_on_or_after(bars, date.date_naive())
                 .ok_or_else(|| QuoteError::Unavailable(symbol.to_string())),
@@ -223,15 +235,24 @@ impl QuoteProvider for AnyProvider {
         }
     }
 
+    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
+            Self::Offline => OfflineProvider.close_on(symbol, date).await,
+            Self::Fixture(f) => f.close_on(symbol, date).await,
+        }
+    }
+
     async fn close_on_or_after(
         &self,
         symbol: &str,
         date: DateTime<Utc>,
     ) -> Result<f64, QuoteError> {
+        // Dispatch, so a fixture's date-aware override is not skipped.
         match self {
-            Self::Yahoo => YahooProvider.close_on_or_after(symbol, date).await,
-            Self::Offline => OfflineProvider.close_on_or_after(symbol, date).await,
-            Self::Fixture(f) => f.close_on_or_after(symbol, date).await,
+            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
+            Self::Offline => OfflineProvider.close_on(symbol, date).await,
+            Self::Fixture(f) => f.close_on(symbol, date).await,
         }
     }
 
@@ -265,15 +286,7 @@ impl QuoteProvider for OfflineProvider {
         Err(QuoteError::Unavailable(symbol.to_string()))
     }
 
-    async fn close_on_or_after(
-        &self,
-        symbol: &str,
-        _date: DateTime<Utc>,
-    ) -> Result<f64, QuoteError> {
-        Err(QuoteError::Unavailable(symbol.to_string()))
-    }
-
-    async fn close_before(&self, symbol: &str, _date: DateTime<Utc>) -> Result<f64, QuoteError> {
+    async fn close_on(&self, symbol: &str, _date: DateTime<Utc>) -> Result<f64, QuoteError> {
         Err(QuoteError::Unavailable(symbol.to_string()))
     }
 
@@ -333,6 +346,7 @@ mod tests {
         )
         .unwrap();
         let sat = Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap();
+        assert_eq!(fixture.close_on("FAKE", sat).await.unwrap(), 11.0);
         assert_eq!(fixture.close_on_or_after("FAKE", sat).await.unwrap(), 11.0);
         assert_eq!(fixture.close_before("FAKE", sat).await.unwrap(), 10.0);
     }

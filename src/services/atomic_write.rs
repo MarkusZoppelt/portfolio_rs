@@ -20,7 +20,8 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Atomically replace `path` with `contents`, keeping a single `{path}.bak`.
 ///
 /// The temp file is `.{filename}.tmp-{pid}-{counter}` in the same directory as
-/// `path`. If `path` already exists, its permissions are applied to the new
+/// `path`. A new file is created owner-only (0600 on unix). If `path` already
+/// exists, its permissions are applied to the new
 /// file and its previous contents are copied to `{path}.bak` (overwriting any
 /// earlier backup) before the rename. On error the temp file is removed.
 ///
@@ -78,6 +79,35 @@ pub fn write_atomic_with_backup(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// `OpenOptions` that create new files as owner-only (0600) on unix.
+///
+/// The mode only applies when a file is created; existing files keep theirs.
+pub(crate) fn private_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Create a new file at `path` with owner-only (0600) permissions on unix.
+///
+/// Fails if `path` already exists, so existing files are never overwritten.
+pub fn write_new_private(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut file = private_options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .wrap_err_with(|| format!("failed to create file: {}", path.display()))?;
+    file.write_all(contents)
+        .wrap_err_with(|| format!("failed to write file: {}", path.display()))?;
+    file.sync_all()
+        .wrap_err_with(|| format!("failed to flush file to disk: {}", path.display()))?;
+    Ok(())
+}
+
 fn is_gpg_path(path: &Path) -> bool {
     path.as_os_str().to_string_lossy().ends_with(".gpg")
 }
@@ -110,7 +140,7 @@ fn create_temp_file(path: &Path) -> Result<(PathBuf, std::fs::File)> {
     for _ in 0..128 {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp_path = temp_path_for(path, seq)?;
-        match OpenOptions::new()
+        match private_options()
             .write(true)
             .create_new(true)
             .open(&tmp_path)
@@ -333,5 +363,26 @@ mod tests {
         let expected_prefix = format!(".positions.json.tmp-{}-", std::process::id());
         assert!(name.starts_with(&expected_prefix), "{}", name);
         assert!(name.ends_with("-7"), "{}", name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_new_files_are_owner_only_and_existing_modes_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("positions.json");
+        write_atomic_with_backup(&path, b"[]").unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic_with_backup(&path, b"[1]").unwrap();
+        assert_eq!(mode(&path), 0o640);
+
+        let doc = tmp.path().join("doc.md");
+        write_new_private(&doc, b"x").unwrap();
+        assert_eq!(mode(&doc), 0o600);
+        assert!(write_new_private(&doc, b"y").is_err());
+        assert_eq!(fs::read(&doc).unwrap(), b"x");
     }
 }

@@ -78,8 +78,7 @@ pub fn init_workspace(dir: &str, dry_run: bool) -> Result<()> {
                     format!("failed to create parent directory for: {}", path.display())
                 })?;
             }
-            fs::write(path, content)
-                .wrap_err_with(|| format!("failed to write file: {}", path.display()))?;
+            crate::services::atomic_write::write_new_private(path, content.as_bytes())?;
             println!("  created file: {}", path.display());
         }
     }
@@ -131,8 +130,7 @@ pub fn init_agent_files(dir: &str, dry_run: bool) -> Result<()> {
         if dry_run {
             println!("  file: {}", path.display());
         } else {
-            fs::write(path, content)
-                .wrap_err_with(|| format!("failed to write file: {}", path.display()))?;
+            crate::services::atomic_write::write_new_private(path, content.as_bytes())?;
             println!("  created file: {}", path.display());
         }
     }
