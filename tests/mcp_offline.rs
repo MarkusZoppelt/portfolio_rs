@@ -1203,3 +1203,67 @@ async fn complete_data_says_so() {
     assert_eq!(v["dataQuality"]["affectedPositions"], json!([]));
     client.cancel().await.unwrap();
 }
+
+/// Finance item 3: get_context shows unpriced values as null, real quote
+/// currencies, no false cash flag when incomplete, and MCP follow-ups.
+#[tokio::test]
+async fn get_context_is_honest_about_partial_data() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_context", json!({ "format": "json" })).await;
+    let ctx = &v["context"];
+    assert_eq!(ctx["complete"], true);
+    let spy = ctx["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["ticker"] == "SPY")
+        .unwrap();
+    assert_eq!(spy["price"], 500.0);
+    assert_eq!(spy["priceCurrency"], "USD");
+    let follow: Vec<String> = ctx["followUpCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert!(follow.iter().any(|c| c == "get_positions"), "{follow:?}");
+    assert!(
+        !follow.iter().any(|c| c.contains("portfolio_rs ")),
+        "{follow:?}"
+    );
+    let v = ok(&client, "get_context", json!({})).await;
+    let md = v["markdown"].as_str().unwrap();
+    assert!(md.contains("500.00 USD"), "{md}");
+    assert!(!md.contains("500.00 EUR"), "{md}");
+    assert!(md.contains("`get_positions`"));
+    client.cancel().await.unwrap();
+
+    let (_tmp, client) = connect_partial("quotes_no_fx.json").await;
+    let v = ok(&client, "get_context", json!({ "format": "json" })).await;
+    let ctx = &v["context"];
+    assert_eq!(ctx["complete"], false);
+    assert_ne!(ctx["networkStatus"], "Connected");
+    for p in ctx["positions"].as_array().unwrap() {
+        if p["ticker"].is_string() {
+            assert!(p["value"].is_null(), "{p}");
+            assert!(p["weightPercent"].is_null(), "{p}");
+        }
+    }
+    let flags = ctx["riskFlags"].to_string();
+    assert!(!flags.contains("100.00%"), "{flags}");
+    assert!(!flags.contains("Asset-class concentration"), "{flags}");
+    let v = ok(&client, "get_context", json!({})).await;
+    assert!(v["markdown"].as_str().unwrap().contains("INCOMPLETE"));
+    client.cancel().await.unwrap();
+
+    let (_tmp, client) = connect_partial("quotes_no_gsg.json").await;
+    let v = ok(&client, "get_context", json!({ "format": "json" })).await;
+    let commodities = v["context"]["allocation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["assetClass"] == "Commodities")
+        .expect("Commodities stays in the context allocation");
+    assert!(commodities["value"].is_null());
+    client.cancel().await.unwrap();
+}
