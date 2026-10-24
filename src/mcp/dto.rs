@@ -302,7 +302,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "snapshot_lines_skipped",
         "data_quality",
         "warning",
-        "Snapshot lines were skipped (bad JSON or a non-strict date); the start point may be older than intended.",
+        "Snapshot lines were skipped (bad JSON, a non-strict date, a missing field such as a null totalBase, a negative position value, or a totalBase that is not the sum of the positions; detail.lines names each reason); the start point may be older than intended.",
     ),
     (
         "performance_approximate",

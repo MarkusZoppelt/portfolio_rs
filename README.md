@@ -223,9 +223,13 @@ weighted at its transaction date and each cash change (or flow without a dated
 transaction) at the snapshot that shows it. A buy or sell without a recorded
 price is valued at the historic close of its date, also flagged by a
 `performance_approximate` note (`detail.reason: estimated_transaction_price`). Dates (`from`, `to` and every
-snapshot `date`) must be strict `YYYY-MM-DD`; snapshot lines with bad JSON or
-a looser date are skipped and counted in `dataCoverage.skippedLines`, with a
-`snapshot_lines_skipped` warning because they can move the start point.
+snapshot `date`) must be strict `YYYY-MM-DD`. Snapshot lines with bad JSON, a
+looser date, a missing field (such as a null `totalBase`), a negative position
+`valueBase`, or a `totalBase` more than 0.05 off the sum of the positions are
+skipped and counted in `dataCoverage.skippedLines`, with a
+`snapshot_lines_skipped` warning naming each line's reason (`detail.lines`)
+because they can move the start point. `portfolio_rs snapshot` keeps such
+implausible lines in the file untouched.
 `fxEffect` and `mwrPercent` are null for now, and nothing is reconstructed from
 historic closes (`reconstructed: false`).
 
