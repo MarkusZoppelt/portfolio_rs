@@ -269,7 +269,10 @@ Notes:
   needs `Authorization: Bearer $(cat PATH)` (`401` otherwise). `/health`
   stays open.
 - Positions carry a stable `positionId` (`pos_…`, generated if missing and
-  persisted on the next save); use it in `/api/positions/{id}`. The numeric
+  persisted on the next save; a stored `Id` always wins). Generated ids of
+  market positions derive from ticker and asset class only, so renaming a
+  position keeps its id; cash and manual positions use name and asset class.
+  Use it in `/api/positions/{id}`. The numeric
   `id` is the array index, kept for older clients.
 - Purchase `price` is the recorded price only; prices estimated from
   historic closes are `null`.
