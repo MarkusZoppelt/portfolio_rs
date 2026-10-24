@@ -929,13 +929,13 @@ fn like_for_like_values<'a>(
     (historic, current)
 }
 
+/// `(name, %day, day pnl)` of one position.
+pub type Mover<T> = (T, f64, f64);
+
 /// Split `(name, %day, day pnl)` movers into the top `n` gainers (largest
 /// positive %day first) and top `n` losers (most negative first). A position
 /// is in at most one list; an unchanged one (0%) is in neither.
-pub fn top_movers<T: Clone>(
-    movers: Vec<(T, f64, f64)>,
-    n: usize,
-) -> (Vec<(T, f64, f64)>, Vec<(T, f64, f64)>) {
+pub fn top_movers<T: Clone>(movers: Vec<Mover<T>>, n: usize) -> (Vec<Mover<T>>, Vec<Mover<T>>) {
     use std::cmp::Ordering;
     let mut gainers: Vec<_> = movers.iter().filter(|m| m.1 > 0.0).cloned().collect();
     gainers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
