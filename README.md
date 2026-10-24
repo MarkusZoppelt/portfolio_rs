@@ -65,7 +65,7 @@ data.
 | `init-workspace [DIR]` | Create a new finance workspace |
 | `agent init/skill` | Agent instructions + portable skill management |
 | `api` | Local HTTP API server |
-| `mcp` | MCP server for agents (experimental preview) |
+| `mcp` | Read-only MCP server for AI agents (stdio) |
 | `config` | Show config file location |
 | `components` | List TUI components for `--disable` |
 
@@ -117,10 +117,8 @@ total portfolio values (including cash).
   workspace — reviewable in six months, greppable forever. Use `--dry-run`
   to preview any file mutation.
 
-- **MCP server (experimental)**: `portfolio_rs mcp` starts a JSON-RPC-over-
-  stdio preview. Tools are advertised via `tools/list` but currently return
-  pointers to the equivalent CLI commands; a protocol-complete
-  implementation is planned.
+- **MCP server**: `portfolio_rs mcp` serves your portfolio read-only to MCP
+  clients over stdio (see [MCP server](#mcp-server)).
 
 ## HTTP API
 

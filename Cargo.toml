@@ -44,6 +44,9 @@ toml = "1.1"
 # HTTP API server (api subcommand)
 axum = "0.8"
 uuid = { version = "1.23", features = ["v4", "v7"] }
+# MCP server (mcp subcommand): local stdio transport only
+rmcp = { version = "3.7", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
 rust_decimal = { version = "1.43", default-features = false, features = ["std", "serde-with-float"] }
 
 [dev-dependencies]
@@ -52,3 +55,4 @@ assert_cmd = "2"
 predicates = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+rmcp = { version = "3.7", default-features = false, features = ["server", "macros", "transport-io", "client"] }

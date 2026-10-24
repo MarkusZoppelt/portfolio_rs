@@ -442,19 +442,47 @@ pub fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("mcp")
-                .about("Start the MCP server for agent integration (experimental)")
+                .about("Start the read-only MCP server on stdio for AI agents")
                 .long_about(
-                    "Start an experimental Model Context Protocol (MCP) server\n\
-                    that communicates via JSON-RPC over stdio.\n\
+                    "Start a local Model Context Protocol (MCP) server that speaks\n\
+                    JSON-RPC over stdin/stdout (logs go to stderr).\n\
                     \n\
-                    This is a preview: tools/list advertises\n\
-                    get_portfolio_snapshot, get_allocation,\n\
-                    get_context_markdown, and get_investment_policy,\n\
-                    but the tools currently return pointers to the\n\
-                    equivalent CLI commands instead of live data.\n\
+                    Tools (read-only): get_positions, get_allocation, check_policy,\n\
+                    get_transactions, list_portfolios, get_context.\n\
+                    Resources: portfolio://<id>/policy, portfolio://<id>/policy.md,\n\
+                    portfolio://<id>/context.md, portfolio://schema/positions,\n\
+                    portfolio://schema/findings.\n\
                     \n\
-                    For structured data today, prefer:\n\
-                    portfolio_rs context <FILE> --format json"
+                    Quotes follow PORTFOLIO_RS_QUOTES (yahoo, offline, fixture:<path>);\n\
+                    --offline forces offline quotes unless a fixture is configured.\n\
+                    The app config is read, never written."
+                )
+                .arg(file_arg())
+                .arg(
+                    Arg::new("workspace")
+                        .long("workspace")
+                        .value_name("DIR")
+                        .conflicts_with("FILE")
+                        .help("Serve a workspace (positions.json + portfolio/policy.toml)"),
+                )
+                .arg(
+                    Arg::new("policy")
+                        .long("policy")
+                        .value_name("FILE")
+                        .conflicts_with("workspace")
+                        .help("Investment policy file for FILE mode (no default: never CWD-relative)"),
+                )
+                .arg(
+                    Arg::new("portfolio")
+                        .long("portfolio")
+                        .value_name("ID")
+                        .help("Portfolio id exposed to clients (default: default)"),
+                )
+                .arg(
+                    Arg::new("offline")
+                        .long("offline")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Never fetch quotes from the network"),
                 ),
         )
         .subcommand(
@@ -537,7 +565,7 @@ pub async fn run() -> Result<()> {
         Some(("report", sub_matches)) => handle_report(sub_matches, &cfg).await?,
         Some(("doctor", sub_matches)) => handle_doctor(sub_matches)?,
         Some(("validate", sub_matches)) => handle_validate(sub_matches, &cfg).await?,
-        Some(("mcp", _sub_matches)) => handle_mcp(),
+        Some(("mcp", sub_matches)) => handle_mcp(sub_matches, &cfg).await?,
         Some(("api", sub_matches)) => {
             let host =
                 get_arg_value(Some(sub_matches), "host").unwrap_or_else(|| "127.0.0.1".to_string());
