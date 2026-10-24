@@ -93,8 +93,7 @@ impl PortfolioContext {
         for position in &portfolio.positions {
             let value = position.market_value();
             let asset_class = position.get_asset_class().to_string();
-            let is_cash = position.get_ticker().is_none()
-                && position.get_asset_class().eq_ignore_ascii_case("cash");
+            let is_cash = position.is_cash();
 
             if is_cash {
                 cash_value += value;

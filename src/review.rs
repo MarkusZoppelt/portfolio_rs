@@ -295,9 +295,7 @@ fn check_constraints(
         let cash_value: f64 = portfolio
             .positions
             .iter()
-            .filter(|p| {
-                p.get_ticker().is_none() && p.get_asset_class().eq_ignore_ascii_case("cash")
-            })
+            .filter(|p| p.is_cash())
             .map(|p| p.market_value())
             .sum();
 
@@ -370,9 +368,7 @@ fn check_data_quality(portfolio: &Portfolio, base_currency: &str) -> Vec<DataQua
         }
 
         // No ticker for non-cash positions
-        if position.get_ticker().is_none()
-            && !position.get_asset_class().eq_ignore_ascii_case("cash")
-        {
+        if position.get_ticker().is_none() && !position.is_cash() {
             issues.push(DataQualityIssue {
                 severity: Severity::Warning,
                 position: position.get_name().to_string(),

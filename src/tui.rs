@@ -2447,9 +2447,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 );
             }
 
-            // Check if this is a cash position (no ticker and cash asset class)
-            let is_cash = position.get_ticker().is_none()
-                && position.get_asset_class().to_lowercase() == "cash";
+            let is_cash = position.is_cash();
 
             if !app.disabled_components.is_disabled(Component::Price) {
                 if is_cash {
@@ -2593,9 +2591,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             let securities_value: f64 = portfolio
                 .positions
                 .iter()
-                .filter(|p| {
-                    !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase() == "cash")
-                })
+                .filter(|p| !p.is_cash())
                 .map(|p| p.get_balance())
                 .sum();
             let pnl_total = securities_value - invested_sum;
@@ -2619,9 +2615,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             let securities_value: f64 = portfolio
                 .positions
                 .iter()
-                .filter(|p| {
-                    !(p.get_ticker().is_none() && p.get_asset_class().to_lowercase() == "cash")
-                })
+                .filter(|p| !p.is_cash())
                 .map(|p| p.get_balance())
                 .sum();
             let hist_pct = if invested_sum > 0.0 {

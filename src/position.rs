@@ -162,6 +162,11 @@ impl PortfolioPosition {
         self.ticker.as_deref()
     }
 
+    /// Cash: no ticker and asset class "cash", compared case-insensitively.
+    pub fn is_cash(&self) -> bool {
+        self.ticker.is_none() && self.asset_class.eq_ignore_ascii_case("cash")
+    }
+
     pub fn get_name_option(&self) -> Option<&str> {
         self.name.as_deref()
     }
@@ -718,6 +723,19 @@ mod tests {
         let cash = PortfolioPosition::for_test(None, "Cash", 25.0, 0.0, PriceStatus::Unavailable);
         assert!(cash.has_market_price());
         assert_eq!(cash.get_balance(), 25.0);
+    }
+
+    #[test]
+    fn test_is_cash() {
+        assert!(PortfolioPosition::for_test(None, "Cash", 1.0, 0.0, PriceStatus::Live).is_cash());
+        assert!(PortfolioPosition::for_test(None, "CASH", 1.0, 0.0, PriceStatus::Live).is_cash());
+        assert!(
+            !PortfolioPosition::for_test(None, "Stocks", 1.0, 0.0, PriceStatus::Live).is_cash()
+        );
+        assert!(
+            !PortfolioPosition::for_test(Some("CASH"), "Cash", 1.0, 1.0, PriceStatus::Live)
+                .is_cash()
+        );
     }
 
     #[test]

@@ -62,6 +62,29 @@ impl Portfolio {
             .sum()
     }
 
+    /// `(invested, unrealized PnL)` from [`PortfolioPosition::total_invested`]
+    /// and [`PortfolioPosition::pnl`], summed only over non-cash positions that
+    /// have a market price and a cost basis.
+    ///
+    /// Cash is neither a gain nor a loss. Unpriced holdings are excluded so a
+    /// missing quote is not treated as a full loss against cost basis.
+    pub fn cost_basis_totals(&self) -> (f64, f64) {
+        let mut invested = 0.0_f64;
+        let mut pnl = 0.0_f64;
+        for position in &self.positions {
+            if position.is_cash() || !position.has_market_price() {
+                continue;
+            }
+            if let Some(inv) = position.total_invested() {
+                invested += inv;
+            }
+            if let Some(p) = position.pnl() {
+                pnl += p;
+            }
+        }
+        (invested, pnl)
+    }
+
     /// Value of the currently held, priced ticker positions at `date`, at
     /// current quantities and the current FX rate.
     pub async fn get_historic_securities_value(&self, date: DateTime<Utc>) -> Result<f64> {
@@ -178,8 +201,6 @@ impl Portfolio {
         ]);
 
         let mut total_value = 0.0_f64;
-        let mut total_invested = 0.0_f64;
-        let mut total_pnl = 0.0_f64;
         let mut cash_value = 0.0_f64;
         let mut securities_value = 0.0_f64;
 
@@ -195,21 +216,9 @@ impl Portfolio {
             let day_var = position.daily_variation_percent();
             let hist_var = position.historic_variation_percent();
 
-            // Check if this is a cash position (no ticker and cash asset class)
-            let is_cash = position.get_ticker().is_none()
-                && position.get_asset_class().to_lowercase() == "cash";
+            let is_cash = position.is_cash();
 
             total_value += value;
-            // Unpriced holdings are excluded from totals; do not treat a missing
-            // quote as a full loss against cost basis.
-            if position.has_market_price() {
-                if let Some(i) = invested {
-                    total_invested += i;
-                }
-                if let Some(p) = pnl {
-                    total_pnl += p;
-                }
-            }
 
             // Estimate previous value from daily % to compute portfolio daily change
             let prev_value_for_row = match day_var {
@@ -336,6 +345,14 @@ impl Portfolio {
             ]);
         }
 
+        // Cash is excluded: a cash balance is neither a gain nor a loss.
+        let (total_invested, total_pnl) = self.cost_basis_totals();
+        let hist_percent = if total_invested > 0.0 {
+            total_pnl / total_invested * 100.0
+        } else {
+            0.0
+        };
+
         // Broker-style overview summary above balances
         if include_sum {
             use comfy_table::{
@@ -345,11 +362,6 @@ impl Portfolio {
             let day_pnl_abs = total_value - total_prev_value_for_day;
             let total_day_var = if total_prev_value_for_day > 0.0 {
                 (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-            } else {
-                0.0
-            };
-            let hist_percent = if total_invested > 0.0 {
-                (total_value - total_invested) / total_invested * 100.0
             } else {
                 0.0
             };
@@ -403,11 +415,6 @@ impl Portfolio {
         }
 
         if include_sum {
-            let total_hist_var = if total_invested > 0.0 {
-                (total_value - total_invested) / total_invested * 100.0
-            } else {
-                0.0
-            };
             let total_day_var = if total_prev_value_for_day > 0.0 {
                 (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
             } else {
@@ -437,12 +444,12 @@ impl Portfolio {
                         .fg(c)
                 },
                 {
-                    let c = if total_hist_var >= 0.0 {
+                    let c = if hist_percent >= 0.0 {
                         TColor::Green
                     } else {
                         TColor::Red
                     };
-                    Cell::new(format!("{total_hist_var:.2}%"))
+                    Cell::new(format!("{hist_percent:.2}%"))
                         .set_alignment(CellAlignment::Right)
                         .add_attribute(Attribute::Bold)
                         .fg(c)
@@ -595,14 +602,9 @@ impl Portfolio {
 
         let current_value = self.get_total_value();
 
-        // Inception invested and PnL
-        let mut total_invested = 0.0_f64;
-        for p in &self.positions {
-            if let Some(inv) = p.total_invested() {
-                total_invested += inv;
-            }
-        }
-        let unrealized_pnl = current_value - total_invested;
+        // Inception invested and PnL. Cash is neither a gain nor a loss:
+        // do not subtract invested from total value (which includes cash).
+        let (total_invested, unrealized_pnl) = self.cost_basis_totals();
         let hist_percent = if total_invested > 0.0 {
             (unrealized_pnl / total_invested) * 100.0
         } else {
@@ -706,8 +708,7 @@ impl Portfolio {
         let mut securities_value = 0.0_f64;
         for position in &self.positions {
             let value = position.get_balance();
-            let is_cash = position.get_ticker().is_none()
-                && position.get_asset_class().to_lowercase() == "cash";
+            let is_cash = position.is_cash();
             if is_cash {
                 cash_value += value;
             } else {
@@ -890,7 +891,21 @@ pub fn period_return_percent(current: f64, historic: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::position::{PortfolioPosition, PriceStatus};
+    use crate::position::{PortfolioPosition, PriceStatus, Purchase};
+
+    fn with_purchase(
+        mut position: PortfolioPosition,
+        quantity: f64,
+        price: f64,
+    ) -> PortfolioPosition {
+        position.purchases.push(Purchase {
+            date: None,
+            quantity,
+            price: Some(price),
+            fees: None,
+        });
+        position
+    }
 
     #[test]
     fn unavailable_position_excluded_from_totals_and_allocation() {
@@ -982,5 +997,70 @@ mod tests {
 
         assert_eq!(period_return_percent(100.0, 0.0), None);
         assert_eq!(like_for_like_values([(&security, Some(0.0))]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn cash_is_neither_gain_nor_loss() {
+        // Winner: 10 @ 100, now 110. Invested 1000, PnL +100.
+        let winner = with_purchase(
+            PortfolioPosition::for_test(Some("UP"), "Stocks", 10.0, 110.0, PriceStatus::Live),
+            10.0,
+            100.0,
+        );
+        // Loser: 4 @ 80, now 50. Invested 320, PnL -120.
+        let loser = with_purchase(
+            PortfolioPosition::for_test(Some("DOWN"), "Stocks", 4.0, 50.0, PriceStatus::Live),
+            4.0,
+            80.0,
+        );
+        // Large cash balance. The old total-value-minus-invested basis counted this as profit.
+        let cash = PortfolioPosition::for_test(None, "Cash", 5_000.0, 0.0, PriceStatus::Live);
+        // Cash with a cost basis above its balance would be a loss if purchases were included.
+        let cash_with_basis = with_purchase(
+            PortfolioPosition::for_test(None, "CASH", 1_000.0, 0.0, PriceStatus::Live),
+            1.0,
+            1_500.0,
+        );
+        // Unpriced cost basis must not be booked as a total loss.
+        let unpriced = with_purchase(
+            PortfolioPosition::for_test(Some("GONE"), "Stocks", 5.0, 0.0, PriceStatus::Unavailable),
+            5.0,
+            50.0,
+        );
+
+        assert!(cash.is_cash());
+        assert!(cash_with_basis.is_cash());
+        assert!(!winner.is_cash());
+
+        let mut portfolio = Portfolio::new();
+        for position in [winner, loser, cash, cash_with_basis, unpriced] {
+            portfolio.add_position(position);
+        }
+
+        let (invested, pnl) = portfolio.cost_basis_totals();
+        assert_eq!(invested, 1_320.0);
+        assert_eq!(pnl, -20.0);
+        let pct = if invested > 0.0 {
+            pnl / invested * 100.0
+        } else {
+            0.0
+        };
+        assert!((pct - (-20.0 / 1_320.0 * 100.0)).abs() < 1e-9);
+
+        // Old basis: total value (incl. cash) minus invested treated cash as profit
+        // and would have hidden the securities loss.
+        let old_pnl = portfolio.get_total_value() - invested;
+        assert!(old_pnl > 0.0);
+        assert!(pnl < 0.0);
+
+        let mut cash_only = Portfolio::new();
+        cash_only.add_position(PortfolioPosition::for_test(
+            None,
+            "cash",
+            250.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        assert_eq!(cash_only.cost_basis_totals(), (0.0, 0.0));
     }
 }
