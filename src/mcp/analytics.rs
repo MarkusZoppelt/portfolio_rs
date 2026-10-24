@@ -33,6 +33,12 @@ fn price_status(p: &PortfolioPosition) -> &'static str {
         "manual" => "manual",
         _ => match p.price_status() {
             PriceStatus::Live if p.has_market_price() && p.is_stale() => "stale",
+            PriceStatus::Live
+                if p.has_market_price()
+                    && p.price_source() == Some(crate::services::quotes::PriceSource::Cache) =>
+            {
+                "cache"
+            }
             PriceStatus::Live if p.has_market_price() => "live",
             PriceStatus::FxUnavailable if p.has_native_price() => "fx_unavailable",
             _ => "unavailable",

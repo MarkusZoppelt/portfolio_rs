@@ -1790,7 +1790,7 @@ async fn last_known_price_cache_fills_and_falls_back() {
     let tlt = by_ticker(&v["positions"], "TLT");
     assert_eq!(tlt["priceSource"], "cache");
     assert_eq!(tlt["isStale"], false);
-    assert_eq!(tlt["priceStatus"], "live");
+    assert_eq!(tlt["priceStatus"], "cache");
     assert_eq!(tlt["price"], 90.0);
     assert!(tlt["priceAsOf"].is_string());
     assert!(tlt["dayChangePercent"].is_number(), "cached previous close");
