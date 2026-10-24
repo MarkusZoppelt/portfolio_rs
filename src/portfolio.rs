@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::money::{dec, div, percent_change, to_f64, Decimal};
+use crate::money::{dec, div, percent_change, percent_of, to_f64, Decimal};
 use crate::position::{PortfolioPosition, PriceStatus};
 use crate::services::quotes::{QuoteError, QuoteProvider, YahooProvider};
 
@@ -75,6 +75,12 @@ impl Portfolio {
     /// Cash is neither a gain nor a loss. Unpriced holdings are excluded so a
     /// missing quote is not treated as a full loss against cost basis.
     pub fn cost_basis_totals(&self) -> (f64, f64) {
+        let (invested, pnl) = self.cost_basis_totals_dec();
+        (to_f64(invested), to_f64(pnl))
+    }
+
+    /// [`Self::cost_basis_totals`] as [`Decimal`]s.
+    pub fn cost_basis_totals_dec(&self) -> (Decimal, Decimal) {
         let mut invested = Decimal::ZERO;
         let mut pnl = Decimal::ZERO;
         for position in &self.positions {
@@ -88,7 +94,41 @@ impl Portfolio {
                 pnl += p;
             }
         }
-        (to_f64(invested), to_f64(pnl))
+        (invested, pnl)
+    }
+
+    /// Total, cash, securities and previous-close value, in one pass.
+    pub fn value_breakdown(&self) -> ValueBreakdown {
+        let mut breakdown = ValueBreakdown::default();
+        for position in &self.positions {
+            let value = position.balance_dec();
+            breakdown.total += value;
+            if position.is_cash() {
+                breakdown.cash += value;
+            } else {
+                breakdown.securities += value;
+            }
+            breakdown.previous_day += position.previous_day_value_dec();
+        }
+        breakdown
+    }
+
+    /// Unrealized PnL over invested in percent (cash excluded), 0 without cost basis.
+    pub fn hist_percent(&self) -> f64 {
+        let (invested, pnl) = self.cost_basis_totals_dec();
+        percent_of(pnl, invested).map(to_f64).unwrap_or(0.0)
+    }
+
+    /// `(name, %day, day pnl)` of every position with a known daily change.
+    pub fn day_movers(&self) -> Vec<Mover<String>> {
+        self.positions
+            .iter()
+            .filter_map(|position| {
+                let pct = position.daily_variation_percent()?;
+                let pnl = position.day_pnl_dec()?;
+                Some((position.get_name().to_string(), pct, to_f64(pnl)))
+            })
+            .collect()
     }
 
     /// Value of the currently held, priced ticker positions at `date`, at
@@ -232,12 +272,10 @@ impl Portfolio {
             Cell::new("%Day").add_attribute(Attribute::Bold),
         ]);
 
-        let mut total_value = 0.0_f64;
-        let mut cash_value = 0.0_f64;
-        let mut securities_value = 0.0_f64;
-
-        // Track previous total value for computing portfolio daily change
-        let mut total_prev_value_for_day = 0.0_f64;
+        let breakdown = self.value_breakdown();
+        let total_value = to_f64(breakdown.total);
+        let cash_value = to_f64(breakdown.cash);
+        let securities_value = to_f64(breakdown.securities);
         for position in &self.positions {
             let amount = position.get_amount();
             let avg_cost = position.average_cost();
@@ -249,29 +287,6 @@ impl Portfolio {
             let hist_var = position.historic_variation_percent();
 
             let is_cash = position.is_cash();
-
-            total_value += value;
-
-            // Estimate previous value from daily % to compute portfolio daily change
-            let prev_value_for_row = match day_var {
-                Some(dv) => {
-                    let ratio = dv / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON {
-                        value / (1.0 + ratio)
-                    } else {
-                        value
-                    }
-                }
-                None => value,
-            };
-            total_prev_value_for_day += prev_value_for_row;
-
-            // Aggregate cash vs securities
-            if is_cash {
-                cash_value += value;
-            } else {
-                securities_value += value;
-            }
 
             let avg_cost_str = if is_cash {
                 "-".to_string()
@@ -379,11 +394,7 @@ impl Portfolio {
 
         // Cash is excluded: a cash balance is neither a gain nor a loss.
         let (total_invested, total_pnl) = self.cost_basis_totals();
-        let hist_percent = if total_invested > 0.0 {
-            total_pnl / total_invested * 100.0
-        } else {
-            0.0
-        };
+        let hist_percent = self.hist_percent();
 
         // Broker-style overview summary above balances
         if include_sum {
@@ -391,12 +402,8 @@ impl Portfolio {
                 presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
                 ContentArrangement, Table,
             };
-            let day_pnl_abs = total_value - total_prev_value_for_day;
-            let total_day_var = if total_prev_value_for_day > 0.0 {
-                (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-            } else {
-                0.0
-            };
+            let day_pnl_abs = breakdown.day_pnl();
+            let total_day_var = breakdown.day_percent();
 
             let mut overview = Table::new();
             overview
@@ -447,11 +454,7 @@ impl Portfolio {
         }
 
         if include_sum {
-            let total_day_var = if total_prev_value_for_day > 0.0 {
-                (total_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-            } else {
-                0.0
-            };
+            let total_day_var = breakdown.day_percent();
             table.add_row(vec![
                 Cell::new("TOTAL").add_attribute(Attribute::Bold),
                 Cell::new(""),
@@ -629,37 +632,17 @@ impl Portfolio {
         // Reference points — Jan 1 and first of month are never ambiguous
         let start_year = Utc.with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0).unwrap();
 
-        let current_value = self.get_total_value();
+        let breakdown = self.value_breakdown();
+        let current_value = to_f64(breakdown.total);
 
         // Inception invested and PnL. Cash is neither a gain nor a loss:
         // do not subtract invested from total value (which includes cash).
         let (total_invested, unrealized_pnl) = self.cost_basis_totals();
-        let hist_percent = if total_invested > 0.0 {
-            (unrealized_pnl / total_invested) * 100.0
-        } else {
-            0.0
-        };
+        let hist_percent = self.hist_percent();
 
         // 1D: whole priced portfolio (incl. cash) vs. its previous-close value;
         // both sides contain the same positions, cash at an unchanged value.
-        let mut total_prev_value_for_day = 0.0_f64;
-        for position in &self.positions {
-            let value = position.get_balance();
-            let prev = position.daily_variation_percent().map(|dv| {
-                let ratio = dv / 100.0;
-                if (1.0 + ratio).abs() > f64::EPSILON {
-                    value / (1.0 + ratio)
-                } else {
-                    value
-                }
-            });
-            total_prev_value_for_day += prev.unwrap_or(value);
-        }
-        let daily_percent = if total_prev_value_for_day > 0.0 {
-            (current_value - total_prev_value_for_day) / total_prev_value_for_day * 100.0
-        } else {
-            0.0
-        };
+        let daily_percent = breakdown.day_percent();
 
         // Period returns (1W..1Y, YTD): market return of the currently held,
         // priced ticker positions at current quantities and FX. Cash and
@@ -698,8 +681,10 @@ impl Portfolio {
 
         // "Since": total (incl. cash) vs. the last stored total balance; both
         // are totals, but deposits and withdrawals in between are not accounted for.
-        let since_last_check_percent = if last_db > 0.0 {
-            (current_value - last_db) / last_db * 100.0
+        let since_last_check_percent = if last_db.is_finite() {
+            percent_change(breakdown.total, dec(last_db))
+                .map(to_f64)
+                .unwrap_or(0.0)
         } else {
             0.0
         };
@@ -722,21 +707,11 @@ impl Portfolio {
             None => Cell::new("-").set_alignment(CellAlignment::Right),
         };
 
-        // Compute cash vs securities
-        let mut cash_value = 0.0_f64;
-        let mut securities_value = 0.0_f64;
-        for position in &self.positions {
-            let value = position.get_balance();
-            let is_cash = position.is_cash();
-            if is_cash {
-                cash_value += value;
-            } else {
-                securities_value += value;
-            }
-        }
+        let cash_value = to_f64(breakdown.cash);
+        let securities_value = to_f64(breakdown.securities);
 
         // Overview table (professional summary)
-        let day_pnl_abs = current_value - total_prev_value_for_day;
+        let day_pnl_abs = breakdown.day_pnl();
         let mut overview = Table::new();
         overview
             .load_style(UTF8_FULL)
@@ -796,23 +771,7 @@ impl Portfolio {
         ]);
 
         // Top movers today
-        let mut movers: Vec<(String, f64, f64)> = Vec::new(); // name, %day, day pnl
-        for position in &self.positions {
-            if let Some(pct) = position.daily_variation_percent() {
-                let value = position.get_balance();
-                let prev = {
-                    let ratio = pct / 100.0;
-                    if (1.0 + ratio).abs() > f64::EPSILON {
-                        value / (1.0 + ratio)
-                    } else {
-                        value
-                    }
-                };
-                let day_pnl = value - prev;
-                movers.push((position.get_name().to_string(), pct, day_pnl));
-            }
-        }
-        let (gainers, losers) = top_movers(movers, 3);
+        let (gainers, losers) = top_movers(self.day_movers(), 3);
 
         let mut top_gainers = Table::new();
         top_gainers
@@ -894,6 +853,30 @@ fn like_for_like_values<'a>(
         current += position.balance_dec();
     }
     (to_f64(historic), to_f64(current))
+}
+
+/// Base-currency totals of a portfolio, see [`Portfolio::value_breakdown`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ValueBreakdown {
+    pub total: Decimal,
+    pub cash: Decimal,
+    pub securities: Decimal,
+    /// Total at the previous close (unchanged value where no daily change is known).
+    pub previous_day: Decimal,
+}
+
+impl ValueBreakdown {
+    /// Change of the total since the previous close.
+    pub fn day_pnl(&self) -> f64 {
+        to_f64(self.total - self.previous_day)
+    }
+
+    /// [`Self::day_pnl`] in percent of the previous-close total, 0 when that is not positive.
+    pub fn day_percent(&self) -> f64 {
+        percent_change(self.total, self.previous_day)
+            .map(to_f64)
+            .unwrap_or(0.0)
+    }
 }
 
 /// `(name, %day, day pnl)` of one position.
