@@ -27,6 +27,7 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
         policy: get("policy"),
         offline: matches.get_flag("offline"),
         currency: cfg.currency.clone(),
+        quotes: None,
     })
     .await
 }
