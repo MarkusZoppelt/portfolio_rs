@@ -216,11 +216,16 @@ impl PortfolioServer {
                 Severity::Critical => counts.critical += 1,
             }
         }
-        let breaches: Vec<Finding> = findings
-            .iter()
-            .filter(|f| analytics::BREACH_CODES.contains(&f.code.as_str()))
-            .cloned()
-            .collect();
+        // Breaches: critical findings only, one per (code, position, class).
+        let mut breaches: Vec<Finding> = Vec::new();
+        for f in findings.iter().filter(|f| f.severity == Severity::Critical) {
+            let dup = breaches.iter().any(|b| {
+                b.code == f.code && b.position_id == f.position_id && b.asset_class == f.asset_class
+            });
+            if !dup {
+                breaches.push(f.clone());
+            }
+        }
         let status = if !breaches.is_empty() {
             "breach"
         } else if findings.iter().any(|f| f.severity >= Severity::Warning) {
@@ -228,10 +233,17 @@ impl PortfolioServer {
         } else {
             "ok"
         };
+        // Top-level warnings: data quality plus warning-severity policy findings.
+        let mut warnings = analytics::data_quality(&portfolio);
+        for f in findings.iter().filter(|f| f.severity == Severity::Warning) {
+            if !warnings.iter().any(|w| {
+                w.code == f.code && w.position_id == f.position_id && w.asset_class == f.asset_class
+            }) {
+                warnings.push(f.clone());
+            }
+        }
         Ok(Json(PolicyCheckOutput {
-            meta: self
-                .meta(&portfolio, analytics::data_quality(&portfolio))
-                .await,
+            meta: self.meta(&portfolio, warnings).await,
             policy_name: policy.map(|p| p.name),
             status: status.to_string(),
             breaches,

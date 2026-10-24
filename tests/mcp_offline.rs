@@ -1446,3 +1446,61 @@ async fn single_position_limit_agrees_everywhere_and_excludes_cash() {
     assert_eq!(single.len(), 1, "{single:?}");
     assert!(!single[0]["message"].as_str().unwrap().contains("Cash"));
 }
+
+/// Finance item 7: `breaches` holds only critical findings, deduplicated;
+/// warning-severity findings are in the top-level `warnings`; without a
+/// policy every held class, Cash included, is untargeted.
+#[tokio::test]
+async fn check_policy_separates_breaches_from_warnings() {
+    let tmp = TempDir::new().unwrap();
+    let policy = tmp.path().join("policy.toml");
+    std::fs::write(&policy, POLICY_LOWER).unwrap();
+    let client = connect(McpOptions {
+        policy: Some(policy.to_string_lossy().into_owned()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert_eq!(v["status"], "breach");
+    let breaches = v["breaches"].as_array().unwrap();
+    assert!(!breaches.is_empty());
+    assert!(
+        breaches.iter().all(|b| b["severity"] == "critical"),
+        "{breaches:?}"
+    );
+    let keys: Vec<String> = breaches
+        .iter()
+        .map(|b| format!("{}|{}|{}", b["code"], b["positionId"], b["assetClass"]))
+        .collect();
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(keys.len(), unique.len(), "duplicate breaches: {keys:?}");
+    // Gold drifts -3.35 pts with ±3 tolerance: a warning, not a breach.
+    assert!(!breaches.iter().any(|b| b["assetClass"] == "Gold"));
+    let gold = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["assetClass"] == "Gold" && w["code"] == "allocation_out_of_band")
+        .expect("Gold drift is a top-level warning");
+    assert_eq!(gold["severity"], "warning");
+    // Commodities has no target in POLICY_LOWER.
+    assert!(codes(&v["warnings"]).contains(&"unknown_asset_class".to_string()));
+    client.cancel().await.unwrap();
+
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_allocation", json!({})).await;
+    let mut untargeted: Vec<String> = v["untargetedClasses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    untargeted.sort();
+    assert_eq!(
+        untargeted,
+        ["Bonds", "Cash", "Commodities", "Crypto", "Gold", "Stocks"]
+    );
+    client.cancel().await.unwrap();
+}

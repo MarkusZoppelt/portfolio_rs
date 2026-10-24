@@ -344,7 +344,8 @@ pub fn allocation(
     for key in &order {
         let (label, value) = &values[key];
         let target = policy.and_then(|pol| pol.get_allocation(label));
-        if policy.is_some() && target.is_none() {
+        // Without a policy every held class (Cash included) is untargeted.
+        if target.is_none() {
             untargeted.push(label.clone());
         }
         classes.push(class_row(label, *value, total, target.map(band), complete));
@@ -429,15 +430,6 @@ pub struct PolicyCheck {
     pub findings: Vec<Finding>,
     pub checks: Vec<ConstraintCheckRow>,
 }
-
-/// Breach codes: a finding with one of these makes the status `breach`.
-pub const BREACH_CODES: &[&str] = &[
-    "allocation_out_of_band",
-    "single_position_limit",
-    "asset_class_limit",
-    "cash_below_minimum_amount",
-    "invalid_policy",
-];
 
 pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
     let mut findings = Vec::new();
@@ -527,7 +519,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
         if !passed {
             findings.push(Finding::new(
                 "cash_below_minimum_amount",
-                Severity::Warning,
+                Severity::Critical,
                 Category::Constraint,
                 "Cash is below the policy's minimum cash amount.".into(),
             ));
@@ -564,7 +556,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                 findings.push(
                     Finding::new(
                         "single_position_limit",
-                        Severity::Warning,
+                        Severity::Critical,
                         Category::Constraint,
                         format!(
                             "{} is {:.2}% of the portfolio (limit {limit:.2}%).",
@@ -606,7 +598,7 @@ pub fn check_policy(portfolio: &Portfolio, policy: &Policy) -> PolicyCheck {
                 findings.push(
                     Finding::new(
                         "asset_class_limit",
-                        Severity::Warning,
+                        Severity::Critical,
                         Category::Constraint,
                         format!(
                             "{} is {:.2}% of the portfolio (limit {limit:.2}%).",

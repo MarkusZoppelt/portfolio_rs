@@ -148,19 +148,19 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
     (
         "single_position_limit",
         "constraint",
-        "warning",
+        "critical",
         "A position exceeds single_position_limit_percent.",
     ),
     (
         "asset_class_limit",
         "constraint",
-        "warning",
+        "critical",
         "An asset class exceeds asset_class_limit_percent.",
     ),
     (
         "cash_below_minimum_amount",
         "constraint",
-        "warning",
+        "critical",
         "Cash is below minimum_cash_amount.",
     ),
     (
@@ -476,7 +476,11 @@ pub struct PolicyCheckOutput {
     pub policy_name: Option<String>,
     /// ok | warnings | breach
     pub status: String,
+    /// Critical findings only (hard limits exceeded, allocation far outside
+    /// its band, invalid policy), deduplicated. Warning-severity findings are
+    /// in the top-level `warnings`, next to the data-quality warnings.
     pub breaches: Vec<Finding>,
+    /// Every policy finding at or above `minSeverity`.
     pub findings: Vec<Finding>,
     pub constraint_checks: Vec<ConstraintCheckRow>,
     pub counts: SeverityCounts,

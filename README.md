@@ -182,7 +182,7 @@ governed by the cash-buffer and asset-class rules instead.
 | --- | --- |
 | `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
 | `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
-| `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); `minSeverity` filter |
+| `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); `breaches` = critical findings (deduplicated), top-level `warnings` = data quality + warning-severity findings; `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
 | `list_portfolios` | The served portfolio (paths only with `includePaths`) |
 | `get_context` | The `portfolio_rs context` report as Markdown or JSON |
