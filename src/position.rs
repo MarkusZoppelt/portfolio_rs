@@ -118,9 +118,9 @@ pub struct PortfolioPosition {
     pub(crate) previous_close: Option<f64>,
 }
 
-/// A new stable position id, `pos_` followed by a random UUID (no data is encoded).
+/// A new stable position id: `pos_` + a time-ordered UUID v7 (encodes only creation time).
 pub fn new_position_id() -> String {
-    format!("pos_{}", uuid::Uuid::new_v4().simple())
+    format!("pos_{}", uuid::Uuid::now_v7().simple())
 }
 
 /// Give every position without an id a new one. Returns whether any changed.
@@ -672,6 +672,18 @@ mod tests {
         assert_eq!(values[1]["Id"], "pos_keep");
         assert_ne!(new_position_id(), new_position_id());
     }
+
+    #[test]
+    fn test_new_position_id_is_time_ordered() {
+        let a = new_position_id();
+        let b = new_position_id();
+        assert!(a.starts_with("pos_"), "{a}");
+        assert!(b.starts_with("pos_"), "{b}");
+        assert_eq!(a.len(), 36, "{a}");
+        assert_eq!(b.len(), 36, "{b}");
+        assert!(a <= b, "{a} should sort before {b}");
+    }
+
     use std::fs;
 
     #[tokio::test]
