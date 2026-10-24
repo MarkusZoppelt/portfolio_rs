@@ -195,7 +195,31 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
     }
 
     // Size what is excluded from totals: last cached price (any age), else
-    // cost basis, converted with the current or last cached FX rate.
+    // cost basis, converted with the current or last cached FX rate. FX
+    // pairs only an excluded position needs are fetched here (Finance N4:
+    // no historic FX for the cost basis, so the current rate it is).
+    let needed: HashSet<String> = portfolio
+        .positions
+        .iter()
+        .filter(|p| p.get_ticker().is_some() && !p.has_market_price())
+        .filter_map(|p| {
+            p.price_currency()
+                .map(str::to_string)
+                .or_else(|| {
+                    p.get_ticker()
+                        .and_then(|t| provider.last_known(t))
+                        .and_then(|(_, c)| c)
+                })
+                .or_else(|| p.currency.clone())
+        })
+        .filter_map(|ccy| fx_symbol(base_currency, &ccy))
+        .map(|(symbol, _)| symbol)
+        .filter(|symbol| !symbol.is_empty() && !fx_prices.contains_key(symbol))
+        .collect();
+    for symbol in needed {
+        let quote = provider.latest(&symbol).await.ok();
+        fx_prices.insert(symbol, quote.map(|q| q.price));
+    }
     let fx_for = |ccy: &str| -> Option<crate::money::Decimal> {
         let (symbol, scale) = fx_symbol(base_currency, ccy)?;
         if symbol.is_empty() {
@@ -235,6 +259,7 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
                 .unwrap_or_else(|| "unknown".to_string())
         });
         position.runtime.estimate_assumed_as_of = None;
+        position.runtime.estimate_current_fx = false;
         position.excluded_estimate = match from_last {
             Some(v) if v > crate::money::Decimal::ZERO => {
                 position.runtime.estimate_assumed_as_of = assumed;
@@ -248,6 +273,10 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
                     .map(str::to_string)
                     .or_else(|| provider.last_known(&ticker).and_then(|(_, c)| c))
                     .or_else(|| position.currency.clone());
+                let foreign = ccy
+                    .as_deref()
+                    .and_then(|c| fx_symbol(base_currency, c))
+                    .is_some_and(|(symbol, _)| !symbol.is_empty());
                 let (fx, basis) = match ccy {
                     Some(c) => (fx_for(&c), ExcludedBasis::CostBasis),
                     None => (
@@ -255,12 +284,14 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
                         ExcludedBasis::CostBasisAssumedBase,
                     ),
                 };
-                position
+                let est = position
                     .average_cost_dec()
                     .zip(fx)
                     .map(|(cost, fx)| cost * qty * fx)
                     .filter(|v| *v > crate::money::Decimal::ZERO)
-                    .map(|v| (v, basis))
+                    .map(|v| (v, basis));
+                position.runtime.estimate_current_fx = foreign && est.is_some();
+                est
             }
         };
     }

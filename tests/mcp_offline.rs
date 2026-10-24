@@ -2479,6 +2479,34 @@ async fn recorded_currency_converts_cost_basis_of_unpriced_position() {
     client.cancel().await.unwrap();
 }
 
+/// Finance retest N4: when only unpriced positions need an FX pair, the
+/// cost-basis share still converts at the current FX rate (flagged).
+#[tokio::test]
+async fn cost_basis_share_falls_back_to_current_fx() {
+    let (_tmp, data, policy) = big_files(r#", "Currency": "USD""#);
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["BTC-USD", "SPY", "TLT", "GLD", "GSG"])),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_allocation", json!({})).await;
+    assert!(v["excludedValueShare"].is_number(), "{v}");
+    let f = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "cost_basis_current_fx")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(
+        f["detail"]["estimatePositionIds"].as_array().unwrap().len(),
+        1,
+        "{f}"
+    );
+    client.cancel().await.unwrap();
+}
+
 /// Finance N4: with the materiality threshold off, possible breaches appear,
 /// at most one per class and limit, with the priced-only percent.
 #[tokio::test]

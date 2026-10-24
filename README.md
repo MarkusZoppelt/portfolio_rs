@@ -311,7 +311,9 @@ positions in `excludedPositions` and their estimated share in
 null without an estimate). The cost basis is converted from the quote
 currency, the cached currency or the position's optional recorded
 `"Currency"`; with none of them it is assumed to be in the base currency
-(`cost_basis_assumed_base`).
+(`cost_basis_assumed_base`). There is no historic FX, so a foreign cost basis
+uses the current FX rate (fetched even when only excluded positions need it)
+and is listed in `cost_basis_current_fx` `detail.estimatePositionIds`.
 `check_policy` reports a breach only when it is certain (`detail.basis:
 "partial"`); a band or limit that might be violated is a `possible_breach`
 warning (at most one per class and limit, with the priced-only percent in the

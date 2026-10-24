@@ -236,7 +236,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "cost_basis_current_fx",
         "data_quality",
         "info",
-        "Invested and PnL of foreign-currency positions use the current FX rate, not the rate on the purchase date.",
+        "Invested and PnL of foreign-currency positions, and the cost-basis estimate of excluded ones (detail.estimatePositionIds), use the current FX rate, not the rate on the purchase date.",
     ),
     (
         "fx_historic_unavailable",
