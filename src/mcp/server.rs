@@ -494,6 +494,10 @@ impl PortfolioServer {
     ) -> Result<Json<PortfoliosOutput>, ToolError> {
         let s = &self.served;
         let has_policy = s.state.policy().await.is_some();
+        let data_status = self
+            .meta(&self.portfolio(false).await, Vec::new())
+            .await
+            .data_status;
         Ok(Json(PortfoliosOutput {
             schema_version: SCHEMA_VERSION,
             as_of: now_rfc3339(),
@@ -505,6 +509,7 @@ impl PortfolioServer {
                 has_policy,
                 is_default: true,
                 quote_source: s.quote_source.to_string(),
+                data_status,
                 path: input.include_paths.unwrap_or(false).then(|| s.path.clone()),
             }],
         }))

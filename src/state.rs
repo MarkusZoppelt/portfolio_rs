@@ -353,8 +353,16 @@ impl AppState {
             .collect();
 
         let pnl_percent = portfolio.hist_percent();
+        let has_stale = portfolio.positions.iter().any(|p| p.is_stale());
+        let complete = portfolio
+            .positions
+            .iter()
+            .all(|p| p.get_ticker().is_none() || p.has_market_price());
 
         PortfolioSummaryDto {
+            has_stale,
+            complete,
+            data_status: crate::mcp::analytics::data_status(complete, has_stale).to_string(),
             total_value: to_f64(breakdown.total),
             total_invested: to_f64(total_invested),
             total_pnl: to_f64(total_pnl),
@@ -763,6 +771,15 @@ pub struct PortfolioSummaryDto {
     pub securities_value: f64,
     pub allocation: HashMap<String, f64>,
     pub positions: Vec<PositionDto>,
+    /// Some price or FX rate is older than the stale threshold.
+    #[serde(default)]
+    pub has_stale: bool,
+    /// Every ticker position has a value.
+    #[serde(default)]
+    pub complete: bool,
+    /// complete | partial | stale (as in the MCP tools).
+    #[serde(default)]
+    pub data_status: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

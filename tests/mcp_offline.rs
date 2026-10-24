@@ -2552,6 +2552,31 @@ async fn expired_cache_bounds_cap_severity_at_warning() {
     client.cancel().await.unwrap();
 }
 
+/// Finance N5 and gaps: get_positions and get_context list positions in the
+/// same order on partial data; list_portfolios carries dataStatus.
+#[tokio::test]
+async fn partial_data_order_matches_and_list_portfolios_has_data_status() {
+    let (_t, client) = connect_partial("quotes_no_gsg.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let names: Vec<Value> = v["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].clone())
+        .collect();
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    let ctx_names: Vec<Value> = ctx["context"]["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].clone())
+        .collect();
+    assert_eq!(names, ctx_names);
+    let l = ok(&client, "list_portfolios", json!({})).await;
+    assert_eq!(l["portfolios"][0]["dataStatus"], "partial", "{l}");
+    client.cancel().await.unwrap();
+}
+
 /// Finance L4: untargetedClasses lists classes in `classes` order.
 fn assert_untargeted_in_class_order(v: &Value) {
     let untargeted: Vec<&Value> = v["untargetedClasses"].as_array().unwrap().iter().collect();

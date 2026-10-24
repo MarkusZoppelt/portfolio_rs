@@ -261,11 +261,11 @@ governed by the cash-buffer and asset-class rules instead.
 
 | Tool | Returns |
 | --- | --- |
-| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` summed over the priced market positions, `pnlPartial: true` when a position is left out. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
+| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` summed over the priced market positions, `pnlPartial: true` when a position is left out. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange (value ties and unpriced rows by name, the same order as `get_context`) |
 | `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); one deduplicated list (policy findings + warning-severity data quality, filtered by `minSeverity`) feeds `findings` (policy part), `breaches` (critical), top-level `warnings` (warning severity), `counts` and `status`, so `counts.warning` = `warnings` length and `counts.critical` = `breaches` length; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with `synthesized: true`, dated at the earliest purchase date or else the file date, reported in `dateSource`: `earliest_purchase` | `file_mtime`, fees 0); `fees` is 0 when none is recorded; `complete` covers current values only; matching transactions whose `amountBase` is null (no historic FX) are counted in `fxHistoricMissing` with an `fx_historic_unavailable` warning; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
-| `list_portfolios` | The served portfolio with its `quoteSource` (`yahoo`, `offline` or `fixture`; paths only with `includePaths`) |
+| `list_portfolios` | The served portfolio with its `dataStatus` and `quoteSource` (`yahoo`, `offline` or `fixture`; paths only with `includePaths`) |
 | `get_context` | The `portfolio_rs context` report as Markdown or JSON (money and percentages rounded to 2 decimals, as in `/api/context`). When a position is unpriced, `summary.incomplete` carries a banner (also the first line of the markdown) and `cashPercent`, cash weights and `largestPositionPercent` are null |
 
 Errors come back as tool results with `isError: true` and
@@ -292,7 +292,7 @@ Serve your portfolio to local scripts, agents, and GUIs:
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Liveness check |
-| `GET /api/portfolio` | Full portfolio summary |
+| `GET /api/portfolio` | Full portfolio summary, with `complete`, `hasStale` and `dataStatus` |
 | `GET/POST /api/positions` | List / create positions |
 | `GET/PUT/DELETE /api/positions/{id}` | Read / update / delete a position by stable `pos_` id (`positionId`; a numeric index still works) |
 | `GET /api/allocation` | Allocation breakdown |
