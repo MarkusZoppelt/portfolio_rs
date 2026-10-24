@@ -112,7 +112,8 @@ pub fn fx_symbol(base: &str, quote_ccy: &str) -> Option<(String, f64)> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortfolioPosition {
-    /// Stable id (`pos_<uuid>`). Optional in the file; generated on first write.
+    /// Stable id (`pos_<uuid>`). Optional in the file; derived deterministically
+    /// from the position content when absent (see `derived_position_id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) id: Option<String>,
     pub(crate) name: Option<String>,
@@ -152,27 +153,117 @@ pub fn new_position_id() -> String {
     format!("pos_{}", uuid::Uuid::now_v7().simple())
 }
 
-/// Give every position without an id a new one. Returns whether any changed.
+/// Namespace for ids derived from position content (fixed, never change it).
+const POSITION_ID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x7c1e_4a5b_9d2f_4e60_8b3a_1f0c_d5e2_9a47);
+
+/// A deterministic id for a position that has no stored `Id`: `pos_` + a
+/// UUID v5 over name, ticker, asset class and the first purchase (date and
+/// quantity). `occurrence` separates otherwise identical positions. The same
+/// file always yields the same ids, so read-only readers (MCP, API before the
+/// first save) stay stable across restarts.
+pub fn derived_position_id(
+    name: Option<&str>,
+    ticker: Option<&str>,
+    asset_class: &str,
+    first_purchase: Option<(Option<&str>, Decimal)>,
+    occurrence: usize,
+) -> String {
+    let (date, quantity) = match first_purchase {
+        Some((d, q)) => (d.unwrap_or(""), q.normalize().to_string()),
+        None => ("", String::new()),
+    };
+    let key = format!(
+        "v1\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{date}\u{1f}{quantity}\u{1f}{occurrence}",
+        name.unwrap_or("").trim(),
+        ticker.unwrap_or("").trim().to_uppercase(),
+        asset_class.trim().to_lowercase(),
+    );
+    format!(
+        "pos_{}",
+        uuid::Uuid::new_v5(&POSITION_ID_NAMESPACE, key.as_bytes()).simple()
+    )
+}
+
+/// Give every position without an id a deterministic one (see
+/// [`derived_position_id`]). Stored ids always win. Returns whether any changed.
 pub fn ensure_position_ids(positions: &mut [PortfolioPosition]) -> bool {
+    let keyed: Vec<(String, usize)> = {
+        let mut seen: std::collections::HashMap<String, usize> = Default::default();
+        positions
+            .iter()
+            .map(|p| {
+                let first = p
+                    .purchases
+                    .first()
+                    .map(|pu| (pu.date.as_deref(), pu.quantity));
+                let base = derived_position_id(
+                    p.name.as_deref(),
+                    p.ticker.as_deref(),
+                    &p.asset_class,
+                    first,
+                    0,
+                );
+                let n = if p.id.is_none() {
+                    let e = seen.entry(base.clone()).or_default();
+                    *e += 1;
+                    *e - 1
+                } else {
+                    0
+                };
+                (base, n)
+            })
+            .collect()
+    };
     let mut changed = false;
-    for position in positions.iter_mut().filter(|p| p.id.is_none()) {
-        position.id = Some(new_position_id());
-        changed = true;
+    for (p, (_, n)) in positions.iter_mut().zip(keyed) {
+        if p.id.is_none() {
+            let first = p
+                .purchases
+                .first()
+                .map(|pu| (pu.date.as_deref(), pu.quantity));
+            p.id = Some(derived_position_id(
+                p.name.as_deref(),
+                p.ticker.as_deref(),
+                &p.asset_class,
+                first,
+                n,
+            ));
+            changed = true;
+        }
     }
     changed
 }
 
 /// [`ensure_position_ids`] on raw JSON objects, keeping every other field as is.
 pub fn ensure_json_position_ids(positions: &mut [serde_json::Value]) -> bool {
+    let mut seen: std::collections::HashMap<String, usize> = Default::default();
     let mut changed = false;
     for obj in positions.iter_mut().filter_map(|v| v.as_object_mut()) {
-        if !obj.get("Id").is_some_and(|id| id.is_string()) {
-            obj.insert(
-                "Id".to_string(),
-                serde_json::Value::String(new_position_id()),
-            );
-            changed = true;
+        if obj.get("Id").is_some_and(|id| id.is_string()) {
+            continue;
         }
+        let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(String::from);
+        let first = obj
+            .get("Purchases")
+            .and_then(|p| p.as_array())
+            .and_then(|a| a.first())
+            .map(|pu| {
+                let q = pu
+                    .get("Quantity")
+                    .and_then(|q| q.as_f64())
+                    .and_then(|q| Decimal::try_from(q).ok())
+                    .unwrap_or_default();
+                (pu.get("Date").and_then(|d| d.as_str()).map(String::from), q)
+            });
+        let (name, ticker, class) = (s("Name"), s("Ticker"), s("AssetClass").unwrap_or_default());
+        let fp = first.as_ref().map(|(d, q)| (d.as_deref(), *q));
+        let base = derived_position_id(name.as_deref(), ticker.as_deref(), &class, fp, 0);
+        let n = seen.entry(base).or_default();
+        let id = derived_position_id(name.as_deref(), ticker.as_deref(), &class, fp, *n);
+        *n += 1;
+        obj.insert("Id".to_string(), serde_json::Value::String(id));
+        changed = true;
     }
     changed
 }
@@ -738,6 +829,35 @@ mod tests {
         assert_eq!(values[0]["Custom"], 1);
         assert_eq!(values[1]["Id"], "pos_keep");
         assert_ne!(new_position_id(), new_position_id());
+    }
+
+    #[test]
+    fn test_missing_ids_are_derived_deterministically() {
+        let json = r#"[{"Name": "A", "Ticker": "spy", "AssetClass": "Stocks", "Amount": 2.5,
+                        "Purchases": [{"Date": "2025/01/02", "Quantity": 2.5}]},
+                       {"Name": "A", "Ticker": "spy", "AssetClass": "Stocks", "Amount": 2.5,
+                        "Purchases": [{"Date": "2025/01/02", "Quantity": 2.5}]},
+                       {"Name": "Cash", "AssetClass": "Cash", "Amount": 1}]"#;
+        let mut a: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let mut b = a.clone();
+        ensure_json_position_ids(&mut a);
+        ensure_json_position_ids(&mut b);
+        assert_eq!(a, b);
+        let ids: Vec<_> = a
+            .iter()
+            .map(|v| v["Id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.iter().all(|i| i.starts_with("pos_") && i.len() == 36));
+        assert_ne!(ids[0], ids[1], "identical positions still get distinct ids");
+        assert_ne!(ids[0], ids[2]);
+        // The struct path derives the same ids as the JSON path.
+        let mut positions: Vec<PortfolioPosition> = serde_json::from_str(json).unwrap();
+        ensure_position_ids(&mut positions);
+        let struct_ids: Vec<_> = positions
+            .iter()
+            .map(|p| p.id().unwrap().to_string())
+            .collect();
+        assert_eq!(struct_ids, ids);
     }
 
     #[test]
