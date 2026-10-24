@@ -21,7 +21,7 @@ static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> =
 static HISTORIC_CACHE: Lazy<Mutex<HistoricCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct Purchase {
     // Optional ISO date string (e.g., 2024-01-15)
@@ -33,6 +33,20 @@ pub struct Purchase {
     pub price: Option<Decimal>,
     #[serde(default, with = "rust_decimal::serde::float_option")]
     pub fees: Option<Decimal>,
+    /// Historic close filled in for a missing price. Used for calculations,
+    /// never serialized, so guesses are not saved back to the file.
+    #[serde(skip)]
+    pub estimated_price: Option<Decimal>,
+}
+
+impl Purchase {
+    /// The recorded price, or the estimated close when none was recorded.
+    pub fn effective_price(&self) -> Option<Decimal> {
+        match self.price {
+            Some(p) if p > Decimal::ZERO => Some(p),
+            _ => self.estimated_price.or(self.price),
+        }
+    }
 }
 
 /// Whether a ticker position has a usable market quote.
@@ -273,7 +287,7 @@ impl PortfolioPosition {
     fn priced_purchases(&self) -> impl Iterator<Item = (Decimal, Decimal)> + '_ {
         self.purchases
             .iter()
-            .filter_map(|p| p.price.map(|price| (price, p)))
+            .filter_map(|p| p.effective_price().map(|price| (price, p)))
             .filter(|(price, _)| *price > Decimal::ZERO)
             .map(|(price, p)| {
                 let quantity = p.quantity;
@@ -648,7 +662,7 @@ pub async fn handle_position_with<P: QuoteProvider>(
                     if needs_price && p.quantity > Decimal::ZERO {
                         if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
                             if let Ok(close) = provider.close_on(ticker, date).await {
-                                p.price = Some(dec(close.max(0.0)));
+                                p.estimated_price = Some(dec(close.max(0.0)));
                             }
                         }
                     }
@@ -797,6 +811,7 @@ mod tests {
                 quantity: dec(4.0),
                 price: Some(dec(400.0)),
                 fees: None,
+                estimated_price: None,
             }],
             previous_close: Some(dec(490.0)),
         };
@@ -924,6 +939,7 @@ mod tests {
             quantity: dec(3.0),
             price: Some(dec(80.0)),
             fees: None,
+            estimated_price: None,
         }];
         assert_eq!(position.market_price(), 100.0);
         assert_eq!(position.get_balance(), 150.0);
@@ -959,6 +975,7 @@ mod tests {
                 quantity: dec(0.1),
                 price: Some(dec(10.0)),
                 fees: Some(dec(0.1)),
+                estimated_price: None,
             })
             .collect();
         // In f64, 0.1 + 0.1 + 0.1 == 0.30000000000000004.

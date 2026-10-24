@@ -115,6 +115,49 @@ impl QuoteProvider for FixtureProvider {
     }
 }
 
+/// Runtime-selected provider (the trait itself is not object safe).
+#[derive(Debug, Clone, Default)]
+pub enum AnyProvider {
+    #[default]
+    Yahoo,
+    Offline,
+    Fixture(Box<FixtureProvider>),
+}
+
+impl QuoteProvider for AnyProvider {
+    async fn latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
+        match self {
+            Self::Yahoo => YahooProvider.latest(symbol).await,
+            Self::Offline => OfflineProvider.latest(symbol).await,
+            Self::Fixture(f) => f.latest(symbol).await,
+        }
+    }
+
+    async fn previous_close(&self, symbol: &str) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo => YahooProvider.previous_close(symbol).await,
+            Self::Offline => OfflineProvider.previous_close(symbol).await,
+            Self::Fixture(f) => f.previous_close(symbol).await,
+        }
+    }
+
+    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
+            Self::Offline => OfflineProvider.close_on(symbol, date).await,
+            Self::Fixture(f) => f.close_on(symbol, date).await,
+        }
+    }
+
+    async fn name(&self, symbol: &str) -> Option<String> {
+        match self {
+            Self::Yahoo => YahooProvider.name(symbol).await,
+            Self::Offline => OfflineProvider.name(symbol).await,
+            Self::Fixture(f) => f.name(symbol).await,
+        }
+    }
+}
+
 /// Never touches the network; every lookup is unavailable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OfflineProvider;

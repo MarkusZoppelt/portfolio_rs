@@ -16,9 +16,10 @@ use tokio::sync::RwLock;
 
 use crate::money::{dec, percent_change, to_f64, Decimal};
 use crate::services::atomic_write::write_atomic_with_backup;
+use crate::services::quotes::AnyProvider;
 use crate::{
     context::PortfolioContext,
-    create_live_portfolio_in,
+    create_live_portfolio_with,
     decision::generate_decision_draft,
     doctor::{check_workspace, WorkspaceHealth},
     document::write_dated_document,
@@ -31,6 +32,7 @@ use crate::{
     validate::{validate_portfolio_file, ValidationReport},
     AppConfig, NetworkStatus, Portfolio, PortfolioPosition, Purchase,
 };
+use std::sync::Arc;
 
 /// How long a fetched portfolio (with live quotes) stays fresh before the
 /// next [`AppState::portfolio`] call re-fetches quotes.
@@ -50,6 +52,7 @@ pub struct AppState {
     pub currency: RwLock<String>,
     pub network_status: RwLock<NetworkStatus>,
     portfolio_cache: RwLock<Option<CachedPortfolio>>,
+    quotes: AnyProvider,
 }
 
 fn path_to_string(path: &Path) -> Result<String> {
@@ -68,6 +71,15 @@ impl AppState {
             currency: RwLock::new(currency),
             network_status: RwLock::new(NetworkStatus::Disconnected),
             portfolio_cache: RwLock::new(None),
+            quotes: AnyProvider::default(),
+        }
+    }
+
+    /// [`Self::new`] with an explicit quote provider (tests, offline mode).
+    pub fn with_quotes(currency: String, quotes: AnyProvider) -> Self {
+        Self {
+            quotes,
+            ..Self::new(currency)
         }
     }
 
@@ -210,7 +222,8 @@ impl AppState {
     async fn fetch_portfolio(&self) -> Portfolio {
         let json = self.positions_json.read().await.clone();
         let currency = self.currency().await;
-        let (portfolio, status) = create_live_portfolio_in(json, &currency, false).await;
+        let (portfolio, status) =
+            create_live_portfolio_with(Arc::new(self.quotes.clone()), json, &currency, false).await;
         *self.network_status.write().await = status;
         *self.portfolio_cache.write().await = Some(CachedPortfolio {
             portfolio: portfolio.clone(),
@@ -416,6 +429,7 @@ impl AppState {
                     quantity: dec(p.quantity),
                     price: p.price.map(dec),
                     fees: p.fees.map(dec),
+                    estimated_price: None,
                 })
                 .collect(),
             previous_close: None,
@@ -473,6 +487,7 @@ impl AppState {
                         quantity: dec(p.quantity),
                         price: p.price.map(dec),
                         fees: p.fees.map(dec),
+                        estimated_price: None,
                     })
                     .collect();
             }
@@ -961,7 +976,7 @@ fn position_to_dto(id: usize, position: &PortfolioPosition) -> PositionDto {
             .map(|p| PurchaseDto {
                 date: p.date.clone(),
                 quantity: to_f64(p.quantity),
-                price: p.price.map(to_f64),
+                price: p.effective_price().map(to_f64),
                 fees: p.fees.map(to_f64),
             })
             .collect(),
@@ -1099,6 +1114,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_estimated_purchase_prices_are_not_saved() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("positions.json");
+        let raw = r#"[{"Name": "Fake", "Ticker": "FAKE", "AssetClass": "Stocks", "Amount": 3,
+            "Purchases": [{"Date": "2025/01/02", "Quantity": 2},
+                          {"Date": "2025/02/03", "Quantity": 1, "Price": 50}]}]"#;
+        std::fs::write(&path, raw).unwrap();
+        let fixture = crate::FixtureProvider::from_json(
+            r#"{"latest": {"FAKE": {"price": 60.0, "currency": "EUR"}},
+                "close_on": {"FAKE": 40.0}}"#,
+        )
+        .unwrap();
+        let state =
+            AppState::with_quotes("EUR".to_string(), AnyProvider::Fixture(Box::new(fixture)));
+
+        // load_file refreshes prices, like the API does at startup.
+        state.load_file(path.to_str().unwrap()).await.unwrap();
+        let portfolio = state.portfolio().await;
+        let pos = &portfolio.positions[0];
+        assert_eq!(pos.purchases[0].estimated_price, Some(dec(40.0)));
+        assert_eq!(pos.total_invested(), Some(130.0));
+
+        state.save().await.unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let purchases = &saved[0]["Purchases"];
+        assert!(purchases[0]["Price"].is_null(), "guessed price was saved");
+        assert_eq!(purchases[1]["Price"], serde_json::json!(50.0));
+    }
+
+    #[tokio::test]
     async fn test_save_assigns_stable_position_ids() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("positions.json");
@@ -1168,6 +1214,7 @@ mod tests {
             quantity: dec(10.0),
             price: Some(dec(100.0)),
             fees: None,
+            estimated_price: None,
         });
         // Balance would count as profit under total-value-minus-invested; the
         // purchase would count as a loss if cash cost basis were included.
@@ -1177,6 +1224,7 @@ mod tests {
             quantity: dec(1.0),
             price: Some(dec(8_000.0)),
             fees: None,
+            estimated_price: None,
         });
 
         let mut portfolio = Portfolio::new();
