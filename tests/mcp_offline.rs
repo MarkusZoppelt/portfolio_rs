@@ -1985,3 +1985,23 @@ async fn opening_deposit_is_dated_and_filterable() {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     assert_eq!(v["transactions"][0]["date"], today);
 }
+
+/// Item 10: get_transactions is incomplete when matching amountBase values are
+/// null (no historic FX), and complete when every base amount is known.
+#[tokio::test]
+async fn transactions_complete_reflects_base_amounts() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_transactions", json!({})).await;
+    assert_eq!(v["complete"], false);
+    assert!(v["totals"]["buyAmountBase"].is_null());
+    let w = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "fx_historic_unavailable")
+        .unwrap();
+    assert!(!w["detail"]["positionIds"].as_array().unwrap().is_empty());
+    let v = ok(&client, "get_transactions", json!({"types": ["deposit"]})).await;
+    assert_eq!(v["complete"], true, "{v}");
+    assert!(v["totals"]["depositAmountBase"].is_number());
+}
