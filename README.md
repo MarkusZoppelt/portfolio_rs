@@ -203,7 +203,10 @@ start before the day before `from` adds a `start_point_gap` note. The end is
 today's live valuation, or for a past `to` the last snapshot inside
 [`from`, `to`] (none: `insufficient_history`). A non-cash position held at
 the start that is gone with no sell entry (`vanished_position`) is booked as an
-unknown external flow, never a loss, and the figures are partial. A change of
+unknown external flow, never a loss, and the figures are partial. Likewise a
+position missing from the start snapshot with no purchase dated in the window
+(`untracked_position`, e.g. a buy recorded late): flows follow transaction
+dates, never a position's first appearance in a snapshot. A change of
 `baseCurrency` between the snapshots of the period gives `base_currency_changed`
 and null, partial figures. Contributions are buys minus
 sells dated in that window (from the purchases) plus the change in cash

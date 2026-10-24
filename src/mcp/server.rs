@@ -725,6 +725,25 @@ impl PortfolioServer {
                 .detail(json!({ "positionIds": vanished })),
             );
         }
+        let appeared = perf::appeared(&start, &end, &txs);
+        if !appeared.is_empty() {
+            meta.complete = false;
+            meta.data_status = analytics::data_status(false, has_stale).to_string();
+            warnings.push(
+                Finding::new(
+                    "untracked_position",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    format!(
+                        "{} position(s) held on {} are missing from the {} snapshot and have no purchase dated in between; their value is booked as an unknown external flow, not a gain, and the figures are partial.",
+                        appeared.len(),
+                        end.date,
+                        start.date
+                    ),
+                )
+                .detail(json!({ "positionIds": appeared })),
+            );
+        }
         // Finance B7: values in different base currencies cannot be compared.
         let mut currencies: Vec<String> = std::iter::once(&start)
             .chain(
