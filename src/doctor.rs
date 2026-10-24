@@ -28,6 +28,68 @@ pub struct WorkspaceHealth {
     pub warning_count: usize,
 }
 
+/// `.gitignore` patterns that must cover backups, temp files and the database.
+pub const PRIVATE_ARTIFACT_PATTERNS: [&str; 3] =
+    ["positions.json.bak", ".positions.json.tmp-*", "database/"];
+
+/// Warn when private artifacts are not ignored, or are already tracked by git.
+fn private_artifacts_check(dir: &Path) -> (HealthStatus, String) {
+    let ignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
+    let lines: Vec<&str> = ignore.lines().map(str::trim).collect();
+    let missing: Vec<&str> = PRIVATE_ARTIFACT_PATTERNS
+        .iter()
+        .copied()
+        .filter(|p| !lines.iter().any(|l| l.trim_start_matches('/') == *p))
+        .collect();
+    let tracked = tracked_private_artifacts(dir);
+
+    let mut problems = Vec::new();
+    if !missing.is_empty() {
+        problems.push(format!("not in .gitignore: {}", missing.join(", ")));
+    }
+    if !tracked.is_empty() {
+        problems.push(format!(
+            "tracked by git (run `git rm --cached`): {}",
+            tracked.join(", ")
+        ));
+    }
+    if problems.is_empty() {
+        (
+            HealthStatus::Ok,
+            "Backups, temp files and database/ are ignored and untracked".to_string(),
+        )
+    } else {
+        (
+            HealthStatus::Warning,
+            format!("Private artifacts {}", problems.join("; ")),
+        )
+    }
+}
+
+/// Files under `dir` that git tracks and should not. Empty if git is unavailable.
+fn tracked_private_artifacts(dir: &Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "ls-files",
+            "--",
+            "positions.json",
+            "positions.json.bak",
+            ".positions.json.tmp-*",
+            "database",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Check a workspace directory for common health issues.
 pub fn check_workspace(dir: &str) -> Result<WorkspaceHealth> {
     let mut checks = Vec::new();
@@ -149,6 +211,17 @@ pub fn check_workspace(dir: &str) -> Result<WorkspaceHealth> {
         warning_count += 1;
     }
 
+    // Backups, temp files and the local database hold private data too.
+    let (status, message) = private_artifacts_check(Path::new(dir));
+    if status == HealthStatus::Warning {
+        warning_count += 1;
+    }
+    checks.push(HealthCheck {
+        name: "Private artifacts".to_string(),
+        status,
+        message,
+    });
+
     // Check for unencrypted sensitive files
     let positions = Path::new(dir).join("positions.json");
     if positions.exists() {
@@ -170,4 +243,49 @@ pub fn check_workspace(dir: &str) -> Result<WorkspaceHealth> {
         issue_count,
         warning_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_private_artifacts_must_be_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "positions.json\n").unwrap();
+        let (status, message) = private_artifacts_check(tmp.path());
+        assert_eq!(status, HealthStatus::Warning);
+        assert!(message.contains("positions.json.bak"));
+        assert!(message.contains("database/"));
+
+        let all = PRIVATE_ARTIFACT_PATTERNS.join("\n");
+        std::fs::write(tmp.path().join(".gitignore"), all).unwrap();
+        assert_eq!(private_artifacts_check(tmp.path()).0, HealthStatus::Ok);
+    }
+
+    #[test]
+    fn test_tracked_private_artifacts_warn() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        if !git(dir, &["init", "-q"]) {
+            return; // git not installed (e.g. sandboxed build)
+        }
+        std::fs::write(dir.join(".gitignore"), PRIVATE_ARTIFACT_PATTERNS.join("\n")).unwrap();
+        std::fs::write(dir.join("positions.json.bak"), "[]").unwrap();
+        assert!(git(dir, &["add", "-f", "positions.json.bak"]));
+        let (status, message) = private_artifacts_check(dir);
+        assert_eq!(status, HealthStatus::Warning);
+        assert!(message.contains("tracked by git"), "{message}");
+        assert!(message.contains("positions.json.bak"));
+    }
 }

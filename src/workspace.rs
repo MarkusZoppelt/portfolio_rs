@@ -13,6 +13,9 @@ const WATCHLIST_TEMPLATE: &str = "[]\n";
 
 const GITIGNORE_TEMPLATE: &str = r"# Private financial data — never commit these.
 positions.json
+positions.json.bak
+.positions.json.tmp-*
+database/
 /portfolio/diary/
 /portfolio/decisions/
 /portfolio/reports/
