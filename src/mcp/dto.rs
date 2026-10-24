@@ -287,6 +287,12 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "A position held at the end is missing from the start snapshot with no purchase dated in the period; its value is an unknown external flow and figures are partial.",
     ),
     (
+        "ledger_changed",
+        "data_quality",
+        "warning",
+        "The purchase list no longer matches the flows a snapshot recorded (edited afterwards); figures are partial.",
+    ),
+    (
         "base_currency_changed",
         "data_quality",
         "warning",

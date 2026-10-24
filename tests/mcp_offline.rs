@@ -3106,3 +3106,54 @@ async fn late_recorded_position_is_a_flow_not_a_gain() {
     assert!(f("marketEffect").abs() < 0.01, "{v}");
     client.cancel().await.unwrap();
 }
+
+/// Finance B8 (run6 S4): snapshots record their own flows, and a purchase
+/// list edited afterwards is flagged instead of silently moving the figures.
+#[tokio::test]
+async fn edited_ledger_contradicting_snapshots_warns() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_today(tmp.path()).await;
+    let recorded = today["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "market")
+        .expect("market position")
+        .clone();
+    assert!(recorded["ledgerBase"].is_number(), "{recorded}");
+    assert!(today["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["kind"] != "cash" || p.get("ledgerBase").is_none()));
+    let mut old = today.clone();
+    old["date"] = json!(day(-1));
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert!(has_code(&v, "ledger_changed").is_none(), "{v}");
+    client.cancel().await.unwrap();
+
+    // The purchase list said something else when the snapshot was taken.
+    for p in old["positions"].as_array_mut().unwrap() {
+        if p["positionId"] == recorded["positionId"] {
+            p["ledgerBase"] = json!(recorded["ledgerBase"].as_f64().unwrap() + 240.0);
+        }
+    }
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    let w = has_code(&v, "ledger_changed").expect("flag");
+    assert_eq!(w["detail"]["positionIds"][0], recorded["positionId"], "{w}");
+    assert_eq!(w["detail"]["snapshotDates"][0], day(-1), "{w}");
+    assert_eq!(v["dataStatus"], "partial", "{v}");
+    client.cancel().await.unwrap();
+}

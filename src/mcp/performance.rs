@@ -51,6 +51,38 @@ fn tx_flow(tx: &Transaction, fx: Option<f64>) -> Option<f64> {
     Some(sign * amount)
 }
 
+/// Net flows of position `id` dated on or before `date` (the snapshot's own
+/// record of the purchase list, Finance B8). `None` when an amount is unknown.
+pub fn ledger_to_date(txs: &[Transaction], id: &str, date: &str, fx: Option<f64>) -> Option<f64> {
+    let mut sum = 0.0;
+    for tx in txs
+        .iter()
+        .filter(|t| t.position_id == id && t.date.as_deref().is_some_and(|d| d <= date))
+    {
+        sum += tx_flow(tx, fx)?;
+    }
+    Some(round2(sum))
+}
+
+/// Positions whose recorded `ledgerBase` in any of `points` differs from
+/// what today's purchase list gives for that date (an edited or rewritten
+/// ledger, Finance B8 S4/S6). Snapshots without the field are not checked.
+pub fn ledger_mismatches(points: &[&Snapshot], txs: &[Transaction]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for snap in points {
+        for p in &snap.positions {
+            let Some(recorded) = p.ledger_base else {
+                continue;
+            };
+            let now = ledger_to_date(txs, &p.position_id, &snap.date, p.fx_rate);
+            if now.is_none_or(|n| (n - recorded).abs() > 0.01) {
+                out.push((snap.date.clone(), p.position_id.clone()));
+            }
+        }
+    }
+    out
+}
+
 fn in_interval(tx: &Transaction, after: &str, upto: &str) -> bool {
     tx.date.as_deref().is_some_and(|d| d > after && d <= upto)
 }
@@ -239,6 +271,7 @@ mod tests {
 
     fn pos(id: &str, kind: &str, class: &str, v: f64) -> SnapshotPosition {
         SnapshotPosition {
+            ledger_base: None,
             position_id: id.into(),
             kind: kind.into(),
             asset_class: class.into(),

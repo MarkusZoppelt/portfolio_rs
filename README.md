@@ -206,7 +206,10 @@ the start that is gone with no sell entry (`vanished_position`) is booked as an
 unknown external flow, never a loss, and the figures are partial. Likewise a
 position missing from the start snapshot with no purchase dated in the window
 (`untracked_position`, e.g. a buy recorded late): flows follow transaction
-dates, never a position's first appearance in a snapshot. A change of
+dates, never a position's first appearance in a snapshot. Each snapshot
+records per position the net buys minus sells dated up to its date
+(`ledgerBase`); when today's purchase list gives a different amount, the
+ledger was edited afterwards and `ledger_changed` marks the figures partial. A change of
 `baseCurrency` between the snapshots of the period gives `base_currency_changed`
 and null, partial figures. Contributions are buys minus
 sells dated in that window (from the purchases) plus the change in cash
@@ -247,7 +250,7 @@ snapshots then turn incomplete. An incomplete snapshot never replaces a
 complete one for the same day; `snapshot` warns and keeps the complete
 line. Each line is
 `{date, baseCurrency, positions: [{positionId, kind, assetClass, quantity,
-price, priceCurrency, fxRate, valueBase}], cashBase, totalBase, netFlowsBase,
+price, priceCurrency, fxRate, valueBase, ledgerBase}], cashBase, totalBase, netFlowsBase,
 complete, dataStatus}`. The workspace `.gitignore` template covers
 `/portfolio/history/`, `snapshots.jsonl` and `.snapshots.jsonl.tmp-*`, and
 `doctor` warns when they are missing or tracked by git.
