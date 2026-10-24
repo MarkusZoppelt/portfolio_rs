@@ -389,6 +389,8 @@ impl PortfolioServer {
             count: matching.len(),
             buy_amount_base: sum(TxType::Buy),
             sell_amount_base: sum(TxType::Sell),
+            deposit_amount_base: sum(TxType::Deposit),
+            withdrawal_amount_base: sum(TxType::Withdrawal),
         };
         let mut warnings = Vec::new();
         if matching

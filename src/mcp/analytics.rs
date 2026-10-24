@@ -687,8 +687,29 @@ pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
         } else {
             Some(base.to_string())
         };
+        if p.is_cash() && p.get_purchases().is_empty() {
+            let balance = p.balance_dec();
+            out.push(Transaction {
+                id: format!("tx_{id}_opening"),
+                date: None,
+                tx_type: TxType::Deposit,
+                position_id: id.clone(),
+                ticker: None,
+                asset_class: p.get_asset_class().to_string(),
+                quantity: qty(balance),
+                price: Some(1.0),
+                price_source: "cash".to_string(),
+                fees: None,
+                amount: Some(money(balance)),
+                currency: currency.clone(),
+                amount_base: Some(money(balance)),
+            });
+        }
         for (i, pur) in p.get_purchases().iter().enumerate() {
+            let cash = p.is_cash();
             let (price, source) = match (pur.recorded_price(), pur.estimated_price) {
+                // Cash moves at par in its own currency.
+                _ if cash => (Some(Decimal::ONE), "cash"),
                 (Some(pr), _) => (Some(pr), "recorded"),
                 (None, Some(est)) => (Some(est), "historic_close"),
                 _ => (None, "missing"),
@@ -707,14 +728,19 @@ pub fn transactions(portfolio: &Portfolio, base: &str) -> Vec<Transaction> {
                     .as_deref()
                     .and_then(parse_purchase_date)
                     .map(|d| d.format("%Y-%m-%d").to_string()),
-                tx_type: if sell { TxType::Sell } else { TxType::Buy },
+                tx_type: match (cash, sell) {
+                    (true, false) => TxType::Deposit,
+                    (true, true) => TxType::Withdrawal,
+                    (false, true) => TxType::Sell,
+                    (false, false) => TxType::Buy,
+                },
                 position_id: id.clone(),
                 ticker: p.get_ticker().map(String::from),
                 asset_class: p.get_asset_class().to_string(),
                 quantity: qty(q),
                 price: price.map(|d| to_f64(d.round_dp(6))),
                 price_source: source.to_string(),
-                fees: pur.fees.map(money),
+                fees: Some(money(fees)),
                 amount: amount.map(money),
                 currency: currency.clone(),
                 amount_base: if same_ccy { amount.map(money) } else { None },

@@ -313,6 +313,11 @@ pub struct CheckPolicyInput {
 pub enum TxType {
     Buy,
     Sell,
+    /// Cash paid in. A cash position without recorded entries appears as
+    /// one opening deposit of its balance with a null date.
+    Deposit,
+    /// Cash paid out (negative cash entry).
+    Withdrawal,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -516,10 +521,13 @@ pub struct Transaction {
     /// Absolute quantity.
     pub quantity: f64,
     pub price: Option<f64>,
-    /// recorded | historic_close | missing
+    /// recorded | historic_close | missing | cash (deposits)
     pub price_source: String,
+    /// Recorded fees; 0 when the purchase records none (the same 0 that
+    /// `amount` uses); null only for a synthesized opening deposit.
     pub fees: Option<f64>,
-    /// quantity * price (+ fees for buys, - fees for sells) in `currency`.
+    /// quantity * price (+ fees for buys, - fees for sells) in `currency`;
+    /// null when the price is missing.
     pub amount: Option<f64>,
     pub currency: Option<String>,
     /// `amount` in the base currency; null when currency differs (no historic FX).
@@ -533,6 +541,8 @@ pub struct TransactionTotals {
     /// Null when any matching buy has an unknown base amount.
     pub buy_amount_base: Option<f64>,
     pub sell_amount_base: Option<f64>,
+    pub deposit_amount_base: Option<f64>,
+    pub withdrawal_amount_base: Option<f64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
