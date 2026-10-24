@@ -550,6 +550,11 @@ async fn test_context_reads_quote_cache_read_only() {
     // A cached price is served but marked stale.
     assert_eq!(json["summary"]["dataStatus"], "stale", "{json}");
     assert_eq!(json["positions"][1]["price"], 500.0);
+    // A recorded purchase Price needs no historic lookup (retest B7).
+    assert_eq!(json["positions"][1]["averageCost"], 400.0, "{json}");
+    assert!(!json["dataQualityFlags"]
+        .to_string()
+        .contains("Missing cost basis"));
     assert_eq!(std::fs::read_to_string(&cache).unwrap(), cache_json);
     let names: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
     assert_eq!(names.len(), 2, "no extra files written");
