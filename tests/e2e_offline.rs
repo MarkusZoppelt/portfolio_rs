@@ -503,8 +503,13 @@ fn test_mcp_tools_list() {
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut cmd = std::process::Command::new(bin().get_program())
-        .arg("mcp")
+    let home = isolated_home();
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
+        .args(["mcp", "--offline", &example_data()])
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("PORTFOLIO_RS_QUOTES", "offline")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -513,20 +518,29 @@ fn test_mcp_tools_list() {
 
     let stdin = cmd.stdin.take().unwrap();
     let mut stdin_writer = std::io::BufWriter::new(stdin);
-    writeln!(
-        stdin_writer,
-        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list"}}"#
-    )
-    .unwrap();
+    for line in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    ] {
+        writeln!(stdin_writer, "{line}").unwrap();
+    }
     drop(stdin_writer);
 
     let output = cmd.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("get_portfolio_snapshot"));
-    assert!(stdout.contains("get_allocation"));
-    assert!(stdout.contains("get_context_markdown"));
-    assert!(stdout.contains("get_investment_policy"));
+    for tool in [
+        "get_positions",
+        "get_allocation",
+        "check_policy",
+        "get_transactions",
+        "list_portfolios",
+        "get_context",
+    ] {
+        assert!(stdout.contains(tool), "missing {tool}: {stdout}");
+    }
+    assert!(!stdout.contains("get_portfolio_snapshot"));
 }
 
 fn example_data() -> String {

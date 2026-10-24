@@ -28,6 +28,7 @@ pub mod decision;
 pub mod doctor;
 pub mod document;
 pub mod error;
+pub mod mcp;
 pub mod money;
 pub mod policy;
 pub mod portfolio;
