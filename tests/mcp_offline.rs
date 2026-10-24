@@ -3283,3 +3283,77 @@ async fn snapshot_cash_quantity_is_the_balance() {
         assert!((q * fx - v).abs() < 0.01, "{p}");
     }
 }
+
+/// Finance N1: a sell without a price is valued at the historic close like a
+/// buy, with a performance_approximate note and no spurious ledger_changed.
+#[tokio::test]
+async fn sell_without_price_uses_historic_close() {
+    let tmp = TempDir::new().unwrap();
+    let (path, original) = seed_today(tmp.path()).await;
+    let sell_day = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+    let data = tmp.path().join("positions.json");
+    let mut positions: Value =
+        serde_json::from_str(&std::fs::read_to_string(example_data()).unwrap()).unwrap();
+    let btc = positions
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|p| p["Ticker"] == "BTC-USD")
+        .expect("BTC in example data");
+    btc["Amount"] = json!(0.4);
+    btc["Purchases"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"Date": sell_day.format("%Y/%m/%d").to_string(), "Quantity": -0.05}));
+    let text = positions.to_string();
+    std::fs::write(&data, text).unwrap();
+    let data = data.to_string_lossy().into_owned();
+    let (_, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
+        file: Some(data.clone()),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await
+    .unwrap();
+    let mut mid: Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    mid["date"] = json!(day(-1));
+    let mut start = original;
+    start["date"] = json!(day(-7));
+    std::fs::write(&path, format!("{start}\n{mid}\n")).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let t = ok(&client, "get_transactions", json!({"types": ["sell"]})).await;
+    let sell = &t["transactions"][0];
+    assert_eq!(sell["priceSource"], "historic_close", "{t}");
+    assert!(sell["amount"].is_number(), "{t}");
+    let v = ok(&client, "get_performance", json!({"period": "week"})).await;
+    assert!(has_code(&v, "ledger_changed").is_none(), "{v}");
+    assert!(
+        v["change"].is_number() && v["netContributions"].is_number(),
+        "{v}"
+    );
+    let notes: Vec<&Value> = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "performance_approximate")
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|w| w["detail"]["reason"] == "estimated_transaction_price"),
+        "{v}"
+    );
+    client.cancel().await.unwrap();
+}

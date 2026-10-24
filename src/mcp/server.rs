@@ -883,7 +883,34 @@ impl PortfolioServer {
                     Category::DataQuality,
                     "No daily snapshot chain covers the period, so the return is a Modified Dietz approximation, not a time-weighted return.".to_string(),
                 )
-                .detail(json!({ "method": method })),
+                .detail(json!({ "method": method, "reason": "modified_dietz" })),
+            );
+        }
+        // Finance N1/S6: a buy or sell without a recorded price is valued at
+        // the historic close of its date, an estimate.
+        let estimated: Vec<&str> = txs
+            .iter()
+            .filter(|t| t.price_source == "historic_close")
+            .filter(|t| {
+                t.date
+                    .as_deref()
+                    .is_some_and(|d| d > start.date.as_str() && d <= end.date.as_str())
+            })
+            .map(|t| t.id.as_str())
+            .collect();
+        if !estimated.is_empty() {
+            warnings.push(
+                Finding::new(
+                    "performance_approximate",
+                    Severity::Info,
+                    Category::DataQuality,
+                    format!(
+                        "{} transaction(s) in the period have no recorded price and are valued at the historic close of their date, so contributions and market effect are approximate.",
+                        estimated.len()
+                    ),
+                )
+                .detail(json!({ "method": method, "reason": "estimated_transaction_price",
+                                "transactionIds": estimated })),
             );
         }
         out.twr_percent = twr.map(|v| (v * 100.0).round() / 100.0);
