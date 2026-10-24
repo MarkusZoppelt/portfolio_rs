@@ -91,6 +91,10 @@ pub fn position_effects(
         };
         if any.kind == "cash" {
             eff.net_contributions = ev - sv;
+        } else if e.is_none() && !has_tx_in(txs, id, start, end) {
+            // Vanished without a sell entry: an unknown external flow, never
+            // a loss (see [`vanished`]).
+            eff.net_contributions = ev - sv;
         } else {
             let mut flows = 0.0;
             for tx in txs
@@ -109,6 +113,25 @@ pub fn position_effects(
         out.insert(id.to_string(), (any.asset_class.clone(), eff));
     }
     Some(out)
+}
+
+fn has_tx_in(txs: &[Transaction], id: &str, start: &Snapshot, end: &Snapshot) -> bool {
+    txs.iter()
+        .any(|t| t.position_id == id && in_interval(t, &start.date, &end.date))
+}
+
+/// Non-cash positions held at the start (non-zero value) that are gone at
+/// the end with no transaction in the interval: removed from the data file
+/// without a sell entry. Their value is booked as an unknown external flow.
+pub fn vanished(start: &Snapshot, end: &Snapshot, txs: &[Transaction]) -> Vec<String> {
+    start
+        .positions
+        .iter()
+        .filter(|p| p.kind != "cash" && p.value_base.is_some_and(|v| v != 0.0))
+        .filter(|p| !end.positions.iter().any(|e| e.position_id == p.position_id))
+        .filter(|p| !has_tx_in(txs, &p.position_id, start, end))
+        .map(|p| p.position_id.clone())
+        .collect()
 }
 
 pub fn total(effects: &BTreeMap<String, (String, Effects)>) -> Effects {

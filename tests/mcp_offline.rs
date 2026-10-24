@@ -2917,11 +2917,100 @@ async fn performance_without_history_or_with_partial_data_is_null() {
     client.cancel().await.unwrap();
 }
 
-fn has_code(v: &Value, code: &str) -> Option<()> {
+fn has_code<'a>(v: &'a Value, code: &str) -> Option<&'a Value> {
     v["warnings"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|f| f["code"] == code)
-        .then_some(())
+        .find(|f| f["code"] == code)
+}
+
+/// Write `snaps` (today's snapshot re-dated) as the history in `dir`.
+async fn seed_history(dir: &Path, offsets: &[i64]) -> (PathBuf, Value) {
+    let (path, today) = seed_today(dir).await;
+    let mut text = String::new();
+    for o in offsets {
+        let mut s = today.clone();
+        s["date"] = json!(day(*o));
+        text.push_str(&format!("{s}\n"));
+    }
+    std::fs::write(&path, text).unwrap();
+    (path, today)
+}
+
+/// Finance B1: the start snapshot has a maximum age per period; a past end
+/// must lie inside the window; a "day" spanning more days gets a note.
+#[tokio::test]
+async fn performance_start_point_has_a_maximum_age() {
+    let tmp = TempDir::new().unwrap();
+    seed_history(tmp.path(), &[-20]).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "week"})).await;
+    assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
+    assert!(v["change"].is_null(), "{v}");
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "week", "maxStartAgeDays": 20}),
+    )
+    .await;
+    assert!(v["change"].is_number(), "{v}");
+    assert!(has_code(&v, "start_point_gap").is_some(), "{v}");
+    // Custom range after the only snapshot: never start = end from before.
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "custom", "from": day(-5), "to": day(-3), "maxStartAgeDays": 100}),
+    )
+    .await;
+    assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
+    assert!(v["startValue"].is_null(), "{v}");
+    client.cancel().await.unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    seed_history(tmp.path(), &[-3]).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert!(v["change"].is_number(), "{v}");
+    let gap = has_code(&v, "start_point_gap").expect("note");
+    assert_eq!(gap["detail"]["gapDays"], 2, "{gap}");
+    client.cancel().await.unwrap();
+}
+
+/// Finance B2 (run6 S1): a position removed from the data file without a
+/// sell entry is an unknown external flow, not a loss; figures are partial.
+#[tokio::test]
+async fn vanished_position_is_a_flow_not_a_loss() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_today(tmp.path()).await;
+    let mut old = today.clone();
+    old["date"] = json!(day(-2));
+    old["positions"].as_array_mut().unwrap().push(json!({
+        "positionId": "pos_gone", "kind": "market", "assetClass": "Crypto",
+        "quantity": 1.0, "price": 1000.0, "priceCurrency": "EUR", "fxRate": null, "valueBase": 1000.0
+    }));
+    old["totalBase"] = json!(old["totalBase"].as_f64().unwrap() + 1000.0);
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    let w = has_code(&v, "vanished_position").expect("flag");
+    assert_eq!(w["detail"]["positionIds"][0], "pos_gone", "{w}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "partial", "{v}");
+    let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k}: {v}"));
+    assert!((f("netContributions") + 1000.0).abs() < 0.01, "{v}");
+    assert!(f("marketEffect").abs() < 0.01, "{v}");
+    client.cancel().await.unwrap();
 }

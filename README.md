@@ -196,8 +196,14 @@ Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
 `groupBy` is `none`, `assetClass` or `position`.
 
 The start value is the last stored snapshot dated before `from`
-(`dataCoverage.startPointDate`); the end is today's live valuation, or for a
-past `to` the last snapshot on or before it. Contributions are buys minus
+(`dataCoverage.startPointDate`), at most `maxStartAgeDays` days before the
+day before `from` (default: `day`/`week` 3, `month`/`mtd` 5, `ytd`/`1y` 10;
+`custom` by its length); an older one gives `insufficient_history`, and a
+start before the day before `from` adds a `start_point_gap` note. The end is
+today's live valuation, or for a past `to` the last snapshot inside
+[`from`, `to`] (none: `insufficient_history`). A non-cash position held at
+the start that is gone with no sell entry (`vanished_position`) is booked as an
+unknown external flow, never a loss, and the figures are partial. Contributions are buys minus
 sells dated in that window (from the purchases) plus the change in cash
 balances, so a deposit is never return, and interest or dividends paid to cash
 count as contributions (`incomeEffect` is 0 until there is an income ledger).

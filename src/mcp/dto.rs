@@ -260,7 +260,19 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "insufficient_history",
         "data_quality",
         "warning",
-        "No snapshot before the period start; run `portfolio_rs snapshot` daily (cron or a systemd timer).",
+        "No usable snapshot for the period (none recent enough before the start, or none inside the window); run `portfolio_rs snapshot` daily (cron or a systemd timer).",
+    ),
+    (
+        "start_point_gap",
+        "data_quality",
+        "info",
+        "The start snapshot is older than the day before the period start; the measured span is longer than the period.",
+    ),
+    (
+        "vanished_position",
+        "data_quality",
+        "warning",
+        "A position held at the start is gone without a sell entry; its value is treated as an unknown external flow and figures are partial.",
     ),
     (
         "performance_partial",
@@ -722,6 +734,9 @@ pub struct GetPerformanceInput {
     pub to: Option<String>,
     /// none (default) | assetClass | position
     pub group_by: Option<GroupBy>,
+    /// Maximum age in days of the start snapshot before `from` (default by
+    /// period: day/week 3, month/mtd 5, ytd/1y 10; custom by length).
+    pub max_start_age_days: Option<u32>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
