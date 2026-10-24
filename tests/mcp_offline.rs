@@ -982,3 +982,48 @@ async fn readme_documents_every_tool_and_resource() {
     }
     client.cancel().await.unwrap();
 }
+
+/// Finance t1b: ids for positions without a stored `Id` must survive a
+/// restart, stored ids win, and the read-only server never writes the file.
+#[tokio::test]
+async fn position_ids_are_stable_across_server_starts() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    let mut data: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(example_data()).unwrap()).unwrap();
+    data[0]["Id"] = json!("pos_stored");
+    let original = serde_json::to_string_pretty(&data).unwrap();
+    std::fs::write(&file, &original).unwrap();
+    let opts = || McpOptions {
+        file: Some(file.to_string_lossy().into_owned()),
+        ..opts()
+    };
+    let ids = |v: &Value| {
+        let mut ids: Vec<(String, String)> = v["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["name"].as_str().unwrap().to_string(),
+                    p["id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        ids.sort();
+        ids
+    };
+    let client = connect(opts()).await;
+    let first = ids(&ok(&client, "get_positions", json!({})).await);
+    let tx1 = ok(&client, "get_transactions", json!({})).await;
+    client.cancel().await.unwrap();
+    let client = connect(opts()).await;
+    let second = ids(&ok(&client, "get_positions", json!({})).await);
+    let tx2 = ok(&client, "get_transactions", json!({})).await;
+    client.cancel().await.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(tx1["transactions"], tx2["transactions"]);
+    assert!(first.iter().any(|(_, id)| id == "pos_stored"));
+    assert!(first.iter().all(|(_, id)| id.starts_with("pos_")));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+}
