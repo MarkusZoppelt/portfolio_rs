@@ -642,6 +642,8 @@ pub struct PortfolioEntry {
     pub is_default: bool,
     /// Where quotes come from: yahoo | offline | fixture.
     pub quote_source: String,
+    /// complete | partial | stale, as in every other tool's `dataStatus`.
+    pub data_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }

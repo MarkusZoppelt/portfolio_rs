@@ -543,7 +543,7 @@ async fn test_context_reads_quote_cache_read_only() {
     )
     .await
     .unwrap();
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let response = app.oneshot(get("/api/context")).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
@@ -556,6 +556,14 @@ async fn test_context_reads_quote_cache_read_only() {
     assert!(!json["dataQualityFlags"]
         .to_string()
         .contains("Missing cost basis"));
+    // Gap: /api/portfolio carries the stale flag too.
+    let r = create_router(state.clone())
+        .oneshot(get("/api/portfolio"))
+        .await
+        .unwrap();
+    let p = body_json(r).await;
+    assert_eq!(p["hasStale"], true, "{p}");
+    assert_eq!(p["dataStatus"], "stale", "{p}");
     assert_eq!(std::fs::read_to_string(&cache).unwrap(), cache_json);
     let names: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
     assert_eq!(names.len(), 2, "no extra files written");

@@ -236,7 +236,10 @@ pub fn position_rows(
         .collect();
     let key = |r: &PositionRow| r.value_base.unwrap_or(f64::NEG_INFINITY);
     match sort {
-        SortBy::Value => rows.sort_by(|a, b| key(b).total_cmp(&key(a))),
+        // Ties (and all unpriced rows) by name: the same order as get_context.
+        SortBy::Value => {
+            rows.sort_by(|a, b| key(b).total_cmp(&key(a)).then_with(|| a.name.cmp(&b.name)))
+        }
         SortBy::Name => rows.sort_by_key(|r| r.name.to_lowercase()),
         SortBy::Pnl => rows.sort_by(|a, b| {
             b.unrealized_pnl
