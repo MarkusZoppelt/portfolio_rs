@@ -37,6 +37,73 @@ fn parse_day(field: &str, value: &Option<String>) -> Result<Option<String>, Tool
     }
 }
 
+/// Inclusive `[from, to]` for a performance period.
+///
+/// Non-custom periods always have `from <= to`. `since_inception` starts the
+/// day after the first snapshot, clamped with `min(first + 1, today)` so a
+/// first snapshot of today (or later) does not invert the window. Custom
+/// errors when a bound is missing, `from > to`, or `to` is in the future.
+fn period_window(
+    period: Period,
+    today: chrono::NaiveDate,
+    first_snapshot: Option<chrono::NaiveDate>,
+    cfrom: Option<chrono::NaiveDate>,
+    cto: Option<chrono::NaiveDate>,
+) -> Result<(chrono::NaiveDate, chrono::NaiveDate), ToolError> {
+    use chrono::{Datelike, Duration, NaiveDate};
+    match period {
+        Period::Day => Ok((today, today)),
+        Period::Week => Ok((today - Duration::days(6), today)),
+        Period::Month => Ok((today - Duration::days(29), today)),
+        Period::Mtd => Ok((today.with_day(1).unwrap_or(today), today)),
+        Period::Ytd => Ok((
+            NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today),
+            today,
+        )),
+        Period::OneYear => Ok((today - Duration::days(364), today)),
+        Period::SinceInception => {
+            let from = first_snapshot
+                .map(|d| d + Duration::days(1))
+                .unwrap_or(today)
+                .min(today);
+            Ok((from, today))
+        }
+        Period::Custom => match (cfrom, cto) {
+            (Some(f), Some(t)) if f <= t && t <= today => Ok((f, t)),
+            (Some(_), Some(_)) => Err(ToolError::new(
+                "invalid_argument",
+                "from must be on or before to, and to not in the future",
+            )),
+            _ => Err(ToolError::new(
+                "invalid_argument",
+                "period custom needs from and to",
+            )),
+        },
+    }
+}
+
+/// One `performance_approximate` note per `detail.reason`.
+fn push_approximate(warnings: &mut Vec<Finding>, finding: Finding) {
+    let reason = finding
+        .detail
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(|v| v.as_str());
+    if reason.is_some_and(|reason| {
+        warnings.iter().any(|w| {
+            w.code == "performance_approximate"
+                && w.detail
+                    .as_ref()
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|v| v.as_str())
+                    == Some(reason)
+        })
+    }) {
+        return;
+    }
+    warnings.push(finding);
+}
+
 impl PortfolioServer {
     pub fn new(served: ServedPortfolio) -> Self {
         Self {
@@ -535,7 +602,7 @@ impl PortfolioServer {
     ) -> Result<Json<PerformanceOutput>, ToolError> {
         use super::performance as perf;
         use super::snapshots;
-        use chrono::{Datelike, Duration, NaiveDate};
+        use chrono::NaiveDate;
         self.check_id(&input.portfolio_id)?;
         let today = chrono::Local::now().date_naive();
         let parse = |v: &Option<String>, name: &str| -> Result<Option<NaiveDate>, ToolError> {
@@ -556,40 +623,16 @@ impl PortfolioServer {
         }
         let path = self.served.snapshots_path.clone();
         let (snaps, skipped) = path.as_deref().map(snapshots::read).unwrap_or_default();
-        let (from, to) = match input.period {
-            Period::Day => (today, today),
-            Period::Week => (today - Duration::days(6), today),
-            Period::Month => (today - Duration::days(29), today),
-            Period::Mtd => (today.with_day(1).unwrap_or(today), today),
-            Period::Ytd => (
-                NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today),
-                today,
-            ),
-            Period::OneYear => (today - Duration::days(364), today),
-            Period::SinceInception => (
-                snaps
-                    .first()
-                    .and_then(|s| NaiveDate::parse_from_str(&s.date, "%Y-%m-%d").ok())
-                    .map(|d| d + Duration::days(1))
-                    .unwrap_or(today),
-                today,
-            ),
-            Period::Custom => match (cfrom, cto) {
-                (Some(f), Some(t)) if f <= t && t <= today => (f, t),
-                (Some(_), Some(_)) => {
-                    return Err(ToolError::new(
-                        "invalid_argument",
-                        "from must be on or before to, and to not in the future",
-                    ))
-                }
-                _ => {
-                    return Err(ToolError::new(
-                        "invalid_argument",
-                        "period custom needs from and to",
-                    ))
-                }
-            },
-        };
+        let first_snapshot = snaps.first().and_then(|s| snapshots::strict_date(&s.date));
+        let (from, to) = period_window(input.period, today, first_snapshot, cfrom, cto)?;
+        // Backstop: every period reports from <= to. Custom already errors
+        // when from > to; this catches a period that would otherwise invert.
+        debug_assert!(
+            from <= to,
+            "period window inverted: {from} > {to} ({:?})",
+            input.period
+        );
+        let from = from.min(to);
         let (from_s, to_s) = (
             from.format("%Y-%m-%d").to_string(),
             to.format("%Y-%m-%d").to_string(),
@@ -635,6 +678,15 @@ impl PortfolioServer {
             .filter(|s| start_gap(s) <= max_age)
             .cloned();
         let end = end.filter(|e| end_is_live || e.date >= from_s);
+        // A start on or after the end point is not a baseline (an inverted
+        // window would otherwise book today's snapshot as both ends and
+        // report a zero change). Treat it as no usable start.
+        let end_point = if end_is_live {
+            Some(to_s.as_str())
+        } else {
+            end.as_ref().map(|e| e.date.as_str())
+        };
+        let start = start.filter(|s| end_point.is_none_or(|d| s.date.as_str() < d));
         let snapshot_days = snaps
             .iter()
             .filter(|s| s.date >= from_s && s.date <= to_s)
@@ -930,7 +982,8 @@ impl PortfolioServer {
             ));
         }
         if twr.is_some() && method == "modified_dietz" {
-            warnings.push(
+            push_approximate(
+                &mut warnings,
                 Finding::new(
                     "performance_approximate",
                     Severity::Info,
@@ -953,7 +1006,8 @@ impl PortfolioServer {
             .map(|t| t.id.as_str())
             .collect();
         if !estimated.is_empty() {
-            warnings.push(
+            push_approximate(
+                &mut warnings,
                 Finding::new(
                     "performance_approximate",
                     Severity::Info,
@@ -968,7 +1022,8 @@ impl PortfolioServer {
             );
         }
         if !manual_unpriced.is_empty() {
-            warnings.push(
+            push_approximate(
+                &mut warnings,
                 Finding::new(
                     "performance_approximate",
                     Severity::Info,
@@ -980,6 +1035,43 @@ impl PortfolioServer {
                 )
                 .detail(json!({ "method": method, "reason": "estimated_manual_value",
                                 "transactionIds": manual_unpriced })),
+            );
+        }
+        // After the stepwise split: any non-zero unknown flow, whatever groupBy.
+        let mut unknown_ids = Vec::new();
+        let mut unknown_classes = Vec::new();
+        let mut unknown_total = 0.0;
+        for (id, (class, e)) in &effects {
+            let rounded = perf::r2(e.external_unknown);
+            if rounded == 0.0 {
+                continue;
+            }
+            unknown_ids.push(id.as_str());
+            if !unknown_classes.contains(class) {
+                unknown_classes.push(class.clone());
+            }
+            unknown_total += rounded;
+        }
+        if !unknown_ids.is_empty() {
+            let unknown_total = perf::r2(unknown_total);
+            let n = unknown_ids.len();
+            push_approximate(
+                &mut warnings,
+                Finding::new(
+                    "performance_approximate",
+                    Severity::Info,
+                    Category::DataQuality,
+                    format!(
+                        "{n} position(s) have flows of unknown origin (externalUnknown, total {unknown_total:.2}); contributions and market effect are approximate."
+                    ),
+                )
+                .detail(json!({
+                    "method": method,
+                    "reason": "external_unknown_flows",
+                    "externalUnknown": unknown_total,
+                    "positionIds": unknown_ids,
+                    "classes": unknown_classes,
+                })),
             );
         }
         out.twr_percent = twr.map(|v| (v * 100.0).round() / 100.0);
@@ -1305,5 +1397,109 @@ impl ServerHandler for PortfolioServer {
             }
             _ => Err(not_found()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::period_window;
+    use crate::mcp::dto::Period;
+    use chrono::{Duration, NaiveDate};
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn since_inception_window_clamps_to_today() {
+        let today = d(2026, 10, 24);
+        let window = |first: Option<NaiveDate>| {
+            period_window(Period::SinceInception, today, first, None, None).unwrap()
+        };
+        // first == today → (today, today), not (tomorrow, today).
+        assert_eq!(window(Some(today)), (today, today));
+        // first == yesterday → first + 1 == today.
+        assert_eq!(window(Some(today - Duration::days(1))), (today, today));
+        // earlier first snapshot: the day after it, through today.
+        let earlier = d(2024, 3, 15);
+        assert_eq!(window(Some(earlier)), (earlier + Duration::days(1), today));
+        // a first snapshot after today clamps, same as one dated today.
+        assert_eq!(window(Some(today + Duration::days(5))), (today, today));
+        assert_eq!(window(None), (today, today));
+    }
+
+    #[test]
+    fn non_custom_periods_never_invert() {
+        let periods = [
+            Period::Day,
+            Period::Week,
+            Period::Month,
+            Period::Mtd,
+            Period::Ytd,
+            Period::OneYear,
+            Period::SinceInception,
+        ];
+        // 1 January, the 1st of a month, and an ordinary day.
+        let todays = [d(2026, 1, 1), d(2026, 3, 1), d(2026, 10, 24)];
+        for today in todays {
+            let firsts = [
+                None,
+                Some(today),
+                Some(today - Duration::days(1)),
+                Some(today - Duration::days(40)),
+                Some(today + Duration::days(3)),
+            ];
+            for period in periods {
+                for first in firsts {
+                    let (from, to) =
+                        period_window(period, today, first, None, None).expect("non-custom");
+                    assert!(
+                        from <= to,
+                        "{period:?} today={today} first={first:?} => {from} > {to}"
+                    );
+                    assert_eq!(to, today, "{period:?} {today}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn custom_still_rejects_an_inverted_or_future_window() {
+        let today = d(2026, 10, 24);
+        let ending_today = period_window(
+            Period::Custom,
+            today,
+            None,
+            Some(d(2026, 10, 1)),
+            Some(today),
+        )
+        .unwrap();
+        assert_eq!(ending_today, (d(2026, 10, 1), today));
+        let past = period_window(
+            Period::Custom,
+            today,
+            None,
+            Some(d(2026, 9, 1)),
+            Some(d(2026, 9, 30)),
+        )
+        .unwrap();
+        assert!(past.0 <= past.1 && past.1 < today);
+        assert!(period_window(
+            Period::Custom,
+            today,
+            None,
+            Some(today),
+            Some(today - Duration::days(1)),
+        )
+        .is_err());
+        assert!(period_window(
+            Period::Custom,
+            today,
+            None,
+            Some(today),
+            Some(today + Duration::days(1)),
+        )
+        .is_err());
+        assert!(period_window(Period::Custom, today, None, None, Some(today)).is_err());
     }
 }

@@ -308,7 +308,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "performance_approximate",
         "data_quality",
         "info",
-        "The figures are approximate: a Modified Dietz return (no daily snapshot chain covers the period), transactions valued at the historic close for want of a recorded price, or manual-position transactions with no price valued at the last snapshot's unit value (or Amount/Quantity) when quantities agree, otherwise booked as externalUnknown (detail.reason: modified_dietz | estimated_transaction_price | estimated_manual_value).",
+        "The figures are approximate: a Modified Dietz return (no daily snapshot chain covers the period), transactions valued at the historic close for want of a recorded price, manual-position transactions with no price valued at the last snapshot's unit value (or Amount/Quantity) when quantities agree, otherwise booked as externalUnknown, or non-zero flows of unknown origin (detail.reason: modified_dietz | estimated_transaction_price | estimated_manual_value | external_unknown_flows).",
     ),
     (
         "performance_twr_unavailable",

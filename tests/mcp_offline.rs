@@ -3676,3 +3676,171 @@ async fn implausible_snapshot_lines_are_skipped_with_reasons() {
     assert!(msg.contains("total base null"), "{msg}");
     client.cancel().await.unwrap();
 }
+
+/// One snapshot, dated today: since_inception must not invert to tomorrow
+/// and then treat that snapshot as the start (a zero-change Dietz).
+#[tokio::test]
+async fn since_inception_with_only_today_is_insufficient_history() {
+    let tmp = TempDir::new().unwrap();
+    seed_today(tmp.path()).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "since_inception"}),
+    )
+    .await;
+    assert_eq!(v["method"], "none", "{v}");
+    assert!(v["change"].is_null(), "{v}");
+    assert!(v["netContributions"].is_null(), "{v}");
+    assert!(v["marketEffect"].is_null(), "{v}");
+    let from = v["from"].as_str().unwrap();
+    let to = v["to"].as_str().unwrap();
+    assert!(from <= to, "{from} > {to}: {v}");
+    let today = day(0);
+    assert_eq!((from, to), (today.as_str(), today.as_str()), "{v}");
+    assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
+    assert!(has_code(&v, "performance_twr_unavailable").is_none(), "{v}");
+    client.cancel().await.unwrap();
+}
+
+fn approx_reason<'a>(v: &'a Value, reason: &str) -> Vec<&'a Value> {
+    v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "performance_approximate" && w["detail"]["reason"] == reason)
+        .collect()
+}
+
+/// A same-step deposit and buy with no dated cash deposit books
+/// externalUnknown and must be flagged once, including with groupBy none.
+/// A window with no such flows must not carry the note. `complete` is not
+/// changed by the note.
+#[tokio::test]
+async fn external_unknown_flows_are_flagged_once() {
+    let tmp = TempDir::new().unwrap();
+    let buy_day = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+    let data = tmp.path().join("positions.json");
+    let positions = json!([
+        {
+            "Name": "Index",
+            "AssetClass": "Stocks",
+            "Amount": 3940.0,
+            "Purchases": [
+                {"Date": "2020/01/02", "Quantity": 1, "Price": 100.0},
+                {"Date": buy_day.format("%Y/%m/%d").to_string(), "Quantity": 1, "Price": 3840.0}
+            ]
+        },
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 6160.0}
+    ]);
+    std::fs::write(&data, positions.to_string()).unwrap();
+    let data = data.to_string_lossy().into_owned();
+    let (path, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
+        file: Some(data.clone()),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await
+    .unwrap();
+    let today: Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut start = today;
+    start["date"] = json!(day(-7));
+    let mut total = 0.0;
+    for p in start["positions"].as_array_mut().unwrap() {
+        p["ledgerBase"] = Value::Null;
+        if p["kind"] == "cash" {
+            p["valueBase"] = json!(0.0);
+            p["quantity"] = json!(0.0);
+        } else if p["assetClass"] == "Stocks" {
+            p["valueBase"] = json!(100.0);
+        }
+        total += p["valueBase"].as_f64().unwrap();
+    }
+    start["cashBase"] = json!(0.0);
+    start["totalBase"] = json!(total);
+    std::fs::write(&path, format!("{start}\n")).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    for group in ["assetClass", "none", "position"] {
+        let v = ok(
+            &client,
+            "get_performance",
+            json!({"period": "week", "groupBy": group}),
+        )
+        .await;
+        let notes = approx_reason(&v, "external_unknown_flows");
+        assert_eq!(notes.len(), 1, "groupBy {group}: {v}");
+        let note = notes[0];
+        assert_eq!(note["severity"], "info", "{note}");
+        assert_eq!(note["detail"]["method"], v["method"], "{note}");
+        let total = note["detail"]["externalUnknown"].as_f64().unwrap();
+        assert!((total - 3_840.0).abs() < 0.05, "{note}");
+        assert!(
+            note["message"]
+                .as_str()
+                .unwrap()
+                .contains("position(s) have flows of unknown origin"),
+            "{note}"
+        );
+        let ids = note["detail"]["positionIds"].as_array().unwrap();
+        assert!(!ids.is_empty(), "{note}");
+        let classes: Vec<&str> = note["detail"]["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert!(classes.contains(&"Stocks"), "{note}");
+        let mut uniq = classes.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(classes.len(), uniq.len(), "classes not deduped: {note}");
+        let reasons: Vec<&str> = v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] == "performance_approximate")
+            .map(|w| w["detail"]["reason"].as_str().unwrap())
+            .collect();
+        let mut deduped = reasons.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(reasons.len(), deduped.len(), "{v}");
+        // The note is Info and must not flip complete (same for every groupBy).
+        assert_eq!(v["complete"], true, "groupBy {group}: {v}");
+        assert_eq!(v["dataStatus"], "complete", "{v}");
+    }
+    client.cancel().await.unwrap();
+
+    // Clean window: seeded history, no flows of unknown origin.
+    let tmp = TempDir::new().unwrap();
+    seed_history(tmp.path(), &[-1]).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert!(v["change"].is_number(), "{v}");
+    assert!(
+        approx_reason(&v, "external_unknown_flows").is_empty(),
+        "{v}"
+    );
+    client.cancel().await.unwrap();
+}

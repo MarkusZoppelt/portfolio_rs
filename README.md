@@ -198,7 +198,7 @@ Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
 `internalTransfers` (between tracked positions: a buy paid from tracked cash is
 internal for both the security's class and Cash), `externalFlows` (into or out
 of the portfolio) and `externalUnknown` (positions that appeared or vanished
-without a transaction). The split is computed per snapshot step and summed; a same-step deposit and buy without dated cash deposits goes to `externalUnknown`. With `insufficient_history`, `endValue` still holds a known end value.
+without a transaction). The split is computed per snapshot step and summed; a same-step deposit and buy without dated cash deposits goes to `externalUnknown`. A non-zero `externalUnknown` is flagged by one `performance_approximate` note (`detail.reason: external_unknown_flows`). With `insufficient_history`, `endValue` still holds a known end value.
 
 The start value is the last stored snapshot dated before `from`
 (`dataCoverage.startPointDate`), at most `maxStartAgeDays` days before the
