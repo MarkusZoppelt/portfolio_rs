@@ -414,6 +414,7 @@ impl AppState {
             last_spot: Decimal::ZERO,
             price_status: crate::position::PriceStatus::Live,
             price_currency: None,
+            price_as_of: None,
             fx_rate: None,
             purchases: req
                 .purchases

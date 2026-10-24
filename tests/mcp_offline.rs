@@ -1618,7 +1618,7 @@ async fn cash_buffer_in_check_policy_and_get_context() {
 }
 
 #[tokio::test]
-async fn get_positions_portfolio_totals_and_currency() {
+async fn get_positions_portfolio_totals_currency_and_price_as_of() {
     let client = connect(opts()).await;
     let v = ok(&client, "get_positions", json!({})).await;
     // Sum of the market rows (cash has no cost basis).
@@ -1634,6 +1634,13 @@ async fn get_positions_portfolio_totals_and_currency() {
         .unwrap();
     assert_eq!(cash["currency"], "EUR");
     assert_eq!(by_ticker(&v["positions"], "SPY")["currency"], "USD");
+    // priceAsOf comes from the provider; null when it reports none.
+    assert_eq!(
+        by_ticker(&v["positions"], "SPY")["priceAsOf"],
+        "2026-01-02T21:00:00Z"
+    );
+    assert!(by_ticker(&v["positions"], "TLT")["priceAsOf"].is_null());
+    assert!(cash["priceAsOf"].is_null());
     client.cancel().await.unwrap();
 
     // One market position without a quote: no partial sum labelled as total.

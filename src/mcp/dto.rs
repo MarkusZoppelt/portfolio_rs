@@ -383,6 +383,8 @@ pub struct PositionRow {
     /// Latest price in priceCurrency; null when unknown.
     pub price: Option<f64>,
     pub price_currency: Option<String>,
+    /// When the provider set `price` (RFC 3339); null when not reported.
+    pub price_as_of: Option<String>,
     /// Currency the holding is denominated in: the quote currency for market
     /// positions (null when unknown), the base currency for cash and manual.
     pub currency: Option<String>,

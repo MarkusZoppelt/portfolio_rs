@@ -184,7 +184,7 @@ governed by the cash-buffer and asset-class rules instead.
 
 | Tool | Returns |
 | --- | --- |
-| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` over market positions (null if any input is unknown). Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
+| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` over market positions (null if any input is unknown). Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
 | `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); `breaches` = critical findings (deduplicated), top-level `warnings` = data quality + warning-severity findings; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with a null date); `fees` is 0 when none is recorded; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |

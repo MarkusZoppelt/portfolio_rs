@@ -15,6 +15,9 @@ pub struct Quote {
     pub price: f64,
     #[serde(default)]
     pub currency: Option<String>,
+    /// When the price was set (RFC 3339), if the provider reports it.
+    #[serde(default, alias = "asOf")]
+    pub as_of: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

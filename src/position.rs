@@ -134,6 +134,10 @@ pub struct PortfolioPosition {
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) price_currency: Option<String>,
 
+    // Not persisted. Provider timestamp of `last_spot` (RFC 3339), if reported.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) price_as_of: Option<String>,
+
     // Not persisted. Base-currency units per 1 unit of `price_currency`.
     // None means no conversion (same currency or unknown).
     #[serde(skip_serializing, skip_deserializing)]
@@ -350,6 +354,11 @@ impl PortfolioPosition {
         self.price_currency.as_deref()
     }
 
+    /// When the provider says the current price was set (RFC 3339), if known.
+    pub fn price_as_of(&self) -> Option<&str> {
+        self.price_as_of.as_deref()
+    }
+
     /// Base-currency units per 1 unit of the quote currency, if a conversion applies.
     pub fn fx_rate(&self) -> Option<f64> {
         self.fx_rate.map(to_f64)
@@ -527,6 +536,7 @@ impl PortfolioPosition {
             previous_close: None,
             price_status,
             price_currency: None,
+            price_as_of: None,
             fx_rate: None,
         }
     }
@@ -677,17 +687,17 @@ async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
 }
 
 /// Positive close from a quote response, if one is present.
-fn usable_close(quote: &yahoo::YResponse) -> Option<f64> {
+fn usable_close(quote: &yahoo::YResponse) -> Option<(f64, i64)> {
     if let Ok(last) = quote.last_quote() {
         if last.close > 0.0 {
-            return Some(last.close);
+            return Some((last.close, last.timestamp));
         }
     }
     // Market may be closed: fall back to the last bar with a positive close.
     if let Ok(quotes) = quote.quotes() {
         if let Some(last) = quotes.last() {
             if last.close > 0.0 {
-                return Some(last.close);
+                return Some((last.close, last.timestamp));
             }
         }
     }
@@ -699,9 +709,16 @@ pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
     let quote = get_quote_price(symbol)
         .await
         .map_err(|e| QuoteError::Provider(e.to_string()))?;
-    let price = usable_close(&quote).ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))?;
+    let (price, ts) =
+        usable_close(&quote).ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))?;
     let currency = quote.metadata().ok().and_then(|m| m.currency);
-    Ok(Quote { price, currency })
+    let as_of = DateTime::from_timestamp(ts as _, 0)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    Ok(Quote {
+        price,
+        currency,
+        as_of,
+    })
 }
 
 pub(crate) async fn yahoo_previous_close(symbol: &str) -> Result<f64, QuoteError> {
@@ -776,11 +793,12 @@ pub async fn handle_position_with<P: QuoteProvider>(
 ) -> PortfolioPosition {
     if let Some(ticker_owned) = position.ticker.clone() {
         let ticker = ticker_owned.as_str();
-        let (close, currency) = match provider.latest(ticker).await {
-            Ok(quote) => (Some(quote.price), quote.currency),
-            Err(_) => (None, None),
+        let (close, currency, as_of) = match provider.latest(ticker).await {
+            Ok(quote) => (Some(quote.price), quote.currency, quote.as_of),
+            Err(_) => (None, None, None),
         };
         position.price_currency = currency;
+        position.price_as_of = as_of;
         apply_quote_result(position, close);
 
         // Quote-dependent enrichment is useless without a live price, and a
@@ -935,6 +953,7 @@ mod tests {
             last_spot: Decimal::ZERO,
             price_status: PriceStatus::Live,
             price_currency: None,
+            price_as_of: None,
             fx_rate: None,
             purchases: vec![],
             previous_close: None,
@@ -971,6 +990,7 @@ mod tests {
             last_spot: dec(500.0),
             price_status: PriceStatus::Live,
             price_currency: None,
+            price_as_of: None,
             fx_rate: None,
             purchases: vec![Purchase {
                 date: Some("2024-01-15".to_string()),
