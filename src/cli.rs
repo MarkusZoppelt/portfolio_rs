@@ -89,6 +89,10 @@ pub fn build_cli() -> Command {
             portfolio_rs policy init --strategy balanced-growth my-portfolio\n\
             portfolio_rs context my-portfolio/positions.json\n\
             \n\
+            Quote source: set PORTFOLIO_RS_QUOTES to 'yahoo' (default), 'offline'\n\
+            (no network; nothing gets a price) or 'fixture:<path>' (prices from a\n\
+            JSON file). An invalid value warns and uses offline quotes.\n\
+            \n\
             Run 'portfolio_rs --help' for all commands."
         )
         .author("Markus Zoppelt")

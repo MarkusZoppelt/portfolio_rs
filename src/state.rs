@@ -71,7 +71,7 @@ impl AppState {
             currency: RwLock::new(currency),
             network_status: RwLock::new(NetworkStatus::Disconnected),
             portfolio_cache: RwLock::new(None),
-            quotes: AnyProvider::default(),
+            quotes: AnyProvider::configured().clone(),
         }
     }
 

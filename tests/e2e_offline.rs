@@ -2,8 +2,30 @@ use assert_cmd::Command;
 use predicates::str;
 use tempfile::TempDir;
 
+/// Throwaway HOME shared by this test binary, so no test reads or writes the
+/// real `~/.config/portfolio`.
+fn isolated_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| TempDir::new().unwrap()).path()
+}
+
+/// The CLI with an isolated HOME/XDG dirs and no network quotes.
 fn bin() -> Command {
-    Command::cargo_bin("portfolio_rs").unwrap()
+    let home = isolated_home();
+    let mut cmd = Command::cargo_bin("portfolio_rs").unwrap();
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("PORTFOLIO_RS_QUOTES", "offline");
+    cmd
+}
+
+fn quotes_fixture() -> String {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/quotes_example.json"
+    )
+    .to_string()
 }
 
 #[test]
@@ -751,4 +773,60 @@ fn test_report_weekly_dry_run_does_not_block_writes() {
         .args(["report", "weekly", "--dir", dir.to_str().unwrap()])
         .assert()
         .success();
+}
+
+#[test]
+fn test_cli_never_touches_the_real_config() {
+    let mut cmd = bin();
+    cmd.args(["context", &example_data()]);
+    cmd.assert().success();
+    assert!(isolated_home()
+        .join(".config/portfolio/config.yml")
+        .is_file());
+}
+
+#[test]
+fn test_context_with_fixture_quotes_is_deterministic() {
+    let run = || {
+        let mut cmd = bin();
+        cmd.env(
+            "PORTFOLIO_RS_QUOTES",
+            format!("fixture:{}", quotes_fixture()),
+        )
+        .args(["context", &example_data(), "--format", "json"]);
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let json = run();
+    // Fixture prices in USD, FX 1.25 USD per EUR, base EUR:
+    // BTC 0.45*60000 + SPY 50*500 + TLT 55*90 + GLD 10*200 + GSG 3*20
+    // = 59010 USD = 47208 EUR, plus 50000 EUR cash.
+    let total = json["summary"]["totalValue"].as_f64().unwrap();
+    assert!((total - 97_208.0).abs() < 1e-6, "totalValue {total}");
+    let mut again = run();
+    again["generatedAt"] = json["generatedAt"].clone();
+    assert_eq!(json, again);
+}
+
+#[test]
+fn test_offline_quotes_keep_positions_without_prices() {
+    let mut cmd = bin();
+    cmd.args(["context", &example_data(), "--format", "json"]);
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let total = json["summary"]["totalValue"].as_f64().unwrap();
+    assert!(
+        (total - 50_000.0).abs() < 1e-6,
+        "only cash is priced offline: {total}"
+    );
+}
+
+#[test]
+fn test_invalid_quotes_setting_falls_back_to_offline() {
+    let mut cmd = bin();
+    cmd.env("PORTFOLIO_RS_QUOTES", "fixture:/nonexistent/quotes.json")
+        .args(["context", &example_data(), "--format", "json"]);
+    cmd.assert()
+        .success()
+        .stderr(str::contains("using offline quotes"));
 }
