@@ -605,7 +605,32 @@ impl PortfolioServer {
         } else {
             snaps.iter().rev().find(|s| s.date <= to_s).cloned()
         };
-        let start = snaps.iter().rev().find(|s| s.date < from_s).cloned();
+        // B1: the start is the last snapshot before `from`, at most
+        // `max_age` days before the day before `from`; a historical end must
+        // lie inside the window.
+        let max_age = i64::from(input.max_start_age_days.unwrap_or(match input.period {
+            Period::Day | Period::Week => 3,
+            Period::Month | Period::Mtd => 5,
+            Period::Ytd | Period::OneYear => 10,
+            Period::SinceInception => 0,
+            Period::Custom => match (to - from).num_days() + 1 {
+                0..=7 => 3,
+                8..=31 => 5,
+                _ => 10,
+            },
+        }));
+        let start_gap = |s: &snapshots::Snapshot| {
+            NaiveDate::parse_from_str(&s.date, "%Y-%m-%d")
+                .map(|d| (from - d).num_days() - 1)
+                .unwrap_or(i64::MAX)
+        };
+        let start = snaps
+            .iter()
+            .rev()
+            .find(|s| s.date < from_s)
+            .filter(|s| start_gap(s) <= max_age)
+            .cloned();
+        let end = end.filter(|e| end_is_live || e.date >= from_s);
         let snapshot_days = snaps
             .iter()
             .filter(|s| s.date >= from_s && s.date <= to_s)
@@ -649,7 +674,10 @@ impl PortfolioServer {
                 "insufficient_history",
                 Severity::Warning,
                 Category::DataQuality,
-                "No snapshot before the period start; run `portfolio_rs snapshot` daily to build history.".to_string(),
+                format!(
+                    "No usable snapshot for {from_s}..{to_s}: the start needs one at most {max_age} day(s) before {from_s} \
+                     (maxStartAgeDays) and a past end one inside the window; run `portfolio_rs snapshot` daily to build history."
+                ),
             ));
             meta.warnings = warnings;
             out.meta = meta;
@@ -663,6 +691,40 @@ impl PortfolioServer {
         meta.has_stale = has_stale;
         meta.data_status = analytics::data_status(meta.complete, has_stale).to_string();
         let txs = analytics::transactions(&portfolio, &base, None);
+        let gap = start_gap(&start);
+        if gap > 0 {
+            warnings.push(
+                Finding::new(
+                    "start_point_gap",
+                    Severity::Info,
+                    Category::DataQuality,
+                    format!(
+                        "The start snapshot is from {}, {gap} day(s) before the day before {from_s}: the figures span {} days, not {period_days}.",
+                        start.date,
+                        period_days + gap
+                    ),
+                )
+                .detail(json!({ "startPointDate": start.date, "gapDays": gap })),
+            );
+        }
+        let vanished = perf::vanished(&start, &end, &txs);
+        if !vanished.is_empty() {
+            meta.complete = false;
+            meta.data_status = analytics::data_status(false, has_stale).to_string();
+            warnings.push(
+                Finding::new(
+                    "vanished_position",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    format!(
+                        "{} position(s) held on {} are gone without a sell entry; their value is booked as an unknown external flow, not a loss, and the figures are partial.",
+                        vanished.len(),
+                        start.date
+                    ),
+                )
+                .detail(json!({ "positionIds": vanished })),
+            );
+        }
         let effects = if complete {
             perf::position_effects(&start, &end, &txs)
         } else {
