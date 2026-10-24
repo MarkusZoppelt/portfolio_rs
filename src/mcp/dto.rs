@@ -256,6 +256,24 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "critical",
         "The policy file could not be loaded or failed validation.",
     ),
+    (
+        "insufficient_history",
+        "data_quality",
+        "warning",
+        "No snapshot before the period start; run `portfolio_rs snapshot` daily (cron or a systemd timer).",
+    ),
+    (
+        "performance_partial",
+        "data_quality",
+        "warning",
+        "A valuation at the period start or end is missing prices or FX rates; performance figures are null.",
+    ),
+    (
+        "performance_twr_unavailable",
+        "data_quality",
+        "info",
+        "The time-weighted return could not be computed (an intermediate snapshot is partial or a value is zero).",
+    ),
 ];
 
 /// A structured tool error (`isError: true`). Never carries monetary values.
@@ -666,4 +684,105 @@ pub struct ContextOutput {
     pub markdown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Period {
+    Day,
+    Week,
+    Month,
+    Mtd,
+    Ytd,
+    #[serde(rename = "1y")]
+    OneYear,
+    SinceInception,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GroupBy {
+    #[default]
+    None,
+    AssetClass,
+    Position,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetPerformanceInput {
+    pub portfolio_id: Option<String>,
+    /// day | week (last 7 days) | month (last 30 days) | mtd | ytd | 1y |
+    /// since_inception | custom (needs from and to).
+    pub period: Period,
+    /// YYYY-MM-DD, first day of the period (custom only).
+    pub from: Option<String>,
+    /// YYYY-MM-DD, last day of the period (custom only).
+    pub to: Option<String>,
+    /// none (default) | assetClass | position
+    pub group_by: Option<GroupBy>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DataCoverage {
+    /// Stored snapshots dated inside [from, to].
+    pub snapshot_days: usize,
+    /// Days in [from, to] without a stored snapshot (today counts as covered
+    /// when the end is the live valuation).
+    pub missing_days: i64,
+    /// Always false: reconstruction from historic closes is not implemented.
+    pub reconstructed: bool,
+    /// Date of the valuation used as the start (the last snapshot before `from`).
+    pub start_point_date: Option<String>,
+    /// Date of the valuation used as the end.
+    pub end_point_date: Option<String>,
+    /// The end is today's live valuation rather than a stored snapshot.
+    pub end_is_live: bool,
+    /// Unreadable lines skipped in snapshots.jsonl.
+    pub skipped_lines: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceBreakdown {
+    pub key: String,
+    pub start_value: f64,
+    pub end_value: f64,
+    pub change: f64,
+    pub net_contributions: f64,
+    pub market_effect: f64,
+    pub manual_revaluation: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceOutput {
+    #[serde(flatten)]
+    pub meta: Meta,
+    pub period: String,
+    pub from: String,
+    pub to: String,
+    pub start_value: Option<f64>,
+    pub end_value: Option<f64>,
+    pub change: Option<f64>,
+    /// Buys − sells of securities and manual positions dated in the period,
+    /// plus the change in cash balances.
+    pub net_contributions: Option<f64>,
+    /// Price and FX effect on market positions.
+    pub market_effect: Option<f64>,
+    /// 0 until a dividend/interest ledger exists (they show up in cash, i.e.
+    /// in netContributions).
+    pub income_effect: Option<f64>,
+    pub manual_revaluation: Option<f64>,
+    /// Not separated yet (included in marketEffect); always null.
+    pub fx_effect: Option<f64>,
+    pub twr_percent: Option<f64>,
+    /// Not computed in phase 2; always null.
+    pub mwr_percent: Option<f64>,
+    /// daily_twr | modified_dietz | none
+    pub method: String,
+    pub data_coverage: DataCoverage,
+    pub breakdown: Vec<PerformanceBreakdown>,
 }

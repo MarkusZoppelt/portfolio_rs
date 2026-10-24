@@ -844,3 +844,37 @@ fn test_invalid_quotes_setting_falls_back_to_offline() {
         .success()
         .stderr(str::contains("using offline quotes"));
 }
+
+/// `portfolio_rs snapshot` writes one 0600 line under --data-dir (and the
+/// default goes to the isolated XDG data dir, never the CWD).
+#[test]
+fn test_snapshot_command_writes_data_dir() {
+    let tmp = TempDir::new().unwrap();
+    let data = concat!(env!("CARGO_MANIFEST_DIR"), "/example_data.json");
+    let mut cmd = bin();
+    cmd.env(
+        "PORTFOLIO_RS_QUOTES",
+        format!("fixture:{}", quotes_fixture()),
+    )
+    .args([
+        "snapshot",
+        data,
+        "--no-cache",
+        "--portfolio",
+        "demo",
+        "--data-dir",
+    ])
+    .arg(tmp.path());
+    cmd.assert().success();
+    let path = tmp.path().join("demo/snapshots.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(v["complete"], true, "{v}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}

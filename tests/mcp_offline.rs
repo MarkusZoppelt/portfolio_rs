@@ -202,7 +202,7 @@ fn assert_envelope(v: &Value, id: &str) {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_six_read_only_tools() {
+async fn tools_list_has_the_seven_read_only_tools() {
     let client = connect(opts()).await;
     let tools = client.list_all_tools().await.unwrap();
     let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
@@ -213,6 +213,7 @@ async fn tools_list_has_the_six_read_only_tools() {
             "check_policy",
             "get_allocation",
             "get_context",
+            "get_performance",
             "get_positions",
             "get_transactions",
             "list_portfolios"
@@ -2664,4 +2665,165 @@ async fn partial_allocation_uses_last_price_and_certain_breaches_only() {
     assert_eq!(inc["category"], "data_quality");
     assert_eq!(inc["detail"]["excludedValueBasis"], "last_price");
     client.cancel().await.unwrap();
+}
+
+// ---- Phase 2: snapshots and get_performance (fake data only) ----
+
+fn day(offset: i64) -> String {
+    (chrono::Local::now().date_naive() + chrono::Duration::days(offset))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// Record today's snapshot of example_data into `dir` and return it parsed.
+async fn seed_today(dir: &Path) -> (PathBuf, Value) {
+    let path = portfolio_rs::mcp::record_snapshot(&McpOptions {
+        data_dir: Some(dir.to_path_buf()),
+        ..opts()
+    })
+    .await
+    .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    (
+        path.clone(),
+        serde_json::from_str(text.lines().next().unwrap()).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn snapshot_command_writes_private_jsonl_once_per_day() {
+    let tmp = TempDir::new().unwrap();
+    let (path, snap) = seed_today(tmp.path()).await;
+    assert_eq!(path, tmp.path().join("main/snapshots.jsonl"));
+    assert_eq!(snap["date"], day(0));
+    assert_eq!(snap["complete"], true, "{snap}");
+    assert!(snap["totalBase"].as_f64().unwrap() > 0.0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // A second run the same day replaces the line.
+    let (_, again) = seed_today(tmp.path()).await;
+    assert_eq!(again["date"], day(0));
+}
+
+/// A seeded history: 8 days ago every market position was worth 80% of
+/// today, cash and manual values unchanged. With no purchases in the
+/// window, the whole change is market effect, and the identity holds.
+#[tokio::test]
+async fn performance_from_seeded_snapshots_splits_change() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_today(tmp.path()).await;
+    let mut old = today.clone();
+    old["date"] = json!(day(-8));
+    let mut total = 0.0;
+    for p in old["positions"].as_array_mut().unwrap() {
+        if p["kind"] == "market" {
+            let v = p["valueBase"].as_f64().unwrap() * 0.8;
+            p["valueBase"] = json!((v * 100.0).round() / 100.0);
+        }
+        total += p["valueBase"].as_f64().unwrap();
+    }
+    old["totalBase"] = json!(total);
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "week", "groupBy": "assetClass"}),
+    )
+    .await;
+    assert_eq!(v["dataStatus"], "complete", "{v}");
+    assert_eq!(v["from"], day(-6));
+    assert_eq!(v["dataCoverage"]["startPointDate"], day(-8));
+    assert_eq!(v["dataCoverage"]["endIsLive"], true);
+    let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k} null: {v}"));
+    let identity =
+        f("netContributions") + f("marketEffect") + f("incomeEffect") + f("manualRevaluation");
+    assert!((f("change") - identity).abs() <= 0.01, "{v}");
+    assert!(
+        (f("change") - (f("endValue") - f("startValue"))).abs() <= 0.01,
+        "{v}"
+    );
+    assert_eq!(f("netContributions"), 0.0, "{v}");
+    assert!(f("marketEffect") > 0.0);
+    assert_eq!(v["method"], "modified_dietz");
+    // Breakdown sums to the totals.
+    let sum: f64 = v["breakdown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["marketEffect"].as_f64().unwrap())
+        .sum();
+    assert!((sum - f("marketEffect")).abs() <= 0.05, "{v}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn performance_without_history_or_with_partial_data_is_null() {
+    let tmp = TempDir::new().unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "ytd"})).await;
+    assert!(v["change"].is_null(), "{v}");
+    assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
+    assert_eq!(
+        err(
+            &client,
+            "get_performance",
+            json!({"period": "custom", "from": day(-3)})
+        )
+        .await,
+        "invalid_argument"
+    );
+    assert_eq!(
+        err(
+            &client,
+            "get_performance",
+            json!({"period": "week", "from": day(-3)})
+        )
+        .await,
+        "invalid_argument"
+    );
+    client.cancel().await.unwrap();
+
+    // A seeded start, but today's valuation is missing a quote (GSG).
+    let (path, today) = seed_today(tmp.path()).await;
+    let mut old = today.clone();
+    old["date"] = json!(day(-2));
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    let policy = tmp.path().join("policy_lower.toml");
+    std::fs::write(&policy, POLICY_LOWER).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        quotes: Some(fixture_named("quotes_no_gsg.json")),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert_eq!(v["dataStatus"], "partial", "{v}");
+    assert_eq!(v["complete"], false);
+    assert!(v["change"].is_null() && v["marketEffect"].is_null(), "{v}");
+    assert!(has_code(&v, "performance_partial").is_some(), "{v}");
+    client.cancel().await.unwrap();
+}
+
+fn has_code(v: &Value, code: &str) -> Option<()> {
+    v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["code"] == code)
+        .then_some(())
 }

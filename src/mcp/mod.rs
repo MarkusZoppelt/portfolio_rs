@@ -1,14 +1,17 @@
 //! Local stdio MCP (Model Context Protocol) server: `portfolio_rs mcp`.
 //!
-//! Read-only Phase 1 tools (`get_positions`, `get_allocation`,
-//! `check_policy`, `get_transactions`, `list_portfolios`, `get_context`) and
+//! Read-only tools (`get_positions`, `get_allocation`, `check_policy`,
+//! `get_transactions`, `list_portfolios`, `get_context`, and the phase 2
+//! `get_performance` over snapshots written by `portfolio_rs snapshot`) and
 //! resources over [rmcp](https://docs.rs/rmcp). stdout carries only the
 //! JSON-RPC stream; diagnostics go to stderr. Quotes follow
 //! `PORTFOLIO_RS_QUOTES` (`--offline` forces offline unless a fixture is set).
 
 pub mod analytics;
 pub mod dto;
+pub mod performance;
 mod server;
+pub mod snapshots;
 pub mod stdio;
 
 pub use server::PortfolioServer;
@@ -47,6 +50,9 @@ pub struct McpOptions {
     /// Drop possible_breach findings when the excluded positions can be at
     /// most this percent of the total (default 0.5).
     pub possible_breach_min_share: Option<f64>,
+    /// Snapshot data dir (default: `PORTFOLIO_RS_DATA_DIR`, the workspace's
+    /// `portfolio/history`, else the XDG data dir).
+    pub data_dir: Option<PathBuf>,
 }
 
 /// Whether the server uses the last-known-price cache.
@@ -78,6 +84,8 @@ pub struct ServedPortfolio {
     /// The last-known-price cache file, when enabled.
     pub cache_path: Option<PathBuf>,
     pub policy_options: analytics::PolicyOptions,
+    /// `<data_dir>/<id>/snapshots.jsonl`, read by get_performance.
+    pub snapshots_path: Option<PathBuf>,
 }
 
 impl ServedPortfolio {
@@ -199,7 +207,10 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
             .unwrap_or(label),
         None => label,
     };
+    let snapshots_path = snapshots::data_dir(opts.data_dir.as_deref(), workspace_dir.as_deref())
+        .map(|d| snapshots::snapshots_path(&d, &id));
     Ok(ServedPortfolio {
+        snapshots_path,
         id,
         label,
         mode,
@@ -235,4 +246,25 @@ pub async fn serve_stdio(opts: McpOptions) -> Result<()> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
     quit.wrap_err("MCP server stopped with an error")?;
     Ok(())
+}
+
+/// Value the portfolio selected by `opts` and upsert today's snapshot.
+/// Returns the snapshot file path. Used by `portfolio_rs snapshot`; the MCP
+/// server itself never writes snapshots.
+pub async fn record_snapshot(opts: &McpOptions) -> Result<PathBuf> {
+    let served = load(opts).await?;
+    let path = served.snapshots_path.clone().ok_or_else(|| {
+        eyre::eyre!("no snapshot dir: pass --data-dir or set PORTFOLIO_RS_DATA_DIR")
+    })?;
+    served.state.refresh_prices().await;
+    let portfolio = served.state.portfolio().await;
+    let base = served.state.currency().await;
+    let stale = portfolio.positions.iter().any(|p| p.is_stale());
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let snap = snapshots::from_portfolio(&portfolio, &base, &today, stale);
+    snapshots::upsert(&path, &snap)?;
+    Ok(path)
 }

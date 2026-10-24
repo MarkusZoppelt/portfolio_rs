@@ -5,7 +5,7 @@ use crate::mcp::{serve_stdio, McpOptions};
 use clap::ArgMatches;
 use eyre::Result;
 
-pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
+fn options(matches: &ArgMatches, cfg: &AppConfig) -> McpOptions {
     let get = |name: &str| matches.get_one::<String>(name).cloned();
     let workspace = get("workspace");
     // Explicit FILE / --workspace win; otherwise the configured portfolio.
@@ -20,11 +20,15 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
         },
         (file, ws) => (file, ws),
     };
-    serve_stdio(McpOptions {
+    McpOptions {
         portfolio_id: get("portfolio"),
         file,
         workspace,
-        policy: get("policy"),
+        policy: matches
+            .try_get_one::<String>("policy")
+            .ok()
+            .flatten()
+            .cloned(),
         offline: matches.get_flag("offline"),
         currency: cfg.currency.clone(),
         quotes: None,
@@ -33,9 +37,33 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
         } else {
             crate::mcp::CacheMode::Auto
         },
-        cache_max_age_days: matches.get_one::<i64>("cache-max-age").copied(),
-        stale_after_days: matches.get_one::<i64>("stale-after").copied(),
-        possible_breach_min_share: matches.get_one::<f64>("possible-breach-min-share").copied(),
-    })
-    .await
+        cache_max_age_days: matches
+            .try_get_one::<i64>("cache-max-age")
+            .ok()
+            .flatten()
+            .copied(),
+        stale_after_days: matches
+            .try_get_one::<i64>("stale-after")
+            .ok()
+            .flatten()
+            .copied(),
+        possible_breach_min_share: matches
+            .try_get_one::<f64>("possible-breach-min-share")
+            .ok()
+            .flatten()
+            .copied(),
+        data_dir: get("data-dir").map(std::path::PathBuf::from),
+    }
+}
+
+pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
+    serve_stdio(options(matches, cfg)).await
+}
+
+/// `portfolio_rs snapshot`: value the portfolio and upsert today's line.
+pub async fn handle_snapshot(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
+    let opts = options(matches, cfg);
+    let path = crate::mcp::record_snapshot(&opts).await?;
+    eprintln!("Snapshot written to {}", path.display());
+    Ok(())
 }
