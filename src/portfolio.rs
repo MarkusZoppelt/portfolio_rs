@@ -427,7 +427,7 @@ impl Portfolio {
                     Cell::new("Cash").add_attribute(Attribute::Bold),
                     Cell::new("Invested").add_attribute(Attribute::Bold),
                     Cell::new("Unreal. PnL").add_attribute(Attribute::Bold),
-                    Cell::new("%Since").add_attribute(Attribute::Bold),
+                    Cell::new("%PnL").add_attribute(Attribute::Bold),
                     Cell::new("Day PnL").add_attribute(Attribute::Bold),
                     Cell::new("%Day").add_attribute(Attribute::Bold),
                 ]);
@@ -744,7 +744,7 @@ impl Portfolio {
                 Cell::new("Cash").add_attribute(Attribute::Bold),
                 Cell::new("Invested").add_attribute(Attribute::Bold),
                 Cell::new("Unreal. PnL").add_attribute(Attribute::Bold),
-                Cell::new("%Since").add_attribute(Attribute::Bold),
+                Cell::new("%PnL").add_attribute(Attribute::Bold),
                 Cell::new("Day PnL").add_attribute(Attribute::Bold),
                 Cell::new("%Day").add_attribute(Attribute::Bold),
             ]);
