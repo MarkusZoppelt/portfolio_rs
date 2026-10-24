@@ -309,10 +309,16 @@ currency, the cached currency or the position's optional recorded
 `check_policy` reports a breach only when it is certain (`detail.basis:
 "partial"`); a band or limit that might be violated is a `possible_breach`
 warning (at most one per class and limit, with the priced-only percent in the
-message). When the excluded positions' estimated share (`excludedValueShare`)
-is below `--possible-breach-min-share` percent (default 0.5), everything is
-judged on the priced part with normal severity instead, and a
-`checks_incomplete` note with `detail.basis: "priced_part"` says so (a class
+message). When the excluded positions' estimated share is below
+`--possible-breach-min-share` percent (default 0.5), everything is judged on
+the priced part with normal severity instead, and a `checks_incomplete` note
+with `detail.basis: "priced_part"` says so. A last-price estimate counts as
+is; a cost-basis estimate is first multiplied by its class's plausible-gain
+factor (default 3 for funds, ETFs, bonds, gold and commodities; crypto, stocks
+and other classes have none, so their cost-basis estimate is never immaterial
+and they get the certain-breach/`possible_breach` treatment). Override per
+class with `--gain-factor CLASS=FACTOR` or `CLASS=never` (repeatable); the
+note reports `detail.materialityShare` and `detail.gainFactors` (a class
 holding the unpriced position that is below its band is then a
 `possible_breach`). `checks_incomplete` summarizes what
 was judged on a partial basis; it is a data-quality warning (top-level

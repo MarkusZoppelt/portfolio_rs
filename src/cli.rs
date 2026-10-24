@@ -518,6 +518,14 @@ pub fn build_cli() -> Command {
                         .help("Judge policy on the priced part when unpriced positions are estimated below PERCENT of the total (default: 0.5)"),
                 )
                 .arg(
+                    Arg::new("gain-factor")
+                        .long("gain-factor")
+                        .value_name("CLASS=FACTOR")
+                        .action(clap::ArgAction::Append)
+                        .value_parser(parse_gain_factor)
+                        .help("Plausible-gain factor for cost-basis estimates of CLASS (FACTOR or 'never'; repeatable). Default: 3 for funds, ETFs, bonds, gold and commodities; never (always material) for crypto, stocks and other classes"),
+                )
+                .arg(
                     Arg::new("data-dir")
                         .long("data-dir")
                         .value_name("DIR")
@@ -685,6 +693,28 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `CLASS=FACTOR` (or `CLASS=never`) for `--gain-factor`.
+fn parse_gain_factor(s: &str) -> Result<(String, Option<f64>), String> {
+    let (class, f) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected CLASS=FACTOR, got '{s}'"))?;
+    let class = class.trim().to_lowercase();
+    if class.is_empty() {
+        return Err("empty class".into());
+    }
+    let f = f.trim();
+    if f.eq_ignore_ascii_case("never") {
+        return Ok((class, None));
+    }
+    let v: f64 = f
+        .parse()
+        .map_err(|_| format!("factor '{f}' is not a number or 'never'"))?;
+    if !v.is_finite() || v < 1.0 {
+        return Err(format!("factor {v} must be at least 1"));
+    }
+    Ok((class, Some(v)))
 }
 
 #[cfg(test)]
