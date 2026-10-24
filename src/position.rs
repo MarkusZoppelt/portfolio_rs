@@ -84,6 +84,9 @@ pub fn fx_symbol(base: &str, quote_ccy: &str) -> Option<(String, f64)> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortfolioPosition {
+    /// Stable id (`pos_<uuid>`). Optional in the file; generated on first write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) ticker: Option<String>,
     pub(crate) asset_class: String,
@@ -115,7 +118,42 @@ pub struct PortfolioPosition {
     pub(crate) previous_close: Option<f64>,
 }
 
+/// A new stable position id, `pos_` followed by a random UUID (no data is encoded).
+pub fn new_position_id() -> String {
+    format!("pos_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Give every position without an id a new one. Returns whether any changed.
+pub fn ensure_position_ids(positions: &mut [PortfolioPosition]) -> bool {
+    let mut changed = false;
+    for position in positions.iter_mut().filter(|p| p.id.is_none()) {
+        position.id = Some(new_position_id());
+        changed = true;
+    }
+    changed
+}
+
+/// [`ensure_position_ids`] on raw JSON objects, keeping every other field as is.
+pub fn ensure_json_position_ids(positions: &mut [serde_json::Value]) -> bool {
+    let mut changed = false;
+    for obj in positions.iter_mut().filter_map(|v| v.as_object_mut()) {
+        if !obj.get("Id").is_some_and(|id| id.is_string()) {
+            obj.insert(
+                "Id".to_string(),
+                serde_json::Value::String(new_position_id()),
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
 impl PortfolioPosition {
+    /// Stable id, if the position has been written since ids were introduced.
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn update_price(&mut self, last_spot: f64) {
         self.last_spot = last_spot;
     }
@@ -313,6 +351,7 @@ impl PortfolioPosition {
         price_status: PriceStatus,
     ) -> Self {
         Self {
+            id: None,
             name: None,
             ticker: ticker.map(str::to_string),
             asset_class: asset_class.to_string(),
@@ -603,6 +642,36 @@ pub async fn handle_position_with<P: QuoteProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_position_id_is_optional_and_not_invented_on_read() {
+        let legacy = r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 1}]"#;
+        let positions = from_string(legacy).unwrap();
+        assert_eq!(positions[0].id(), None);
+        let out = serde_json::to_string(&positions).unwrap();
+        assert!(!out.contains("\"Id\""), "{out}");
+
+        let with_id = r#"[{"Id": "pos_fixed", "Name": "Cash", "AssetClass": "Cash", "Amount": 1}]"#;
+        let mut positions = from_string(with_id).unwrap();
+        assert!(!ensure_position_ids(&mut positions));
+        assert_eq!(positions[0].id(), Some("pos_fixed"));
+        assert!(serde_json::to_string(&positions)
+            .unwrap()
+            .contains("\"Id\":\"pos_fixed\""));
+    }
+
+    #[test]
+    fn test_ensure_json_position_ids_keeps_other_fields() {
+        let mut values: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"Name": "A", "Custom": 1}, {"Id": "pos_keep", "Name": "B"}]"#,
+        )
+        .unwrap();
+        assert!(ensure_json_position_ids(&mut values));
+        assert!(values[0]["Id"].as_str().unwrap().starts_with("pos_"));
+        assert_eq!(values[0]["Custom"], 1);
+        assert_eq!(values[1]["Id"], "pos_keep");
+        assert_ne!(new_position_id(), new_position_id());
+    }
     use std::fs;
 
     #[tokio::test]
@@ -637,6 +706,7 @@ mod tests {
     #[ignore = "requires network access to Yahoo Finance"]
     async fn test_handle_position() {
         let mut position = PortfolioPosition {
+            id: None,
             name: None,
             ticker: Some("AAPL".to_string()),
             asset_class: "Stock".to_string(),
@@ -672,6 +742,7 @@ mod tests {
     #[test]
     fn test_apply_quote_result_failed_quote_keeps_position() {
         let mut position = PortfolioPosition {
+            id: None,
             name: Some("S&P 500".to_string()),
             ticker: Some("SPY".to_string()),
             asset_class: "Stocks".to_string(),

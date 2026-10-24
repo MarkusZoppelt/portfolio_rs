@@ -1029,6 +1029,9 @@ impl App {
                 );
             }
 
+            // Give legacy positions stable ids on first write.
+            crate::position::ensure_json_position_ids(&mut original_data);
+
             // Save the updated data
             let json_string = serde_json::to_string_pretty(&original_data)
                 .wrap_err("failed to serialize portfolio data to JSON")?;
