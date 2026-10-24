@@ -9,10 +9,10 @@ use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
 use crate::money::{dec, div, percent_change, to_f64, Decimal};
-use crate::services::quotes::{Quote, QuoteError, QuoteProvider, YahooProvider};
+use crate::services::quotes::{DailyBar, Quote, QuoteError, QuoteProvider, YahooProvider};
 
 // Type alias to reduce type complexity
-type HistoricCacheMap = HashMap<(String, i64), Arc<yahoo::YResponse>>;
+type HistoricCacheMap = HashMap<(String, i64, i64), Arc<yahoo::YResponse>>;
 // Caches for Yahoo API requests
 static QUOTE_CACHE: Lazy<Mutex<HashMap<String, Arc<yahoo::YResponse>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -488,18 +488,18 @@ pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
         .single()
 }
 
-// get the price at a given date, cache on success, fallback to cache on failure
+// Daily history between two instants, cache on success, fallback to cache on failure
 pub async fn get_historic_price(
     ticker: &str,
-    date: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
 ) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
     // SAFETY: Valid chrono timestamps are always valid OffsetDateTime timestamps
-    let start = OffsetDateTime::from_unix_timestamp(date.timestamp())
+    let start = OffsetDateTime::from_unix_timestamp(from.timestamp())
         .expect("valid chrono timestamp should convert to OffsetDateTime");
-
-    // get a range of 3 days in case the market is closed on the given date
-    let end = start + time::Duration::days(3);
-    let cache_key = (ticker.to_string(), date.timestamp());
+    let end = OffsetDateTime::from_unix_timestamp(to.timestamp())
+        .expect("valid chrono timestamp should convert to OffsetDateTime");
+    let cache_key = (ticker.to_string(), from.timestamp(), to.timestamp());
 
     match yahoo::YahooConnector::new()?
         .get_quote_history(ticker, start, end)
@@ -587,17 +587,29 @@ pub(crate) async fn yahoo_previous_close(symbol: &str) -> Result<f64, QuoteError
         .map_err(|e| QuoteError::Provider(e.to_string()))
 }
 
-pub(crate) async fn yahoo_close_on(symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
-    let resp = get_historic_price(symbol, date)
+/// Daily bars in `[from, to]`, dated in the exchange's local time zone.
+pub(crate) async fn yahoo_daily_bars(
+    symbol: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<DailyBar>, QuoteError> {
+    let resp = get_historic_price(symbol, from, to)
         .await
         .map_err(|e| QuoteError::Provider(e.to_string()))?;
-    if let Ok(q) = resp.last_quote() {
-        return Ok(q.close);
-    }
-    resp.quotes()
-        .ok()
-        .and_then(|quotes| quotes.last().map(|q| q.close))
-        .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
+    let offset = resp.metadata().map(|m| m.gmtoffset as i64).unwrap_or(0);
+    let quotes = resp
+        .quotes()
+        .map_err(|_| QuoteError::Unavailable(symbol.to_string()))?;
+    Ok(quotes
+        .iter()
+        .filter_map(|q| {
+            let date = DateTime::from_timestamp(q.timestamp + offset, 0)?.date_naive();
+            Some(DailyBar {
+                date,
+                close: q.close,
+            })
+        })
+        .collect())
 }
 
 pub(crate) async fn yahoo_name(symbol: &str) -> Option<String> {
@@ -661,7 +673,7 @@ pub async fn handle_position_with<P: QuoteProvider>(
                     let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
                     if needs_price && p.quantity > Decimal::ZERO {
                         if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
-                            if let Ok(close) = provider.close_on(ticker, date).await {
+                            if let Ok(close) = provider.close_on_or_after(ticker, date).await {
                                 p.estimated_price = Some(dec(close.max(0.0)));
                             }
                         }
@@ -750,7 +762,9 @@ mod tests {
     #[ignore = "requires network access to Yahoo Finance"]
     async fn test_get_historic_price() {
         let date = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
-        let quote = get_historic_price("AAPL", date).await.unwrap();
+        let quote = get_historic_price("AAPL", date, date + chrono::Duration::days(3))
+            .await
+            .unwrap();
         assert_eq!(
             quote.quotes().unwrap().last().unwrap().close,
             74.35749816894531
