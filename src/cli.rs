@@ -397,7 +397,8 @@ pub fn build_cli() -> Command {
                     \n\
                     Endpoints include portfolio summary, positions CRUD,\n\
                     allocation, performance, context, review, simulate,\n\
-                    validate, and doctor.\n\
+                    validate, and doctor. Quotes fall back to the data\n\
+                    file's quote cache (as written by `mcp`), read-only.\n\
                     \n\
                     The server is intended for local use only (scripts,\n\
                     agents, GUIs on this machine). It only answers requests\n\

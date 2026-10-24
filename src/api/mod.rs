@@ -40,6 +40,8 @@ use tokio::net::TcpListener;
 use crate::context::PortfolioContext;
 use crate::doctor::WorkspaceHealth;
 use crate::review::Review;
+use crate::services::quote_cache::{cache_path_for, CachedProvider, DEFAULT_MAX_AGE_DAYS};
+use crate::services::quotes::AnyProvider;
 use crate::simulate::RebalanceSimulation;
 use crate::state::{
     AllocationItemDto, AppState, CreatePositionRequest, PerformanceDto, PortfolioSummaryDto,
@@ -81,7 +83,28 @@ impl ApiState {
         policy_file: Option<String>,
         currency: String,
     ) -> Result<Self> {
-        let inner = Arc::new(AppState::new(currency));
+        Self::with_quotes(
+            positions_json,
+            file_path,
+            policy_file,
+            currency,
+            AnyProvider::configured().clone(),
+        )
+        .await
+    }
+
+    /// Like [`ApiState::new`] with an explicit quote provider. With a data
+    /// file the provider reads that file's quote cache (as written by
+    /// `portfolio_rs mcp`), read-only: the API never writes the cache.
+    pub async fn with_quotes(
+        positions_json: String,
+        file_path: Option<String>,
+        policy_file: Option<String>,
+        currency: String,
+        quotes: AnyProvider,
+    ) -> Result<Self> {
+        let quotes = read_only_cache(quotes, file_path.as_deref());
+        let inner = Arc::new(AppState::with_quotes(currency, quotes));
         *inner.file_path.write().await = file_path;
         if let Some(policy) = policy_file {
             inner
@@ -91,6 +114,24 @@ impl ApiState {
         }
         inner.set_positions_json(positions_json).await;
         Ok(Self { inner })
+    }
+}
+
+/// Wrap `quotes` in a read-only view of the data file's quote cache (never
+/// next to an encrypted file, never around a fixture).
+fn read_only_cache(quotes: AnyProvider, file_path: Option<&str>) -> AnyProvider {
+    let path = file_path
+        .filter(|f| !f.ends_with(".gpg"))
+        .filter(|_| !matches!(quotes, AnyProvider::Fixture(_) | AnyProvider::Cached(_)))
+        .and_then(|f| cache_path_for(std::path::Path::new(f)));
+    match path {
+        Some(path) => AnyProvider::Cached(Arc::new(CachedProvider::new(
+            quotes,
+            Some(path),
+            DEFAULT_MAX_AGE_DAYS,
+            false,
+        ))),
+        None => quotes,
     }
 }
 

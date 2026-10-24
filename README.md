@@ -161,6 +161,9 @@ The cache also keeps the historic closes used to fill missing purchase prices,
 so cost basis and PnL survive offline runs. Entries are only served with a
 positive price, a timestamp at most one day in the future and (for quotes) a
 currency; a cache file with an unknown `version` is ignored with a warning.
+The HTTP API (`portfolio_rs api`, including `/api/context`) reads the same
+cache next to its data file, read-only (default max age, never written;
+not next to a `.gpg` file).
 
 Without an FX rate for its quote currency a position keeps its native `price`,
 `priceCurrency`, `priceAsOf` and day change (`priceStatus: "fx_unavailable"`);
