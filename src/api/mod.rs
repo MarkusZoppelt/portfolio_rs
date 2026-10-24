@@ -5,7 +5,16 @@
 //!
 //! # Security
 //!
-//! The server has **no authentication** and is intended for local use only.
+//! The server is intended for local use only. [`run_server`] always applies
+//! [`ApiGuard`]:
+//!
+//! - **Host allowlist:** requests must carry `Host: localhost:<port>`,
+//!   `127.0.0.1:<port>` or `[::1]:<port>` (blocks DNS rebinding). Anything
+//!   else gets `421 Misdirected Request`.
+//! - **Optional bearer token:** with `--token-file`, a random token is written
+//!   to that file (mode 0600, never logged) and every `/api/*` request needs
+//!   `Authorization: Bearer <token>` (`401` otherwise). `/health` stays open.
+//!
 //! [`run_server`] warns loudly when binding to a non-loopback address.
 //!
 //! # Persistence
@@ -17,8 +26,9 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Path, Query, Request, State},
+    http::{header, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -33,7 +43,7 @@ use crate::review::Review;
 use crate::simulate::RebalanceSimulation;
 use crate::state::{
     AllocationItemDto, AppState, CreatePositionRequest, PerformanceDto, PortfolioSummaryDto,
-    PositionDto, UpdatePositionRequest,
+    PositionDto, PositionKey, UpdatePositionRequest,
 };
 use crate::validate::ValidationReport;
 
@@ -51,6 +61,9 @@ pub struct ServerConfig {
     pub policy_file: Option<String>,
     /// Display currency.
     pub currency: String,
+    /// When set, generate a bearer token into this file (mode 0600) and
+    /// require it on every `/api/*` request.
+    pub token_file: Option<std::path::PathBuf>,
 }
 
 /// Shared handler state.
@@ -110,6 +123,13 @@ fn map_position_error(e: eyre::Report) -> ApiError {
     }
 }
 
+/// `{id}` is a stable `pos_…` id, or a legacy array index.
+fn position_key(raw: &str) -> Result<PositionKey, ApiError> {
+    PositionKey::parse(raw).ok_or_else(|| {
+        ApiError::BadRequest("position id must be a pos_ id or an index".to_string())
+    })
+}
+
 fn bad_request(e: eyre::Report) -> ApiError {
     ApiError::BadRequest(format!("{:#}", e))
 }
@@ -141,6 +161,107 @@ pub fn create_router(state: ApiState) -> Router {
         .with_state(state)
 }
 
+/// Request guard applied by [`run_server`]: Host allowlist plus optional
+/// bearer token. See the module docs.
+#[derive(Clone, Debug)]
+pub struct ApiGuard {
+    allowed_hosts: Vec<String>,
+    token: Option<String>,
+}
+
+impl ApiGuard {
+    /// Allow only `localhost`, `127.0.0.1` and `[::1]` on `port`.
+    pub fn new(port: u16, token: Option<String>) -> Self {
+        let allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
+            .iter()
+            .map(|h| format!("{}:{}", h, port))
+            .collect();
+        Self {
+            allowed_hosts,
+            token,
+        }
+    }
+
+    fn host_allowed(&self, host: Option<&str>) -> bool {
+        host.is_some_and(|h| {
+            self.allowed_hosts
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(h.trim()))
+        })
+    }
+
+    fn token_ok(&self, authorization: Option<&str>) -> bool {
+        let Some(expected) = &self.token else {
+            return true;
+        };
+        let Some(given) = authorization.and_then(|v| v.strip_prefix("Bearer ")) else {
+            return false;
+        };
+        constant_time_eq(given.trim().as_bytes(), expected.as_bytes())
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+async fn guard_middleware(
+    State(guard): State<Arc<ApiGuard>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let headers = request.headers();
+    let header_str = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    let host_ok = guard.host_allowed(header_str(header::HOST));
+    let token_ok =
+        request.uri().path() == "/health" || guard.token_ok(header_str(header::AUTHORIZATION));
+    if !host_ok {
+        return (
+            StatusCode::MISDIRECTED_REQUEST,
+            Json(serde_json::json!({ "error": "host not allowed" })),
+        )
+            .into_response();
+    }
+    if !token_ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            Json(serde_json::json!({ "error": "missing or invalid bearer token" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// [`create_router`] with an [`ApiGuard`] in front of every route.
+pub fn create_guarded_router(state: ApiState, guard: ApiGuard) -> Router {
+    create_router(state).layer(middleware::from_fn_with_state(
+        Arc::new(guard),
+        guard_middleware,
+    ))
+}
+
+/// Generate a random bearer token and write it to `path` with mode 0600,
+/// replacing any previous token file. The token is never printed.
+pub fn write_token_file(path: &std::path::Path) -> Result<String> {
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).wrap_err("failed to replace token file"),
+    }
+    crate::services::atomic_write::write_new_private(path, format!("{}\n", token).as_bytes())
+        .wrap_err_with(|| format!("failed to write token file {}", path.display()))?;
+    Ok(token)
+}
+
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
@@ -151,12 +272,22 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 
     if !is_loopback_host(&config.host) {
         eprintln!(
-            "WARNING: binding to non-loopback address {} — the API has no \
-             authentication and exposes your full portfolio (including write \
-             access). Only do this on a trusted network.",
+            "WARNING: binding to non-loopback address {} — the API exposes your \
+             full portfolio (including write access), and the Host allowlist \
+             only accepts localhost names. Only do this on a trusted network.",
             config.host
         );
     }
+
+    let token = match &config.token_file {
+        Some(path) => {
+            let token = write_token_file(path)?;
+            println!("API bearer token written to {}", path.display());
+            Some(token)
+        }
+        None => None,
+    };
+    let guard = ApiGuard::new(config.port, token);
 
     let state = ApiState::new(
         config.positions_json,
@@ -165,7 +296,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         config.currency,
     )
     .await?;
-    let router = create_router(state);
+    let router = create_guarded_router(state, guard);
 
     let listener = TcpListener::bind(&addr)
         .await
@@ -198,11 +329,11 @@ async fn get_positions(State(state): State<ApiState>) -> Json<Vec<PositionDto>> 
 
 async fn get_position(
     State(state): State<ApiState>,
-    Path(id): Path<usize>,
+    Path(id): Path<String>,
 ) -> Result<Json<PositionDto>, ApiError> {
     state
         .inner
-        .get_position(id)
+        .get_position_by_key(&position_key(&id)?)
         .await
         .map(Json)
         .map_err(map_position_error)
@@ -282,12 +413,12 @@ async fn create_position(
 
 async fn update_position(
     State(state): State<ApiState>,
-    Path(id): Path<usize>,
+    Path(id): Path<String>,
     Json(req): Json<UpdatePositionRequest>,
 ) -> Result<Json<PositionDto>, ApiError> {
     let dto = state
         .inner
-        .update_position(id, req)
+        .update_position_by_key(&position_key(&id)?, req)
         .await
         .map_err(map_position_error)?;
     persist(&state).await?;
@@ -296,11 +427,11 @@ async fn update_position(
 
 async fn delete_position(
     State(state): State<ApiState>,
-    Path(id): Path<usize>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     state
         .inner
-        .delete_position(id)
+        .delete_position_by_key(&position_key(&id)?)
         .await
         .map_err(map_position_error)?;
     persist(&state).await?;

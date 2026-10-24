@@ -47,6 +47,16 @@ impl Purchase {
             _ => self.estimated_price.or(self.price),
         }
     }
+
+    /// The price to show to API clients: the recorded price, or `None` when
+    /// [`Purchase::effective_price`] would fall back to an estimate.
+    pub fn recorded_price(&self) -> Option<Decimal> {
+        match self.price {
+            Some(p) if p > Decimal::ZERO => Some(p),
+            _ if self.estimated_price.is_some() => None,
+            other => other,
+        }
+    }
 }
 
 /// Whether a ticker position has a usable market quote.

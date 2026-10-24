@@ -183,6 +183,7 @@ impl AppState {
 
     /// Replace the raw JSON and refresh live prices.
     pub async fn set_positions_json(&self, json: String) {
+        let json = with_position_ids(json);
         {
             let mut positions_json = self.positions_json.write().await;
             *positions_json = json;
@@ -309,11 +310,14 @@ impl AppState {
     }
 
     pub async fn get_position(&self, id: usize) -> Result<PositionDto> {
+        self.get_position_by_key(&PositionKey::Index(id)).await
+    }
+
+    /// Look up a position by stable `pos_` id or (legacy) array index.
+    pub async fn get_position_by_key(&self, key: &PositionKey) -> Result<PositionDto> {
         let portfolio = self.portfolio().await;
-        portfolio
-            .positions
-            .get(id)
-            .map(|p| position_to_dto(id, p))
+        key.index_in(&portfolio.positions)
+            .map(|i| position_to_dto(i, &portfolio.positions[i]))
             .ok_or_else(|| eyre!("position not found"))
     }
 
@@ -446,15 +450,25 @@ impl AppState {
         id: usize,
         req: UpdatePositionRequest,
     ) -> Result<PositionDto> {
+        self.update_position_by_key(&PositionKey::Index(id), req)
+            .await
+    }
+
+    /// [`AppState::update_position`] by stable `pos_` id or (legacy) index.
+    pub async fn update_position_by_key(
+        &self,
+        key: &PositionKey,
+        req: UpdatePositionRequest,
+    ) -> Result<PositionDto> {
         let dto;
         {
             let mut json = self.positions_json.write().await;
             let mut positions: Vec<PortfolioPosition> = serde_json::from_str(&json)
                 .wrap_err("failed to parse current positions for update")?;
 
-            if id >= positions.len() {
+            let Some(id) = key.index_in(&positions) else {
                 bail!("position not found");
-            }
+            };
 
             let position = &mut positions[id];
             if let Some(name) = req.name {
@@ -491,14 +505,19 @@ impl AppState {
     }
 
     pub async fn delete_position(&self, id: usize) -> Result<()> {
+        self.delete_position_by_key(&PositionKey::Index(id)).await
+    }
+
+    /// [`AppState::delete_position`] by stable `pos_` id or (legacy) index.
+    pub async fn delete_position_by_key(&self, key: &PositionKey) -> Result<()> {
         {
             let mut json = self.positions_json.write().await;
             let mut positions: Vec<PortfolioPosition> = serde_json::from_str(&json)
                 .wrap_err("failed to parse current positions for update")?;
 
-            if id >= positions.len() {
+            let Some(id) = key.index_in(&positions) else {
                 bail!("position not found");
-            }
+            };
 
             positions.remove(id);
             crate::position::ensure_position_ids(&mut positions);
@@ -680,7 +699,11 @@ impl AppState {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionDto {
+    /// Array index (legacy; unstable across inserts and deletes).
     pub id: usize,
+    /// Stable `pos_` id. Use this in `/api/positions/{id}`.
+    #[serde(default)]
+    pub position_id: Option<String>,
     pub name: Option<String>,
     pub ticker: Option<String>,
     pub asset_class: String,
@@ -946,9 +969,48 @@ impl From<&Policy> for PolicyDto {
     }
 }
 
+/// How an API caller names a position: a stable `pos_` id, or the legacy
+/// array index (kept for existing GUI clients).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PositionKey {
+    Index(usize),
+    Id(String),
+}
+
+impl PositionKey {
+    /// Parse a path segment: `pos_…` is an id, digits are an index.
+    pub fn parse(raw: &str) -> Option<Self> {
+        if raw.starts_with("pos_") {
+            Some(Self::Id(raw.to_string()))
+        } else {
+            raw.parse().ok().map(Self::Index)
+        }
+    }
+
+    fn index_in(&self, positions: &[PortfolioPosition]) -> Option<usize> {
+        match self {
+            Self::Index(i) => (*i < positions.len()).then_some(*i),
+            Self::Id(id) => positions.iter().position(|p| p.id() == Some(id.as_str())),
+        }
+    }
+}
+
+/// Give positions without an `Id` one, so `pos_` lookups work before the
+/// first save. Unparsable JSON is returned unchanged (the loader reports it).
+fn with_position_ids(json: String) -> String {
+    let Ok(mut values) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else {
+        return json;
+    };
+    if !crate::position::ensure_json_position_ids(&mut values) {
+        return json;
+    }
+    serde_json::to_string_pretty(&values).unwrap_or(json)
+}
+
 fn position_to_dto(id: usize, position: &PortfolioPosition) -> PositionDto {
     PositionDto {
         id,
+        position_id: position.id().map(String::from),
         name: position.get_name_option().map(String::from),
         ticker: position.get_ticker().map(String::from),
         asset_class: position.get_asset_class().to_string(),
@@ -966,7 +1028,8 @@ fn position_to_dto(id: usize, position: &PortfolioPosition) -> PositionDto {
             .map(|p| PurchaseDto {
                 date: p.date.clone(),
                 quantity: to_f64(p.quantity),
-                price: p.effective_price().map(to_f64),
+                // Only a recorded price; estimated (historic close) prices are null.
+                price: p.recorded_price().map(to_f64),
                 fees: p.fees.map(to_f64),
             })
             .collect(),
@@ -977,6 +1040,52 @@ fn position_to_dto(id: usize, position: &PortfolioPosition) -> PositionDto {
 mod tests {
     use super::*;
     use crate::policy::default_balanced_growth_policy;
+
+    #[test]
+    fn test_purchase_dto_price_is_null_when_estimated() {
+        let json = r#"[{"Id": "pos_t1", "Name": "Fund", "Ticker": "SPY", "AssetClass": "Stocks",
+            "Amount": 3, "Purchases": [
+              {"Date": "2025-01-02", "Quantity": 1, "Price": null},
+              {"Date": "2025-01-03", "Quantity": 1, "Price": 0},
+              {"Date": "2025-01-04", "Quantity": 1, "Price": 10}]}]"#;
+        let mut positions: Vec<PortfolioPosition> = serde_json::from_str(json).unwrap();
+        for p in positions[0].purchases.iter_mut() {
+            p.estimated_price = Some(dec(99.0));
+        }
+        let dto = position_to_dto(0, &positions[0]);
+        let prices: Vec<Option<f64>> = dto.purchases.iter().map(|p| p.price).collect();
+        assert_eq!(prices, vec![None, None, Some(10.0)]);
+        assert_eq!(dto.position_id.as_deref(), Some("pos_t1"));
+        // Shape: purchase price is still present, as null.
+        let v = serde_json::to_value(&dto).unwrap();
+        assert!(v["purchases"][0]["price"].is_null());
+        assert_eq!(v["positionId"], "pos_t1");
+        assert_eq!(v["id"], 0);
+    }
+
+    #[test]
+    fn test_position_key_parse() {
+        assert_eq!(PositionKey::parse("3"), Some(PositionKey::Index(3)));
+        assert_eq!(
+            PositionKey::parse("pos_abc"),
+            Some(PositionKey::Id("pos_abc".to_string()))
+        );
+        assert_eq!(PositionKey::parse("abc"), None);
+        assert_eq!(PositionKey::parse("-1"), None);
+    }
+
+    #[test]
+    fn test_with_position_ids_assigns_missing_only() {
+        let out = with_position_ids(
+            r#"[{"Id": "pos_keep", "AssetClass": "Cash", "Amount": 1},
+                {"AssetClass": "Cash", "Amount": 2}]"#
+                .to_string(),
+        );
+        let v: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(v[0]["Id"], "pos_keep");
+        assert!(v[1]["Id"].as_str().unwrap().starts_with("pos_"));
+        assert_eq!(with_position_ids("not json".to_string()), "not json");
+    }
 
     #[test]
     fn test_app_config_dto_serializes_camel_case() {
