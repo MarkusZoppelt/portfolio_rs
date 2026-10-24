@@ -44,6 +44,7 @@ toml = "1.1"
 # HTTP API server (api subcommand)
 axum = "0.8"
 uuid = { version = "1.23", features = ["v7"] }
+rust_decimal = { version = "1.43", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

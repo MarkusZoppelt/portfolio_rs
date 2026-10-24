@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
+use crate::money::{dec, div, percent_change, to_f64, Decimal};
 use crate::services::quotes::{Quote, QuoteError, QuoteProvider, YahooProvider};
 
 // Type alias to reduce type complexity
@@ -173,28 +174,33 @@ impl PortfolioPosition {
     }
 
     pub fn get_balance(&self) -> f64 {
+        to_f64(self.balance_dec())
+    }
+
+    /// Market value in the base currency (see [`Self::get_balance`]).
+    pub fn balance_dec(&self) -> Decimal {
         if let Some(_ticker) = &self.ticker {
             // An unavailable quote or FX rate is not a real zero-value holding. Never guess.
             if self.price_status != PriceStatus::Live {
-                return 0.0;
+                return Decimal::ZERO;
             }
             // Use purchased quantity if available, otherwise fall back to amount
-            let quantity = if !self.purchases.is_empty() {
-                self.purchases.iter().map(|p| p.quantity).sum::<f64>()
-            } else {
-                self.amount
-            };
-            self.last_spot * quantity * self.fx_factor()
+            dec(self.last_spot) * self.quantity_dec() * self.fx_factor_dec()
         } else {
-            self.amount
+            dec(self.amount)
         }
     }
 
     pub fn get_amount(&self) -> f64 {
+        to_f64(self.quantity_dec())
+    }
+
+    /// Held quantity: sum of purchase quantities, or `Amount` without purchases.
+    pub fn quantity_dec(&self) -> Decimal {
         if !self.purchases.is_empty() {
-            self.purchases.iter().map(|p| p.quantity).sum::<f64>()
+            self.purchases.iter().map(|p| dec(p.quantity)).sum()
         } else {
-            self.amount
+            dec(self.amount)
         }
     }
 
@@ -230,8 +236,9 @@ impl PortfolioPosition {
         self.fx_rate
     }
 
-    fn fx_factor(&self) -> f64 {
-        self.fx_rate.unwrap_or(1.0)
+    /// [`Self::fx_rate`], or 1 when no conversion applies.
+    pub fn fx_factor_dec(&self) -> Decimal {
+        self.fx_rate.map(dec).unwrap_or(Decimal::ONE)
     }
 
     pub fn price_status(&self) -> PriceStatus {
@@ -255,24 +262,33 @@ impl PortfolioPosition {
     /// Average purchase cost per unit in the quote currency (shown next to
     /// [`Self::market_price`]).
     pub fn average_cost(&self) -> Option<f64> {
+        self.average_cost_dec().map(to_f64)
+    }
+
+    /// Purchases with a positive price, as `(quantity, cost incl. fees)`.
+    fn priced_purchases(&self) -> impl Iterator<Item = (Decimal, Decimal)> + '_ {
+        self.purchases
+            .iter()
+            .filter_map(|p| p.price.map(|price| (price, p)))
+            .filter(|(price, _)| *price > 0.0)
+            .map(|(price, p)| {
+                let quantity = dec(p.quantity);
+                (quantity, quantity * dec(price) + dec(p.fees.unwrap_or(0.0)))
+            })
+    }
+
+    /// [`Self::average_cost`] as a [`Decimal`].
+    pub fn average_cost_dec(&self) -> Option<Decimal> {
         if self.purchases.is_empty() {
             return None;
         }
-
-        let mut total_quantity = 0.0_f64;
-        let mut total_cost = 0.0_f64;
-
-        for p in &self.purchases {
-            if let Some(price) = p.price {
-                if price > 0.0 {
-                    total_quantity += p.quantity;
-                    total_cost += p.quantity * price + p.fees.unwrap_or(0.0);
-                }
-            }
-        }
-
-        if total_quantity > 0.0 {
-            Some(total_cost / total_quantity)
+        let (quantity, cost) = self
+            .priced_purchases()
+            .fold((Decimal::ZERO, Decimal::ZERO), |(q, c), (pq, pc)| {
+                (q + pq, c + pc)
+            });
+        if quantity > Decimal::ZERO {
+            div(cost, quantity)
         } else {
             None
         }
@@ -284,54 +300,47 @@ impl PortfolioPosition {
     /// Yahoo history) and converted at the CURRENT FX rate. This is an
     /// approximation: it ignores FX moves since purchase.
     pub fn total_invested(&self) -> Option<f64> {
+        self.total_invested_dec().map(to_f64)
+    }
+
+    /// [`Self::total_invested`] as a [`Decimal`].
+    pub fn total_invested_dec(&self) -> Option<Decimal> {
         if self.purchases.is_empty() {
             return None;
         }
-
         let invested = self
-            .purchases
-            .iter()
-            .filter_map(|p| p.price.map(|price| (price, p)))
-            .filter(|(price, _)| *price > 0.0)
-            .map(|(price, p)| p.quantity * price + p.fees.unwrap_or(0.0))
-            .sum::<f64>()
-            * self.fx_factor();
-
-        if invested > 0.0 {
-            Some(invested)
-        } else {
-            None
-        }
+            .priced_purchases()
+            .map(|(_, cost)| cost)
+            .sum::<Decimal>()
+            * self.fx_factor_dec();
+        (invested > Decimal::ZERO).then_some(invested)
     }
 
     pub fn pnl(&self) -> Option<f64> {
+        self.pnl_dec().map(to_f64)
+    }
+
+    /// [`Self::pnl`] as a [`Decimal`].
+    pub fn pnl_dec(&self) -> Option<Decimal> {
         if !self.has_market_price() {
             return None;
         }
-        let invested = self.total_invested()?;
-        Some(self.market_value() - invested)
+        let invested = self.total_invested_dec()?;
+        Some(self.balance_dec() - invested)
     }
 
     pub fn historic_variation_percent(&self) -> Option<f64> {
         if !self.has_market_price() {
             return None;
         }
-        let invested = self.total_invested()?;
-        if invested <= 0.0 {
-            return None;
-        }
-        Some((self.market_value() - invested) / invested * 100.0)
+        percent_change(self.balance_dec(), self.total_invested_dec()?).map(to_f64)
     }
 
     pub fn daily_variation_percent(&self) -> Option<f64> {
         if !self.has_market_price() {
             return None;
         }
-        let prev = self.previous_close?;
-        if prev <= 0.0 {
-            return None;
-        }
-        Some((self.market_price() - prev) / prev * 100.0)
+        percent_change(dec(self.market_price()), dec(self.previous_close?)).map(to_f64)
     }
 
     pub fn get_purchases(&self) -> &[Purchase] {
