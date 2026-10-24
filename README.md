@@ -266,9 +266,11 @@ Missing quotes or FX rates are never hidden: every response carries
 Totals then cover only priced positions; a class with an unpriced position has
 a `null` value. No percentage (position `weightPercent`, context class and cash
 percentages), drift or `amountToTarget` is derived from such a partial total; each class gets `actualPercentMin`/`actualPercentMax` instead:
-its possible share whatever the excluded positions are worth, from 0 up to
-their maximum plausible value (twice their estimate: the last cached price,
-else the cost basis; unbounded only when a position has neither). A band status
+its possible share whatever the excluded positions are worth: from 0 up to
+unbounded. An estimate (cost basis, or a cache entry past max-age) is never a
+bound, because a position can gain far more than any factor; only a native
+price fresh within the cache max-age (excluded for want of an FX rate) bounds
+a position at twice its value. A band status
 (`above_band`, `below_band`, `within_band`) is set only when it holds for the
 whole range, otherwise `unknown`. `get_allocation` lists the left-out
 positions in `excludedPositions` and their estimated share in
@@ -281,12 +283,12 @@ currency, the cached currency or the position's optional recorded
 `check_policy` reports a breach only when it is certain (`detail.basis:
 "partial"`); a band or limit that might be violated is a `possible_breach`
 warning (at most one per class and limit, with the priced-only percent in the
-message; none when the excluded positions can be at most
-`--possible-breach-min-share` percent of the total, default 0.5).
-A bound from a cache entry past max-age (or with `--cache-max-age 0`) is an
-assumption: such a breach names it with its as-of date
-(`detail.assumptions`) and is capped at `warning`
-(`detail.severityCappedFrom: "critical"`). `checks_incomplete` summarizes what
+message). When the excluded positions' estimated share (`excludedValueShare`)
+is below `--possible-breach-min-share` percent (default 0.5), everything is
+judged on the priced part with normal severity instead, and a
+`checks_incomplete` note with `detail.basis: "priced_part"` says so (a class
+holding the unpriced position that is below its band is then a
+`possible_breach`). `checks_incomplete` summarizes what
 was judged on a partial basis; it is a data-quality warning (top-level
 `warnings` only), so `policyStatus` is `warnings` only for real policy
 findings such as a `possible_breach`.

@@ -446,14 +446,21 @@ pub fn no_policy_finding() -> Finding {
     )
 }
 
-/// An excluded position's maximum plausible base value: twice its estimate
-/// (last cached price, else cost basis; the price may have moved since),
-/// unbounded (`None`) when it has no estimate at all.
+/// An excluded position's upper bound for certain-breach checks. Estimates
+/// (cost basis, an expired cache entry) are never bounds, because a position
+/// can gain far more than any factor: the position is unbounded (`None`).
+/// Only a last price that is not an assumption (a native quote fresh within
+/// the cache max-age, excluded for want of an FX rate) bounds it at
+/// `PLAUSIBLE_PRICE_FACTOR`× that price.
 pub const PLAUSIBLE_PRICE_FACTOR: f64 = 2.0;
 
 fn excluded_max(p: &PortfolioPosition) -> Option<Decimal> {
-    p.excluded_estimate()
-        .map(|(v, _)| v * dec(PLAUSIBLE_PRICE_FACTOR))
+    match p.excluded_estimate() {
+        Some((v, ExcludedBasis::LastPrice)) if p.estimate_assumed_as_of().is_none() => {
+            Some(v * dec(PLAUSIBLE_PRICE_FACTOR))
+        }
+        _ => None,
+    }
 }
 
 /// Sum of maximum plausible values; `None` (unbounded) if any is unbounded.
@@ -493,6 +500,9 @@ pub struct Allocation {
     pub total: Decimal,
     /// Every included position has a value.
     pub complete: bool,
+    /// Partial, but the excluded positions' estimated share is below the
+    /// materiality threshold: judged on the priced part as if complete.
+    pub immaterial: bool,
     pub classes: Vec<ClassAllocation>,
     pub untargeted: Vec<String>,
     pub missing: Vec<String>,
@@ -513,6 +523,25 @@ pub fn allocation(
     include_cash: bool,
     include_manual: bool,
 ) -> Allocation {
+    allocation_with(
+        portfolio,
+        policy,
+        include_cash,
+        include_manual,
+        DEFAULT_POSSIBLE_BREACH_MIN_SHARE,
+    )
+}
+
+/// [`allocation`] with the materiality threshold: when the excluded
+/// positions' estimated share is below `min_share` percent, everything is
+/// judged on the priced part as if complete (`immaterial: true`).
+pub fn allocation_with(
+    portfolio: &Portfolio,
+    policy: Option<&Policy>,
+    include_cash: bool,
+    include_manual: bool,
+    min_share: f64,
+) -> Allocation {
     let included: Vec<&PortfolioPosition> = portfolio
         .positions
         .iter()
@@ -527,6 +556,30 @@ pub fn allocation(
         .filter(|p| value_base(p).is_none())
         .collect();
     let excluded_max_all = sum_max(excluded.iter());
+    let estimates: Option<Vec<(Decimal, ExcludedBasis)>> =
+        excluded.iter().map(|p| p.excluded_estimate()).collect();
+    let (excluded_value_share, excluded_value_basis) = match estimates {
+        _ if excluded.is_empty() => (Some(0.0), None),
+        None => (None, None),
+        Some(est) => {
+            let e: Decimal = est.iter().map(|(v, _)| *v).sum();
+            let basis = if est
+                .iter()
+                .any(|(_, b)| *b == ExcludedBasis::CostBasisAssumedBase)
+            {
+                ExcludedBasis::CostBasisAssumedBase
+            } else if est.iter().any(|(_, b)| *b == ExcludedBasis::CostBasis) {
+                ExcludedBasis::CostBasis
+            } else {
+                ExcludedBasis::LastPrice
+            };
+            (
+                Some(pct(percent_of(e, total + e).unwrap_or(Decimal::ZERO))),
+                Some(basis.as_str()),
+            )
+        }
+    };
+    let immaterial = !complete && excluded_value_share.is_some_and(|v| v < min_share);
     // Group case-insensitively, keeping the first spelling seen. A class with
     // any unpriced position has an unknown value (never a partial sum or 0).
     let mut order: Vec<String> = Vec::new();
@@ -542,12 +595,14 @@ pub fn allocation(
             .or_insert_with(|| (p.get_asset_class().to_string(), Some(Decimal::ZERO)));
         entry.1 = match (entry.1, value_base(p)) {
             (Some(sum), Some(v)) => Some(sum + v),
+            // Immaterial exclusions: the class is its priced part.
+            (Some(sum), None) if immaterial => Some(sum),
             _ => None,
         };
         *priced.entry(key).or_default() += value_base(p).unwrap_or(Decimal::ZERO);
     }
     let range = |key: &str| -> Option<(f64, f64)> {
-        if complete {
+        if complete || immaterial {
             return None;
         }
         let own: Vec<&PortfolioPosition> = excluded
@@ -618,32 +673,10 @@ pub fn allocation(
         .map(|c| c.asset_class.clone())
         .filter(|c| untargeted.contains(c))
         .collect();
-    let estimates: Option<Vec<(Decimal, ExcludedBasis)>> =
-        excluded.iter().map(|p| p.excluded_estimate()).collect();
-    let (excluded_value_share, excluded_value_basis) = match estimates {
-        _ if excluded.is_empty() => (Some(0.0), None),
-        None => (None, None),
-        Some(est) => {
-            let e: Decimal = est.iter().map(|(v, _)| *v).sum();
-            let basis = if est
-                .iter()
-                .any(|(_, b)| *b == ExcludedBasis::CostBasisAssumedBase)
-            {
-                ExcludedBasis::CostBasisAssumedBase
-            } else if est.iter().any(|(_, b)| *b == ExcludedBasis::CostBasis) {
-                ExcludedBasis::CostBasis
-            } else {
-                ExcludedBasis::LastPrice
-            };
-            (
-                Some(pct(percent_of(e, total + e).unwrap_or(Decimal::ZERO))),
-                Some(basis.as_str()),
-            )
-        }
-    };
     Allocation {
         total,
         complete,
+        immaterial,
         classes,
         untargeted,
         missing,
@@ -733,9 +766,8 @@ pub struct PolicyCheck {
 /// Tuning for [`check_policy_with`].
 #[derive(Debug, Clone, Copy)]
 pub struct PolicyOptions {
-    /// Drop a possible_breach when the excluded positions' maximum share is
-    /// below this percent of the total: they cannot change the outcome
-    /// materially.
+    /// When the excluded positions' estimated share is below this percent
+    /// of the total, judge the priced part with normal severity (and a note).
     pub possible_breach_min_share: f64,
 }
 
@@ -768,7 +800,13 @@ pub fn check_policy_with(
             format!("Policy failed validation: {e}"),
         ));
     }
-    let alloc = allocation(portfolio, Some(policy), true, true);
+    let alloc = allocation_with(
+        portfolio,
+        Some(policy),
+        true,
+        true,
+        opts.possible_breach_min_share,
+    );
     // Share of the priced positions only (what the priced part alone says).
     let priced_only = |v: Decimal| percent_of(v, alloc.total).map(pct).unwrap_or(0.0);
     let class_priced = |class: &str| -> Decimal {
@@ -818,7 +856,26 @@ pub fn check_policy_with(
             }
             continue;
         }
+        let own_excluded = alloc.immaterial
+            && portfolio.positions.iter().any(|p| {
+                value_base(p).is_none() && p.get_asset_class().eq_ignore_ascii_case(&c.asset_class)
+            });
         match c.drift_points {
+            // Immaterial exclusions: an unpriced position of this class may
+            // lift it into its band, so "below" is only possible.
+            Some(drift)
+                if out
+                    && own_excluded
+                    && c.status == "below_band"
+                    && c.value.is_some_and(|v| v > 0.0) =>
+            {
+                findings.push(
+                    Finding::new("possible_breach", Severity::Warning, Category::Allocation,
+                        format!("{} may be below its band ({:.2}% of the priced part vs target {:.2}% ±{:.2}); it holds an unpriced position.", c.asset_class, c.actual_percent.unwrap_or_default(), t, tol))
+                        .class(&c.asset_class)
+                        .detail(json!({ "code": "allocation_out_of_band", "pricedOnlyPercent": c.actual_percent, "targetPercent": t, "tolerancePercent": tol, "driftPoints": drift, "basis": "priced_part" })),
+                );
+            }
             Some(drift) if out && c.value.is_some_and(|v| v > 0.0) => {
                 let severity = if drift.abs() > 2.0 * tol {
                     Severity::Critical
@@ -869,7 +926,7 @@ pub fn check_policy_with(
     // With partial data a share is a range: [v / (total + max excluded),
     // v / total]. A breach is reported only when the whole range is over the
     // limit; a range straddling it is a possible_breach warning.
-    let partial = !alloc.complete;
+    let partial = !alloc.complete && !alloc.immaterial;
     let mut possible: Vec<serde_json::Value> = Vec::new();
     if let Some(min) = c.minimum_cash_amount {
         let cash: Decimal = portfolio
@@ -1010,15 +1067,6 @@ pub fn check_policy_with(
         }
     }
     if partial {
-        // N4: excluded positions too small to matter: no possible_breach.
-        let excluded_max_share = alloc
-            .excluded_max
-            .and_then(|m| percent_of(m, total + m))
-            .map(pct);
-        if excluded_max_share.is_some_and(|s| s < opts.possible_breach_min_share) {
-            findings.retain(|f| f.code != "possible_breach");
-            possible.clear();
-        }
         // N4: at most one possible_breach per class and limit; the others'
         // positions are listed on the first.
         let key = |f: &Finding| {
@@ -1060,50 +1108,6 @@ pub fn check_policy_with(
             merged.push(f);
         }
         findings = merged;
-        // N2: bounds from an expired cache entry (or with the fallback
-        // disabled) are assumptions: name them and cap severity at warning.
-        let assumptions: Vec<serde_json::Value> = portfolio
-            .positions
-            .iter()
-            .filter(|p| value_base(p).is_none())
-            .filter_map(|p| {
-                p.estimate_assumed_as_of().map(|asof| {
-                    json!({ "positionId": pid(p), "name": p.get_name(), "asOf": asof,
-                            "assumption": format!("worth at most {PLAUSIBLE_PRICE_FACTOR}× its last cached price") })
-                })
-            })
-            .collect();
-        if !assumptions.is_empty() {
-            let named: Vec<String> = assumptions
-                .iter()
-                .map(|a| {
-                    format!(
-                        "{} at most {PLAUSIBLE_PRICE_FACTOR}× its last cached price from {}",
-                        a["name"].as_str().unwrap_or("?"),
-                        a["asOf"].as_str().unwrap_or("unknown")
-                    )
-                })
-                .collect();
-            for f in findings.iter_mut().filter(|f| {
-                f.severity == Severity::Critical
-                    && matches!(
-                        f.code.as_str(),
-                        "allocation_out_of_band" | "single_position_limit" | "asset_class_limit"
-                    )
-            }) {
-                f.severity = Severity::Warning;
-                f.message = format!(
-                    "{} Assumes {} (expired cache entry); capped at warning.",
-                    f.message,
-                    named.join(", ")
-                );
-                let d = f.detail.get_or_insert_with(|| json!({}));
-                if let Some(o) = d.as_object_mut() {
-                    o.insert("assumptions".into(), json!(assumptions));
-                    o.insert("severityCappedFrom".into(), json!("critical"));
-                }
-            }
-        }
         let unknown: Vec<&str> = alloc
             .classes
             .iter()
@@ -1129,6 +1133,30 @@ pub fn check_policy_with(
                             "excludedPositions": alloc.excluded_positions,
                             "excludedValueShare": alloc.excluded_value_share,
                             "excludedValueBasis": alloc.excluded_value_basis })),
+        );
+    }
+    if alloc.immaterial {
+        findings.push(
+            Finding::new(
+                "checks_incomplete",
+                Severity::Warning,
+                Category::DataQuality,
+                format!(
+                    "{} position(s) have no price or FX rate, but their estimated share ({}, {}) is below the {:.2}% \
+                     materiality threshold: allocation and limits are judged on the priced part with normal severity.",
+                    alloc.excluded_positions.len(),
+                    alloc
+                        .excluded_value_share
+                        .map_or("unknown".to_string(), |s| format!("{s:.2}%")),
+                    alloc.excluded_value_basis.unwrap_or("estimate"),
+                    opts.possible_breach_min_share
+                ),
+            )
+            .detail(json!({ "basis": "priced_part",
+                            "excludedPositions": alloc.excluded_positions,
+                            "excludedValueShare": alloc.excluded_value_share,
+                            "excludedValueBasis": alloc.excluded_value_basis,
+                            "minShare": opts.possible_breach_min_share })),
         );
     }
     PolicyCheck { findings, checks }

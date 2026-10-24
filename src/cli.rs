@@ -515,7 +515,7 @@ pub fn build_cli() -> Command {
                         .long("possible-breach-min-share")
                         .value_name("PERCENT")
                         .value_parser(clap::value_parser!(f64))
-                        .help("No possible_breach when unpriced positions can be at most PERCENT of the total (default: 0.5)"),
+                        .help("Judge policy on the priced part when unpriced positions are estimated below PERCENT of the total (default: 0.5)"),
                 )
                 .arg(
                     Arg::new("data-dir")
