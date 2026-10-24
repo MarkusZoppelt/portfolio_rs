@@ -326,7 +326,8 @@ pub enum TxType {
     Buy,
     Sell,
     /// Cash paid in. A cash position without recorded entries appears as
-    /// one opening deposit of its balance with a null date.
+    /// one opening deposit of its balance (`synthesized: true`), dated at the
+    /// earliest purchase date, else the data file's modification date.
     Deposit,
     /// Cash paid out (negative cash entry).
     Withdrawal,
@@ -529,6 +530,9 @@ pub struct Transaction {
     pub id: String,
     /// YYYY-MM-DD, null when the purchase has no date.
     pub date: Option<String>,
+    /// True for an opening deposit synthesized from a cash balance without
+    /// entries (its date is inferred, not recorded).
+    pub synthesized: bool,
     #[serde(rename = "type")]
     pub tx_type: TxType,
     pub position_id: String,
@@ -540,7 +544,7 @@ pub struct Transaction {
     /// recorded | historic_close | missing | cash (deposits)
     pub price_source: String,
     /// Recorded fees; 0 when the purchase records none (the same 0 that
-    /// `amount` uses); null only for a synthesized opening deposit.
+    /// `amount` uses), also for a synthesized opening deposit.
     pub fees: Option<f64>,
     /// quantity * price (+ fees for buys, - fees for sells) in `currency`;
     /// null when the price is missing.
