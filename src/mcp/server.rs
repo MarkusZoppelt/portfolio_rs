@@ -725,7 +725,35 @@ impl PortfolioServer {
                 .detail(json!({ "positionIds": vanished })),
             );
         }
-        let effects = if complete {
+        // Finance B7: values in different base currencies cannot be compared.
+        let mut currencies: Vec<String> = std::iter::once(&start)
+            .chain(
+                snaps
+                    .iter()
+                    .filter(|s| s.date > start.date && s.date < end.date),
+            )
+            .chain(std::iter::once(&end))
+            .map(|s| s.base_currency.clone())
+            .collect();
+        currencies.dedup();
+        let currency_changed = currencies.len() > 1;
+        if currency_changed {
+            warnings.push(
+                Finding::new(
+                    "base_currency_changed",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    format!(
+                        "The base currency changed between {} and {} ({}); values in different currencies are not comparable, so the figures are partial (null).",
+                        start.date,
+                        end.date,
+                        currencies.join(" -> ")
+                    ),
+                )
+                .detail(json!({ "baseCurrencies": currencies })),
+            );
+        }
+        let effects = if complete && !currency_changed {
             perf::position_effects(&start, &end, &txs)
         } else {
             None
@@ -733,12 +761,14 @@ impl PortfolioServer {
         let Some(effects) = effects else {
             meta.complete = false;
             meta.data_status = analytics::data_status(false, has_stale).to_string();
-            warnings.push(Finding::new(
+            if !currency_changed {
+                warnings.push(Finding::new(
                 "performance_partial",
                 Severity::Warning,
                 Category::DataQuality,
                 "A valuation at the period start or end is missing prices, FX rates or flow amounts; figures are null.".to_string(),
             ));
+            }
             meta.warnings = warnings;
             out.meta = meta;
             return Ok(Json(out));

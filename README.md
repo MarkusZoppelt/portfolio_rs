@@ -203,7 +203,9 @@ start before the day before `from` adds a `start_point_gap` note. The end is
 today's live valuation, or for a past `to` the last snapshot inside
 [`from`, `to`] (none: `insufficient_history`). A non-cash position held at
 the start that is gone with no sell entry (`vanished_position`) is booked as an
-unknown external flow, never a loss, and the figures are partial. Contributions are buys minus
+unknown external flow, never a loss, and the figures are partial. A change of
+`baseCurrency` between the snapshots of the period gives `base_currency_changed`
+and null, partial figures. Contributions are buys minus
 sells dated in that window (from the purchases) plus the change in cash
 balances, so a deposit is never return, and interest or dividends paid to cash
 count as contributions (`incomeEffect` is 0 until there is an income ledger).
