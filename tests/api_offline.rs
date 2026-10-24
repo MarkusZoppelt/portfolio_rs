@@ -510,3 +510,47 @@ async fn test_positions_by_stable_id() {
     let r = app.oneshot(get("/api/positions/not-an-id")).await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
+
+/// Finance retest A1: /api/context reads the data file's quote cache
+/// (offline provider, no network) and never writes it.
+#[tokio::test]
+async fn test_context_reads_quote_cache_read_only() {
+    use portfolio_rs::services::quotes::AnyProvider;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    let positions = r#"[
+      {"Name": "Cash", "AssetClass": "Cash", "Amount": 1000.0},
+      {"Name": "S&P 500", "AssetClass": "Stocks", "Ticker": "SPY", "Amount": 2,
+       "Purchases": [{"Date": "2025/04/15", "Quantity": 2, "Price": 400}]}
+    ]"#;
+    std::fs::write(&file, positions).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let cache = tmp.path().join(".positions.json.quotes-cache.json");
+    let cache_json = serde_json::json!({
+        "version": 1,
+        "quotes": {"SPY": {"price": 500.0, "currency": "USD", "asOf": now, "fetchedAt": now}},
+        "fx": {}
+    })
+    .to_string();
+    std::fs::write(&cache, &cache_json).unwrap();
+    let state = ApiState::with_quotes(
+        positions.to_string(),
+        Some(file.to_string_lossy().into_owned()),
+        None,
+        "USD".to_string(),
+        AnyProvider::Offline,
+    )
+    .await
+    .unwrap();
+    let app = create_router(state);
+    let response = app.oneshot(get("/api/context")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["summary"]["totalValue"], 2000.0, "{json}");
+    // A cached price is served but marked stale.
+    assert_eq!(json["summary"]["dataStatus"], "stale", "{json}");
+    assert_eq!(json["positions"][1]["price"], 500.0);
+    assert_eq!(std::fs::read_to_string(&cache).unwrap(), cache_json);
+    let names: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+    assert_eq!(names.len(), 2, "no extra files written");
+}
