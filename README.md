@@ -154,8 +154,8 @@ atomically with mode `0600`. It holds, per symbol, the price, previous close,
 currency, `asOf` and `fetchedAt`, plus the FX pairs (`EURUSD=X`, ...) in a
 separate `fx` map; no quantities or other portfolio data. When a fetch fails,
 the cached value is used if it is younger than the max age (default 7 days,
-measured from `asOf`): the position gets `priceSource: "cache"` and the cached
-`priceAsOf`. Coming from the cache is informational only: a price (or FX
+measured from `asOf`): the position gets `priceSource: "cache"`, `priceStatus: "cache"` and
+the cached `priceAsOf`. Coming from the cache is informational only: a price (or FX
 rate) is stale when its `asOf` is older than `--stale-after` days (default 3,
 which covers a weekend), wherever it came from; stale positions get
 `isStale: true` and `priceStatus: "stale"`. An unknown `asOf` is not stale.
