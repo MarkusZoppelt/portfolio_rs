@@ -1007,7 +1007,7 @@ mod tests {
     fn period_return_handles_fx_and_empty_history() {
         let mut security =
             PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 2.0, 120.0, PriceStatus::Live);
-        security.fx_rate = Some(0.5);
+        security.fx_rate = Some(dec(0.5));
         let (historic, current) = like_for_like_values([(&security, Some(100.0))]);
         assert_eq!((historic, current), (100.0, 120.0));
         assert_eq!(period_return_percent(current, historic), Some(20.0));
@@ -1106,13 +1106,13 @@ mod tests {
             10.0,
             100.0,
         );
-        up.previous_close = Some(105.0);
+        up.previous_close = Some(dec(105.0));
         let mut down = with_purchase(
             PortfolioPosition::for_test(Some("FAKEDN"), "Bonds", 5.0, 180.0, PriceStatus::Live),
             5.0,
             200.0,
         );
-        down.previous_close = Some(190.0);
+        down.previous_close = Some(dec(190.0));
         let mut portfolio = Portfolio::new();
         portfolio.add_position(up);
         portfolio.add_position(down);

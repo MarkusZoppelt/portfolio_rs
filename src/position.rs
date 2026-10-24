@@ -94,7 +94,7 @@ pub struct PortfolioPosition {
     pub(crate) amount: f64,
 
     #[serde(skip_serializing, skip_deserializing)]
-    pub(crate) last_spot: f64,
+    pub(crate) last_spot: Decimal,
 
     // Not persisted. Defaults to Live; ticker positions are unpriced until a quote lands.
     #[serde(skip_serializing, skip_deserializing)]
@@ -108,7 +108,7 @@ pub struct PortfolioPosition {
     // Not persisted. Base-currency units per 1 unit of `price_currency`.
     // None means no conversion (same currency or unknown).
     #[serde(skip_serializing, skip_deserializing)]
-    pub(crate) fx_rate: Option<f64>,
+    pub(crate) fx_rate: Option<Decimal>,
 
     // Optional list of historical purchases to compute cost basis and PnL
     #[serde(default)]
@@ -116,7 +116,7 @@ pub struct PortfolioPosition {
 
     // Previous close used to compute daily variation
     #[serde(skip_serializing, skip_deserializing)]
-    pub(crate) previous_close: Option<f64>,
+    pub(crate) previous_close: Option<Decimal>,
 }
 
 /// A new stable position id: `pos_` + a time-ordered UUID v7 (encodes only creation time).
@@ -156,7 +156,7 @@ impl PortfolioPosition {
     }
 
     fn update_price(&mut self, last_spot: f64) {
-        self.last_spot = last_spot;
+        self.last_spot = dec(last_spot);
     }
 
     pub fn get_name(&self) -> &str {
@@ -185,7 +185,7 @@ impl PortfolioPosition {
                 return Decimal::ZERO;
             }
             // Use purchased quantity if available, otherwise fall back to amount
-            dec(self.last_spot) * self.quantity_dec() * self.fx_factor_dec()
+            self.last_spot * self.quantity_dec() * self.fx_factor_dec()
         } else {
             dec(self.amount)
         }
@@ -223,7 +223,7 @@ impl PortfolioPosition {
 
     /// Latest price in the quote currency ([`Self::price_currency`]), not converted.
     pub fn market_price(&self) -> f64 {
-        self.last_spot
+        to_f64(self.last_spot)
     }
 
     /// Currency of [`Self::market_price`] as reported by the quote, if known.
@@ -233,12 +233,12 @@ impl PortfolioPosition {
 
     /// Base-currency units per 1 unit of the quote currency, if a conversion applies.
     pub fn fx_rate(&self) -> Option<f64> {
-        self.fx_rate
+        self.fx_rate.map(to_f64)
     }
 
     /// [`Self::fx_rate`], or 1 when no conversion applies.
     pub fn fx_factor_dec(&self) -> Decimal {
-        self.fx_rate.map(dec).unwrap_or(Decimal::ONE)
+        self.fx_rate.unwrap_or(Decimal::ONE)
     }
 
     pub fn price_status(&self) -> PriceStatus {
@@ -251,7 +251,7 @@ impl PortfolioPosition {
         if self.ticker.is_none() {
             return true;
         }
-        self.price_status == PriceStatus::Live && self.last_spot > 0.0
+        self.price_status == PriceStatus::Live && self.last_spot > Decimal::ZERO
     }
 
     /// Market value in the base currency.
@@ -341,7 +341,7 @@ impl PortfolioPosition {
     pub fn previous_day_value_dec(&self) -> Decimal {
         let value = self.balance_dec();
         match (self.daily_variation_percent(), self.previous_close) {
-            (Some(_), Some(prev)) => div(value * dec(prev), dec(self.last_spot)).unwrap_or(value),
+            (Some(_), Some(prev)) => div(value * prev, self.last_spot).unwrap_or(value),
             _ => value,
         }
     }
@@ -356,7 +356,7 @@ impl PortfolioPosition {
         if !self.has_market_price() {
             return None;
         }
-        percent_change(dec(self.market_price()), dec(self.previous_close?)).map(to_f64)
+        percent_change(self.last_spot, self.previous_close?).map(to_f64)
     }
 
     pub fn get_purchases(&self) -> &[Purchase] {
@@ -364,7 +364,7 @@ impl PortfolioPosition {
     }
 
     pub fn get_previous_close(&self) -> Option<f64> {
-        self.previous_close
+        self.previous_close.map(to_f64)
     }
 
     #[cfg(test)]
@@ -381,7 +381,7 @@ impl PortfolioPosition {
             ticker: ticker.map(str::to_string),
             asset_class: asset_class.to_string(),
             amount,
-            last_spot,
+            last_spot: dec(last_spot),
             purchases: Vec::new(),
             previous_close: None,
             price_status,
@@ -634,7 +634,7 @@ pub async fn handle_position_with<P: QuoteProvider>(
         // failed name lookup must not discard an otherwise valid position.
         if position.price_status == PriceStatus::Live {
             if let Ok(prev_close) = provider.previous_close(ticker).await {
-                position.previous_close = Some(prev_close);
+                position.previous_close = Some(dec(prev_close));
             }
 
             if !position.purchases.is_empty() {
@@ -748,7 +748,7 @@ mod tests {
             ticker: Some("AAPL".to_string()),
             asset_class: "Stock".to_string(),
             amount: 1.0,
-            last_spot: 0.0,
+            last_spot: Decimal::ZERO,
             price_status: PriceStatus::Live,
             price_currency: None,
             fx_rate: None,
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(updated_position.get_name(), "Apple Inc.");
         assert_eq!(
             updated_position.get_balance(),
-            updated_position.get_amount() * updated_position.last_spot
+            updated_position.get_amount() * updated_position.market_price()
         );
     }
 
@@ -784,7 +784,7 @@ mod tests {
             ticker: Some("SPY".to_string()),
             asset_class: "Stocks".to_string(),
             amount: 4.0,
-            last_spot: 500.0,
+            last_spot: dec(500.0),
             price_status: PriceStatus::Live,
             price_currency: None,
             fx_rate: None,
@@ -794,13 +794,13 @@ mod tests {
                 price: Some(400.0),
                 fees: None,
             }],
-            previous_close: Some(490.0),
+            previous_close: Some(dec(490.0)),
         };
 
         apply_quote_result(&mut position, None);
 
         assert_eq!(position.price_status(), PriceStatus::Unavailable);
-        assert_eq!(position.last_spot, 0.0);
+        assert_eq!(position.market_price(), 0.0);
         assert!(!position.has_market_price());
         assert_eq!(position.get_balance(), 0.0);
         assert!(position.pnl().is_none());
@@ -818,7 +818,7 @@ mod tests {
             PortfolioPosition::for_test(Some("BTC-USD"), "Crypto", 1.0, 20.0, PriceStatus::Live);
         apply_quote_result(&mut position, Some(0.0));
         assert_eq!(position.price_status(), PriceStatus::Unavailable);
-        assert_eq!(position.last_spot, 0.0);
+        assert_eq!(position.market_price(), 0.0);
         assert_eq!(position.get_ticker(), Some("BTC-USD"));
         assert_eq!(position.get_balance(), 0.0);
 
@@ -832,7 +832,7 @@ mod tests {
             PortfolioPosition::for_test(Some("SPY"), "Stocks", 2.0, 0.0, PriceStatus::Unavailable);
         apply_quote_result(&mut position, Some(450.25));
         assert_eq!(position.price_status(), PriceStatus::Live);
-        assert_eq!(position.last_spot, 450.25);
+        assert_eq!(position.market_price(), 450.25);
         assert!(position.has_market_price());
         assert_eq!(position.get_balance(), 900.5);
     }
@@ -880,7 +880,7 @@ mod tests {
         let parsed: PortfolioPosition = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.price_status(), PriceStatus::Live);
         assert_eq!(parsed.get_ticker(), Some("SPY"));
-        assert_eq!(parsed.last_spot, 0.0);
+        assert_eq!(parsed.market_price(), 0.0);
     }
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
         let mut position =
             PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 3.0, 100.0, PriceStatus::Live);
         position.price_currency = Some("USD".to_string());
-        position.fx_rate = Some(0.5);
+        position.fx_rate = Some(dec(0.5));
         position.purchases = vec![Purchase {
             date: None,
             quantity: 3.0,
@@ -947,8 +947,8 @@ mod tests {
     fn test_decimal_money_math_is_exact() {
         let mut position =
             PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 0.0, 10.1, PriceStatus::Live);
-        position.fx_rate = Some(0.5);
-        position.previous_close = Some(10.0);
+        position.fx_rate = Some(dec(0.5));
+        position.previous_close = Some(dec(10.0));
         position.purchases = (0..3)
             .map(|_| Purchase {
                 date: None,
