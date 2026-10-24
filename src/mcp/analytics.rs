@@ -150,7 +150,10 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
                             "fx_unavailable",
                             Severity::Warning,
                             Category::DataQuality,
-                            format!("No FX rate for {ticker}; excluded from totals."),
+                            format!(
+                                "No FX rate for {ticker} ({}); value and invested are null and excluded from totals.",
+                                p.price_currency().unwrap_or("?").to_uppercase()
+                            ),
                         )
                         .position(id)
                         .class(p.get_asset_class())
@@ -161,14 +164,20 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
                             "no_live_price",
                             Severity::Warning,
                             Category::DataQuality,
-                            format!("No live price for {ticker}; excluded from totals."),
+                            if p.has_complete_cost_basis() {
+                                format!("No live price for {ticker}; excluded from totals.")
+                            } else {
+                                format!("No live price for {ticker}; excluded from totals. Purchase prices estimated from quote history are unknown too.")
+                            },
                         )
                         .position(id)
                         .class(p.get_asset_class()),
                     ),
                     _ => {}
                 }
-                if !p.has_complete_cost_basis() {
+                // Without any quote the gap comes from the missing quote
+                // (reported above), not from the user's purchase records.
+                if !p.has_complete_cost_basis() && p.price_currency().is_some() {
                     out.push(
                         Finding::new(
                             "missing_cost_basis",
@@ -193,6 +202,18 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
             ),
             _ => {}
         }
+    }
+    if portfolio
+        .positions
+        .iter()
+        .any(|p| p.cost_basis_at_current_fx())
+    {
+        out.push(Finding::new(
+            "cost_basis_current_fx",
+            Severity::Info,
+            Category::DataQuality,
+            "Invested and PnL of foreign-currency positions convert purchase costs at the current FX rate, not the rate on the purchase date.".to_string(),
+        ));
     }
     let mut dups: Vec<_> = tickers
         .into_iter()

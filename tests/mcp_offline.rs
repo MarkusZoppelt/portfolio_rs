@@ -1293,3 +1293,76 @@ async fn get_context_is_honest_about_partial_data() {
     assert!(commodities["value"].is_null());
     client.cancel().await.unwrap();
 }
+
+fn position<'a>(v: &'a Value, ticker: &str) -> &'a Value {
+    v["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["ticker"] == ticker)
+        .unwrap_or_else(|| panic!("no {ticker}"))
+}
+
+/// Finance item 5: cost basis is never a USD amount labelled as base
+/// currency, a missing quote raises no false missing_cost_basis, and the
+/// current-FX conversion is flagged once, in get_positions and get_context.
+#[tokio::test]
+async fn cost_basis_is_never_unconverted_and_current_fx_is_flagged() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let spy = position(&v, "SPY");
+    assert_eq!(spy["averageCost"], 400.0);
+    assert_eq!(spy["priceCurrency"], "USD");
+    assert_eq!(spy["invested"], 16000.0, "400 USD x 50 x 0.8 EUR/USD");
+    let warn = codes(&v["warnings"]);
+    assert_eq!(
+        warn.iter()
+            .filter(|c| *c == "cost_basis_current_fx")
+            .count(),
+        1,
+        "{warn:?}"
+    );
+    let ctx = ok(&client, "get_context", json!({ "format": "json" })).await;
+    assert!(ctx["context"]["dataQualityFlags"]
+        .to_string()
+        .contains("current FX rate"));
+    client.cancel().await.unwrap();
+
+    let (_tmp, client) = connect_partial("quotes_no_fx.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    for t in ["SPY", "BTC-USD", "TLT", "GLD"] {
+        let p = position(&v, t);
+        assert!(
+            p["invested"].is_null(),
+            "USD cost must not be labelled EUR: {p}"
+        );
+        assert!(
+            p["averageCost"].is_number(),
+            "average cost stays (in USD): {p}"
+        );
+        assert_eq!(p["priceCurrency"], "USD");
+    }
+    let warn = codes(&v["warnings"]);
+    assert!(warn.contains(&"fx_unavailable".to_string()));
+    assert!(
+        !warn.contains(&"missing_cost_basis".to_string()),
+        "{warn:?}"
+    );
+    assert!(!warn.contains(&"cost_basis_current_fx".to_string()));
+    let ctx = ok(&client, "get_context", json!({ "format": "json" })).await;
+    let spy = position(&ctx["context"], "SPY");
+    assert!(spy["invested"].is_null(), "{spy}");
+    assert!(!ctx["context"]["dataQualityFlags"]
+        .to_string()
+        .contains("Missing cost basis"));
+    client.cancel().await.unwrap();
+
+    let (_tmp, client) = connect_partial("quotes_no_gsg.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(position(&v, "SPY")["invested"], 16000.0);
+    assert!(
+        !codes(&v["warnings"]).contains(&"missing_cost_basis".to_string()),
+        "the gap comes from the missing quote, reported as no_live_price"
+    );
+    client.cancel().await.unwrap();
+}

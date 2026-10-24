@@ -113,7 +113,10 @@ impl PortfolioContext {
             };
             allocation_entry.1 += 1;
 
-            if position.get_ticker().is_some() && position.total_invested().is_none() {
+            if position.get_ticker().is_some()
+                && position.price_currency().is_some()
+                && !position.has_complete_cost_basis()
+            {
                 data_quality_flags.push(format!(
                     "Missing cost basis for {}; add Purchase Price entries to improve PnL analysis.",
                     position.get_name()
@@ -129,7 +132,7 @@ impl PortfolioContext {
 
             if position.price_status() == PriceStatus::FxUnavailable {
                 data_quality_flags.push(format!(
-                    "No FX rate from {} to the base currency for {}; position excluded from totals.",
+                    "No FX rate from {} to the base currency for {}; position excluded from totals and invested unknown.",
                     position.price_currency().unwrap_or("?"),
                     position.get_name()
                 ));
@@ -210,6 +213,15 @@ impl PortfolioContext {
             (s, _, _) => s,
         };
 
+        if portfolio
+            .positions
+            .iter()
+            .any(|p| p.cost_basis_at_current_fx())
+        {
+            data_quality_flags.push(
+                "Invested and PnL of foreign-currency positions convert purchase costs at the current FX rate, not the rate on the purchase date.".to_string(),
+            );
+        }
         if network_status != "Connected" {
             data_quality_flags.push(format!(
                 "Network status is {network_status}; quote-dependent values may be incomplete."
