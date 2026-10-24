@@ -3051,3 +3051,26 @@ async fn performance_dates_are_strict_and_fallbacks_warn() {
     assert!(has_code(&v, "performance_approximate").is_some(), "{v}");
     client.cancel().await.unwrap();
 }
+
+/// Finance B7: a baseCurrency change between snapshots warns and is partial.
+#[tokio::test]
+async fn base_currency_change_makes_performance_partial() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_today(tmp.path()).await;
+    let mut old = today.clone();
+    old["date"] = json!(day(-1));
+    old["baseCurrency"] = json!("USD");
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    let w = has_code(&v, "base_currency_changed").expect("warning");
+    assert_eq!(w["detail"]["baseCurrencies"], json!(["USD", "EUR"]), "{w}");
+    assert!(v["change"].is_null(), "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "partial", "{v}");
+    client.cancel().await.unwrap();
+}

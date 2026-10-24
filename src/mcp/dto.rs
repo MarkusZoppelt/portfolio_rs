@@ -281,6 +281,12 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "A valuation at the period start or end is missing prices or FX rates; performance figures are null.",
     ),
     (
+        "base_currency_changed",
+        "data_quality",
+        "warning",
+        "The base currency differs between the snapshots of the period; figures are partial (null).",
+    ),
+    (
         "snapshot_lines_skipped",
         "data_quality",
         "warning",
