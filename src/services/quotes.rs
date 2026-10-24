@@ -120,6 +120,11 @@ pub trait QuoteProvider: Send + Sync + 'static {
     }
     /// Display name. Never fatal: `None` when unknown.
     fn name(&self, symbol: &str) -> impl Future<Output = Option<String>> + Send;
+    /// Last known price and currency regardless of age (the quote cache);
+    /// only used to estimate excluded values, never as a current price.
+    fn last_known(&self, _symbol: &str) -> Option<(f64, Option<String>)> {
+        None
+    }
 }
 
 /// Yahoo Finance, using the process-wide caches in [`crate::position`].
@@ -372,6 +377,13 @@ impl QuoteProvider for AnyProvider {
             Self::Offline => OfflineProvider.name(symbol).await,
             Self::Fixture(f) => f.name(symbol).await,
             Self::Cached(c) => c.name(symbol).await,
+        }
+    }
+
+    fn last_known(&self, symbol: &str) -> Option<(f64, Option<String>)> {
+        match self {
+            Self::Cached(c) => c.last_known_entry(symbol),
+            _ => None,
         }
     }
 }
