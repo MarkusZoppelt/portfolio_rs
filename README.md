@@ -135,7 +135,7 @@ app config, and it has no network listener.
     portfolio_rs mcp example_data.json                    # one positions file
     portfolio_rs mcp example_data.json --policy policy.toml
     portfolio_rs mcp --workspace ~/finance                # positions.json + portfolio/policy.toml
-    portfolio_rs mcp --offline --portfolio demo example_data.json
+    portfolio_rs mcp --offline --portfolio demo example_data.json   # portfolio id (default: main)
 
 With no FILE or `--workspace`, it serves the configured workspace (if the last
 mode was workspace) or the configured portfolio file. `--policy` has no

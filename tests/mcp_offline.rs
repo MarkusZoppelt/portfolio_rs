@@ -236,7 +236,7 @@ async fn tools_list_has_the_six_read_only_tools() {
 async fn get_positions_matches_the_fixture_quotes() {
     let client = connect(opts()).await;
     let v = ok(&client, "get_positions", json!({})).await;
-    assert_envelope(&v, "default");
+    assert_envelope(&v, "main");
     assert_eq!(v["totalValue"], 97208.0);
     assert_eq!(v["cashValue"], 50000.0);
     assert_eq!(v["networkStatus"], "connected");
@@ -333,7 +333,7 @@ async fn offline_quotes_are_null_not_zero() {
 async fn get_allocation_without_policy_warns_no_policy() {
     let client = connect(opts()).await;
     let v = ok(&client, "get_allocation", json!({})).await;
-    assert_envelope(&v, "default");
+    assert_envelope(&v, "main");
     assert!(v["policy"].is_null());
     assert!(codes(&v["warnings"]).contains(&"no_policy".to_string()));
     let classes = v["classes"].as_array().unwrap();
@@ -365,7 +365,7 @@ async fn get_allocation_against_policy_bands() {
     .await;
     let v = ok(&client, "get_allocation", json!({})).await;
     assert_eq!(v["policy"]["name"], "MCP Test Policy");
-    assert_eq!(v["policy"]["source"], "portfolio://default/policy");
+    assert_eq!(v["policy"]["source"], "portfolio://main/policy");
     let class = |name: &str| {
         v["classes"]
             .as_array()
@@ -410,7 +410,7 @@ async fn check_policy_reports_breaches_with_codes() {
     })
     .await;
     let v = ok(&client, "check_policy", json!({})).await;
-    assert_envelope(&v, "default");
+    assert_envelope(&v, "main");
     assert_eq!(v["policyName"], "MCP Test Policy");
     assert_eq!(v["status"], "breach");
     let found = codes(&v["findings"]);
@@ -520,7 +520,7 @@ async fn check_policy_without_policy_and_with_invalid_policy() {
 async fn get_transactions_synthesizes_purchases() {
     let client = connect(opts()).await;
     let v = ok(&client, "get_transactions", json!({})).await;
-    assert_envelope(&v, "default");
+    assert_envelope(&v, "main");
     assert_eq!(v["source"], "synthesized_from_purchases");
     assert_eq!(v["totals"]["count"], 7);
     assert!(v["nextCursor"].is_null());
@@ -703,12 +703,7 @@ async fn list_portfolios_hides_paths_by_default() {
     let v = ok(&client, "get_positions", json!({ "portfolioId": "demo" })).await;
     assert_eq!(v["portfolioId"], "demo");
     assert_eq!(
-        err(
-            &client,
-            "get_positions",
-            json!({ "portfolioId": "default" })
-        )
-        .await,
+        err(&client, "get_positions", json!({ "portfolioId": "main" })).await,
         "unknown_portfolio"
     );
     client.cancel().await.unwrap();
@@ -718,7 +713,7 @@ async fn list_portfolios_hides_paths_by_default() {
 async fn get_context_markdown_and_json() {
     let client = connect(opts()).await;
     let v = ok(&client, "get_context", json!({})).await;
-    assert_envelope(&v, "default");
+    assert_envelope(&v, "main");
     assert_eq!(v["format"], "markdown");
     assert!(v["markdown"]
         .as_str()
@@ -740,7 +735,7 @@ async fn resources_in_file_mode() {
     assert_eq!(
         uris,
         [
-            "portfolio://default/context.md",
+            "portfolio://main/context.md",
             "portfolio://schema/positions",
             "portfolio://schema/findings"
         ]
@@ -756,9 +751,7 @@ async fn resources_in_file_mode() {
         ]
     );
 
-    let (mime, text) = read(&client, "portfolio://default/context.md")
-        .await
-        .unwrap();
+    let (mime, text) = read(&client, "portfolio://main/context.md").await.unwrap();
     assert_eq!(mime, "text/markdown");
     assert!(text.contains("Portfolio Context"));
 
@@ -784,10 +777,10 @@ async fn resources_in_file_mode() {
 
     // No policy loaded, no workspace narrative, unknown ids and paths: not found.
     for uri in [
-        "portfolio://default/policy",
-        "portfolio://default/policy.md",
+        "portfolio://main/policy",
+        "portfolio://main/policy.md",
         "portfolio://other/context.md",
-        "portfolio://default/secrets",
+        "portfolio://main/secrets",
         "portfolio://schema/ledger",
         "file:///etc/passwd",
     ] {
@@ -953,7 +946,7 @@ mod stdio {
                 initialize(),
                 json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
                 json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_positions","arguments":{}}}),
-                json!({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"portfolio://default/context.md"}}),
+                json!({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"portfolio://main/context.md"}}),
                 json!({"jsonrpc":"2.0","id":4,"method":"no/such/method"}),
                 json!({"jsonrpc":"2.0","method":"notifications/unknown"}),
             ],
@@ -1046,7 +1039,7 @@ async fn readme_documents_every_tool_and_resource() {
     for resource in client.list_all_resources().await.unwrap() {
         let uri = resource
             .uri
-            .replace("portfolio://default/", "portfolio://<id>/");
+            .replace("portfolio://main/", "portfolio://<id>/");
         assert!(section.contains(&uri), "README misses resource {uri}");
     }
     client.cancel().await.unwrap();
