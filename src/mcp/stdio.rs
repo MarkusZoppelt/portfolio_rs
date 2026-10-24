@@ -30,11 +30,51 @@ pub fn parse_error_line(err: &serde_json::Error) -> Vec<u8> {
 /// -32602 (invalid params).
 const REQUIRED_PARAM: &[(&str, &str)] = &[("tools/call", "name"), ("resources/read", "uri")];
 
-/// `-32602` response for a request missing a required parameter, if any.
-fn missing_param_reply(line: &str) -> Option<Vec<u8>> {
+fn error_line(id: serde_json::Value, code: i64, message: String) -> Vec<u8> {
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    });
+    let mut out = serde_json::to_vec(&msg).expect("JSON serializes");
+    out.push(b'\n');
+    out
+}
+
+/// Answer requests rmcp would mishandle, if any:
+/// - a batch (JSON array) or any non-object message: `-32600` with `id: null`
+///   (MCP does not support JSON-RPC batching);
+/// - a request missing a required string parameter, or `tools/call` with
+///   non-object `arguments`: `-32602`.
+fn invalid_request_reply(line: &str) -> Option<Vec<u8>> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.is_array() {
+        return Some(error_line(
+            serde_json::Value::Null,
+            -32600,
+            "Invalid Request: batch requests are not supported".to_string(),
+        ));
+    }
+    if !v.is_object() {
+        return Some(error_line(
+            serde_json::Value::Null,
+            -32600,
+            "Invalid Request: expected a JSON-RPC object".to_string(),
+        ));
+    }
     let id = v.get("id")?.clone();
     let method = v.get("method")?.as_str()?;
+    if method == "tools/call" {
+        if let Some(args) = v.get("params").and_then(|p| p.get("arguments")) {
+            if !args.is_object() && !args.is_null() {
+                return Some(error_line(
+                    id,
+                    -32602,
+                    "Invalid params: tools/call \"arguments\" must be an object".to_string(),
+                ));
+            }
+        }
+    }
     let (_, param) = REQUIRED_PARAM.iter().find(|(m, _)| *m == method)?;
     if v.get("params")
         .and_then(|p| p.get(*param))
@@ -42,17 +82,11 @@ fn missing_param_reply(line: &str) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32602,
-            "message": format!("Invalid params: {method} requires a string \"{param}\"")
-        }
-    });
-    let mut out = serde_json::to_vec(&msg).expect("JSON serializes");
-    out.push(b'\n');
-    Some(out)
+    Some(error_line(
+        id,
+        -32602,
+        format!("Invalid params: {method} requires a string \"{param}\""),
+    ))
 }
 
 /// Classify one incoming line: `Ok(true)` forward to rmcp, `Ok(false)` skip
@@ -126,7 +160,7 @@ where
             match check_line(&text) {
                 Ok(false) => {}
                 Ok(true) => {
-                    if let Some(reply) = missing_param_reply(&text) {
+                    if let Some(reply) = invalid_request_reply(&text) {
                         if tx.send(reply).is_err() {
                             break;
                         }
@@ -173,15 +207,44 @@ mod tests {
     #[test]
     fn missing_tool_name_is_invalid_params() {
         let r =
-            missing_param_reply(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{}}"#)
+            invalid_request_reply(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{}}"#)
                 .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&r).unwrap();
         assert_eq!(v["error"]["code"], -32602);
         assert_eq!(v["id"], 7);
-        assert!(missing_param_reply(
+        assert!(invalid_request_reply(
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#
         )
         .is_none());
-        assert!(missing_param_reply(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).is_none());
+        assert!(invalid_request_reply(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).is_none());
+    }
+
+    /// t8: batches and non-object messages are -32600 with id null;
+    /// non-object tool arguments are -32602.
+    #[test]
+    fn batch_and_bad_arguments_are_rejected() {
+        let parse = |r: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&r).unwrap();
+        for line in [
+            "[1,2]",
+            "[]",
+            r#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#,
+            "42",
+        ] {
+            let v = parse(invalid_request_reply(line).unwrap());
+            assert_eq!(v["error"]["code"], -32600, "{line}");
+            assert!(v["id"].is_null(), "{line}");
+        }
+        for args in ["[1]", "\"x\"", "3"] {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"get_positions","arguments":{args}}}}}"#
+            );
+            let v = parse(invalid_request_reply(&line).unwrap());
+            assert_eq!(v["error"]["code"], -32602, "{line}");
+            assert_eq!(v["id"], 9);
+        }
+        assert!(invalid_request_reply(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"x","arguments":{}}}"#
+        )
+        .is_none());
     }
 }

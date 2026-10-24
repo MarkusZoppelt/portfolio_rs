@@ -1000,8 +1000,19 @@ mod stdio {
                 json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{}}}),
                 json!({"jsonrpc":"2.0","id":3,"method":"prompts/list"}),
                 json!({"jsonrpc":"2.0","id":4,"method":"ping"}),
+                json!([1, 2]),
+                json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_positions","arguments":[1]}}),
+                json!({"jsonrpc":"2.0","id":6,"method":"ping"}),
             ],
         );
+        let batch: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m["error"]["code"] == -32600)
+            .collect();
+        assert_eq!(batch.len(), 1, "{messages:?}");
+        assert!(batch[0]["id"].is_null());
+        assert_eq!(response(&messages, 5)["error"]["code"], -32602);
+        assert!(response(&messages, 6)["result"].is_object());
         assert_eq!(
             response(&messages, 2)["error"]["code"],
             -32602,
