@@ -164,6 +164,14 @@ All tools are read-only. Outputs are camelCase JSON with `schemaVersion`,
 `portfolioId`, `asOf` (RFC 3339), `baseCurrency` and `warnings`; unknown values
 are `null`, never `0`. Every tool accepts an optional `portfolioId`.
 
+Missing quotes or FX rates are never hidden: every response carries
+`complete` (false when any position is unpriced) and `dataQuality`
+(`missingPrices`, `missingFx`, `affectedPositions`, `affectedClasses`).
+Totals then cover only priced positions; a class with an unpriced position has
+a `null` value, targeted classes get status `unknown`, `amountToTarget` and
+drift findings are suppressed, and `check_policy` adds `checks_incomplete`.
+`networkStatus` is `connected`, `partial` or `offline`.
+
 | Tool | Returns |
 | --- | --- |
 | `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |

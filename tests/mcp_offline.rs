@@ -27,7 +27,14 @@ fn fixture_path() -> String {
 }
 
 fn fixture() -> AnyProvider {
-    let json = std::fs::read_to_string(fixture_path()).unwrap();
+    fixture_named("quotes_example.json")
+}
+
+fn fixture_named(name: &str) -> AnyProvider {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let json = std::fs::read_to_string(path).unwrap();
     AnyProvider::Fixture(Box::new(FixtureProvider::from_json(&json).unwrap()))
 }
 
@@ -309,7 +316,12 @@ async fn offline_quotes_are_null_not_zero() {
     .await;
     let v = ok(&client, "get_positions", json!({})).await;
     assert_eq!(v["totalValue"], 50000.0);
-    assert_eq!(v["networkStatus"], "disconnected");
+    assert_eq!(v["networkStatus"], "offline");
+    assert_eq!(v["complete"], false);
+    assert_eq!(
+        v["dataQuality"]["missingPrices"].as_array().unwrap().len(),
+        5
+    );
     let spy = by_ticker(&v["positions"], "SPY");
     assert_eq!(spy["priceStatus"], "unavailable");
     assert!(spy["valueBase"].is_null());
@@ -1026,4 +1038,168 @@ async fn position_ids_are_stable_across_server_starts() {
     assert!(first.iter().any(|(_, id)| id == "pos_stored"));
     assert!(first.iter().all(|(_, id)| id.starts_with("pos_")));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+}
+
+/// Finance t7 policy: no Commodities target, 25 % single-position limit.
+const POLICY_LOWER: &str = r#"
+version = "1.0"
+name = "Balanced Growth"
+base_currency = "EUR"
+time_horizon_years = 15
+risk_profile = "moderate"
+
+[constraints]
+minimum_cash_months = 6
+minimum_cash_amount = 30000.0
+single_position_limit_percent = 25.0
+asset_class_limit_percent = 60.0
+
+[[allocations]]
+asset_class = "stocks"
+target_percent = 55.0
+tolerance_percent = 10.0
+
+[[allocations]]
+asset_class = "Bonds"
+target_percent = 25.0
+tolerance_percent = 5.0
+
+[[allocations]]
+asset_class = "Cash"
+target_percent = 10.0
+tolerance_percent = 5.0
+
+[[allocations]]
+asset_class = "CRYPTO"
+target_percent = 5.0
+tolerance_percent = 3.0
+
+[[allocations]]
+asset_class = "Gold"
+target_percent = 5.0
+tolerance_percent = 3.0
+"#;
+
+async fn connect_partial(quotes: &str) -> (TempDir, Client) {
+    let tmp = TempDir::new().unwrap();
+    let policy = tmp.path().join("policy_lower.toml");
+    std::fs::write(&policy, POLICY_LOWER).unwrap();
+    let client = connect(McpOptions {
+        policy: Some(policy.to_string_lossy().into_owned()),
+        quotes: Some(fixture_named(quotes)),
+        ..opts()
+    })
+    .await;
+    (tmp, client)
+}
+
+fn class<'a>(v: &'a Value, name: &str) -> &'a Value {
+    v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["assetClass"] == name)
+        .unwrap_or_else(|| panic!("class {name} disappeared: {}", v["classes"]))
+}
+
+/// Finance t7 (GSG quote missing): the class must not vanish, nothing is
+/// judged against the partial total, and every tool says it is incomplete.
+#[tokio::test]
+async fn missing_quote_is_visible_everywhere() {
+    let (_tmp, client) = connect_partial("quotes_no_gsg.json").await;
+    for tool in [
+        "get_positions",
+        "get_allocation",
+        "check_policy",
+        "get_transactions",
+        "get_context",
+    ] {
+        let v = ok(&client, tool, json!({})).await;
+        assert_eq!(v["complete"], false, "{tool}");
+        assert_eq!(v["dataQuality"]["missingPrices"], json!(["GSG"]), "{tool}");
+        assert_eq!(
+            v["dataQuality"]["affectedClasses"],
+            json!(["Commodities"]),
+            "{tool}"
+        );
+        assert_eq!(
+            v["dataQuality"]["affectedPositions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["networkStatus"], "partial");
+    let gsg = by_ticker(&v["positions"], "GSG");
+    assert!(gsg["valueBase"].is_null());
+    assert!(gsg["weightPercent"].is_null());
+    assert_eq!(
+        codes(&v["warnings"])
+            .iter()
+            .filter(|c| *c == "no_live_price")
+            .count(),
+        1
+    );
+
+    let v = ok(&client, "get_allocation", json!({})).await;
+    let commodities = class(&v, "Commodities");
+    assert!(commodities["value"].is_null());
+    assert!(commodities["actualPercent"].is_null());
+    for c in v["classes"].as_array().unwrap() {
+        assert!(c["amountToTarget"].is_null(), "{c}");
+        assert!(c["driftPoints"].is_null(), "{c}");
+        assert!(
+            ["unknown", "untargeted"].contains(&c["status"].as_str().unwrap()),
+            "{c}"
+        );
+    }
+    assert_eq!(class(&v, "Bonds")["status"], "unknown");
+
+    let v = ok(&client, "check_policy", json!({})).await;
+    let found = codes(&v["findings"]);
+    assert!(
+        !found.contains(&"allocation_out_of_band".to_string()),
+        "{found:?}"
+    );
+    assert!(found.contains(&"checks_incomplete".to_string()));
+    // Data-quality warnings appear once, in the top-level warnings only.
+    assert!(!found.contains(&"no_live_price".to_string()));
+    assert!(codes(&v["warnings"]).contains(&"no_live_price".to_string()));
+    assert_ne!(v["status"], "ok");
+    client.cancel().await.unwrap();
+}
+
+/// Finance t7 (EURUSD missing): USD positions are unpriced, not 0 and not
+/// labelled as EUR; the status is not `connected`.
+#[tokio::test]
+async fn missing_fx_is_visible_everywhere() {
+    let (_tmp, client) = connect_partial("quotes_no_fx.json").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["complete"], false);
+    assert_eq!(v["dataQuality"]["missingFx"], json!(["USD/EUR"]));
+    assert_ne!(v["networkStatus"], "connected");
+    let spy = by_ticker(&v["positions"], "SPY");
+    assert!(spy["valueBase"].is_null());
+    assert!(spy["weightPercent"].is_null());
+    assert_eq!(v["totalValue"], 50000.0);
+    let v = ok(&client, "get_allocation", json!({})).await;
+    assert!(class(&v, "Stocks")["value"].is_null());
+    assert_eq!(class(&v, "Cash")["status"], "unknown");
+    assert!(class(&v, "Cash")["amountToTarget"].is_null());
+    let v = ok(&client, "check_policy", json!({})).await;
+    // Cash is 100 % of the priced total, but that is not a known breach.
+    assert!(!codes(&v["breaches"]).contains(&"asset_class_limit".to_string()));
+    assert!(!codes(&v["findings"]).contains(&"allocation_out_of_band".to_string()));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn complete_data_says_so() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_allocation", json!({})).await;
+    assert_eq!(v["complete"], true);
+    assert_eq!(v["dataQuality"]["affectedPositions"], json!([]));
+    client.cancel().await.unwrap();
 }

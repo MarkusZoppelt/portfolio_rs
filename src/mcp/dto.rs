@@ -39,7 +39,26 @@ pub struct Meta {
     /// RFC 3339 timestamp with UTC offset.
     pub as_of: String,
     pub base_currency: String,
+    /// False when any price or FX rate is missing: totals, weights and
+    /// allocation then cover only the priced positions (see `dataQuality`).
+    pub complete: bool,
+    pub data_quality: DataQuality,
+    /// Data-quality and policy warnings, each emitted once per response.
     pub warnings: Vec<Finding>,
+}
+
+/// What is missing when `complete` is false.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DataQuality {
+    /// Tickers without a live quote.
+    pub missing_prices: Vec<String>,
+    /// FX pairs (`FROM/TO`) without a rate, e.g. `USD/EUR`.
+    pub missing_fx: Vec<String>,
+    /// `pos_` ids whose value is unknown.
+    pub affected_positions: Vec<String>,
+    /// Asset classes whose value is unknown or incomplete.
+    pub affected_classes: Vec<String>,
 }
 
 #[derive(
@@ -149,6 +168,12 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "constraint",
         "info",
         "minimum_cash_months is set but monthly expenses are unknown.",
+    ),
+    (
+        "checks_incomplete",
+        "policy",
+        "warning",
+        "Data is incomplete; drift and percentage limits that cannot be judged were skipped.",
     ),
     (
         "no_live_price",
@@ -369,7 +394,7 @@ pub struct PositionsOutput {
     pub total_value: f64,
     pub cash_value: f64,
     pub positions: Vec<PositionRow>,
-    /// connected | disconnected | partial
+    /// connected | partial | offline, derived from the quotes actually present.
     pub network_status: String,
 }
 
@@ -385,17 +410,21 @@ pub struct PolicyRef {
 #[serde(rename_all = "camelCase")]
 pub struct ClassAllocation {
     pub asset_class: String,
-    pub value: f64,
-    pub actual_percent: f64,
+    /// Null when a position in the class has no price or FX rate.
+    pub value: Option<f64>,
+    /// Share of the priced total; null when the class value is unknown.
+    pub actual_percent: Option<f64>,
     pub target_percent: Option<f64>,
     pub tolerance_percent: Option<f64>,
     pub band_low: Option<f64>,
     pub band_high: Option<f64>,
     /// actualPercent - targetPercent, in percentage points.
     pub drift_points: Option<f64>,
-    /// within_band | below_band | above_band | untargeted
+    /// within_band | below_band | above_band | untargeted | unknown
+    /// (unknown: targeted, but data is incomplete so drift cannot be judged).
     pub status: String,
-    /// Base-currency amount to buy (positive) or sell (negative) to reach the target.
+    /// Base-currency amount to buy (positive) or sell (negative) to reach the
+    /// target; null when data is incomplete.
     pub amount_to_target: Option<f64>,
 }
 
