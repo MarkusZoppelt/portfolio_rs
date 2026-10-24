@@ -197,7 +197,7 @@ Missing quotes or FX rates are never hidden: every response carries
 Totals then cover only priced positions; a class with an unpriced position has
 a `null` value, targeted classes get status `unknown`, `amountToTarget` and
 drift findings are suppressed, and `check_policy` adds `checks_incomplete`.
-`networkStatus` is `connected` (every market position has a fresh quote and FX
+`networkStatus` (in every tool response and in `get_context`, also via `/api/context`) is `connected` (every market position has a fresh quote and FX
 rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
 fresh quotes; cached prices do not count as connected). Each position row
 carries `priceSource` (`live`, `cache`, `fixture` or `none`) and `isStale`.

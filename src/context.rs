@@ -277,16 +277,10 @@ impl PortfolioContext {
         };
 
         let risk_flags = risk_flags(&summary, &allocation, &positions, complete, single_limit);
-        let any_priced = portfolio
-            .positions
-            .iter()
-            .any(|p| p.get_ticker().is_some() && p.has_market_price());
-        let network_status = match (network_status, complete, any_priced) {
-            ("Connected", false, true) => "Partial",
-            ("Connected", false, false) => "Offline",
-            (s, _, _) => s,
-        };
-
+        // One status for every surface, derived from the quotes actually
+        // present (the loader's status is only a hint).
+        let _ = network_status;
+        let network_status = crate::mcp::analytics::network_status(portfolio);
         if portfolio
             .positions
             .iter()
@@ -296,7 +290,7 @@ impl PortfolioContext {
                 "Invested and PnL of foreign-currency positions convert purchase costs at the current FX rate, not the rate on the purchase date.".to_string(),
             );
         }
-        if network_status != "Connected" {
+        if network_status != "connected" {
             data_quality_flags.push(format!(
                 "Network status is {network_status}; quote-dependent values may be incomplete."
             ));

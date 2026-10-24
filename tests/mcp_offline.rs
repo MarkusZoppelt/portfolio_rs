@@ -1292,7 +1292,7 @@ async fn get_context_is_honest_about_partial_data() {
     let v = ok(&client, "get_context", json!({ "format": "json" })).await;
     let ctx = &v["context"];
     assert_eq!(ctx["complete"], false);
-    assert_ne!(ctx["networkStatus"], "Connected");
+    assert_ne!(ctx["networkStatus"], "connected");
     for p in ctx["positions"].as_array().unwrap() {
         if p["ticker"].is_string() {
             assert!(p["value"].is_null(), "{p}");
@@ -1785,4 +1785,41 @@ async fn last_known_price_cache_fills_and_falls_back() {
     assert!(by_ticker(&v["positions"], "TLT")["price"].is_null());
     assert_eq!(v["hasStale"], false);
     assert_eq!(std::fs::read(&data).unwrap(), before, "data file untouched");
+}
+
+/// t9 nofx/offline/full: one networkStatus across every tool and get_context;
+/// quotes without FX are `partial`, not `offline`.
+#[tokio::test]
+async fn network_status_is_shared_across_tools() {
+    async fn statuses(client: &Client) -> Vec<String> {
+        let mut out = Vec::new();
+        for tool in [
+            "get_positions",
+            "get_allocation",
+            "check_policy",
+            "get_transactions",
+            "get_context",
+        ] {
+            let v = ok(client, tool, json!({})).await;
+            out.push(v["networkStatus"].as_str().unwrap().to_string());
+        }
+        let v = ok(client, "get_context", json!({"format": "json"})).await;
+        out.push(v["context"]["networkStatus"].as_str().unwrap().to_string());
+        let md = ok(client, "get_context", json!({})).await;
+        let md = md["markdown"].as_str().unwrap().to_string();
+        assert!(md.contains(&format!("Network Status: {}", out[0])), "{md}");
+        out
+    }
+    let (_t, client) = connect_partial("quotes_no_fx.json").await;
+    assert_eq!(statuses(&client).await, vec!["partial"; 6]);
+    let (_t, client) = connect_partial("quotes_no_gsg.json").await;
+    assert_eq!(statuses(&client).await, vec!["partial"; 6]);
+    let client = connect(opts()).await;
+    assert_eq!(statuses(&client).await, vec!["connected"; 6]);
+    let client = connect(McpOptions {
+        quotes: Some(AnyProvider::Offline),
+        ..opts()
+    })
+    .await;
+    assert_eq!(statuses(&client).await, vec!["offline"; 6]);
 }
