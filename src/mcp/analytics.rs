@@ -51,8 +51,48 @@ fn total_known(positions: &[&PortfolioPosition]) -> Decimal {
     positions.iter().filter_map(|p| value_base(p)).sum()
 }
 
+/// Portfolio-level cost basis and PnL over the market positions (cash and
+/// manual holdings have none). Each total is null as soon as one market
+/// position lacks the input, so a partial sum is never reported as the total.
+pub struct PortfolioPnl {
+    pub invested: Option<Decimal>,
+    pub unrealized_pnl: Option<Decimal>,
+    pub unrealized_pnl_percent: Option<Decimal>,
+    pub day_pnl: Option<Decimal>,
+}
+
+pub fn portfolio_pnl(portfolio: &Portfolio) -> PortfolioPnl {
+    let market: Vec<&PortfolioPosition> = portfolio
+        .positions
+        .iter()
+        .filter(|p| kind(p) == "market")
+        .collect();
+    let sum = |f: &dyn Fn(&PortfolioPosition) -> Option<Decimal>| -> Option<Decimal> {
+        market.iter().map(|p| f(p)).sum::<Option<Decimal>>()
+    };
+    let invested = sum(&|p| p.total_invested_dec());
+    let unrealized_pnl = sum(&|p| p.pnl_dec());
+    let day_pnl = sum(&|p| {
+        let d = dec(p.daily_variation_percent()?);
+        let value = value_base(p)?;
+        let denom = Decimal::ONE_HUNDRED + d;
+        (!denom.is_zero()).then(|| value * d / denom)
+    });
+    let unrealized_pnl_percent = match (unrealized_pnl, invested) {
+        (Some(pnl), Some(inv)) => percent_of(pnl, inv),
+        _ => None,
+    };
+    PortfolioPnl {
+        invested,
+        unrealized_pnl,
+        unrealized_pnl_percent,
+        day_pnl,
+    }
+}
+
 pub fn position_rows(
     portfolio: &Portfolio,
+    base: &str,
     include_manual: bool,
     asset_class: Option<&str>,
     sort: SortBy,
@@ -87,6 +127,11 @@ pub fn position_rows(
                     p.price_currency().map(String::from)
                 } else {
                     None
+                },
+                currency: if market {
+                    p.price_currency().map(String::from)
+                } else {
+                    Some(base.to_string())
                 },
                 fx_rate: if market { p.fx_rate() } else { None },
                 price_status: price_status(p).to_string(),

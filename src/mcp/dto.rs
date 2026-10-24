@@ -378,6 +378,9 @@ pub struct PositionRow {
     /// Latest price in priceCurrency; null when unknown.
     pub price: Option<f64>,
     pub price_currency: Option<String>,
+    /// Currency the holding is denominated in: the quote currency for market
+    /// positions (null when unknown), the base currency for cash and manual.
+    pub currency: Option<String>,
     /// Base-currency units per unit of priceCurrency; null when no conversion applies.
     pub fx_rate: Option<f64>,
     /// live | stale | unavailable | manual | cash
@@ -400,6 +403,15 @@ pub struct PositionsOutput {
     pub meta: Meta,
     pub total_value: f64,
     pub cash_value: f64,
+    /// Portfolio-level cost basis of the market positions (base currency);
+    /// null when any market position's cost basis is unknown.
+    pub invested: Option<f64>,
+    /// Unrealized PnL of the market positions; null when any is unknown.
+    pub unrealized_pnl: Option<f64>,
+    pub unrealized_pnl_percent: Option<f64>,
+    /// Today's PnL of the market positions vs. the previous close; null when
+    /// any market position lacks a price or previous close.
+    pub day_pnl: Option<f64>,
     pub positions: Vec<PositionRow>,
     /// connected | partial | offline, derived from the quotes actually present.
     pub network_status: String,

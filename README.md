@@ -184,7 +184,7 @@ governed by the cash-buffer and asset-class rules instead.
 
 | Tool | Returns |
 | --- | --- |
-| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
+| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` over market positions (null if any input is unknown). Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange |
 | `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); `breaches` = critical findings (deduplicated), top-level `warnings` = data quality + warning-severity findings; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
