@@ -465,6 +465,27 @@ fn findings_catalog() -> serde_json::Value {
     })
 }
 
+/// rmcp reports argument deserialization failures (wrong type, unknown
+/// field) as plain text. Re-shape them like every other tool error.
+fn structured_argument_error(response: CallToolResponse) -> CallToolResponse {
+    const PREFIX: &str = "failed to deserialize parameters:";
+    if let CallToolResponse::Complete(result) = &response {
+        if result.is_error == Some(true) && result.content.len() == 1 {
+            if let Some(text) = result.content[0].as_text() {
+                if let Some(rest) = text.text.strip_prefix(PREFIX) {
+                    let err = ToolError::invalid(format!("invalid arguments: {}", rest.trim()));
+                    if let Ok(r) =
+                        rmcp::handler::server::tool::IntoCallToolResult::into_call_tool_result(err)
+                    {
+                        return r;
+                    }
+                }
+            }
+        }
+    }
+    response
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortfolioServer {
     fn get_info(&self) -> ServerConfig {
@@ -483,6 +504,46 @@ impl ServerHandler for PortfolioServer {
              get_positions / get_allocation / check_policy. Money is in the base currency \
              rounded to 2 decimals; null means unknown.",
         )
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let response = self.tool_router.call(tcc).await?;
+        Ok(structured_argument_error(response))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut tools = self.tool_router.list_all();
+        if !self.served.network {
+            // No tool reaches the network without a live quote provider.
+            for tool in &mut tools {
+                if let Some(a) = tool.annotations.as_mut() {
+                    a.open_world_hint = Some(false);
+                }
+            }
+        }
+        Ok(ListToolsResult::with_all_items(tools))
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        // Prompts are not advertised in the capabilities.
+        Err(McpError::method_not_found::<ListPromptsRequestMethod>())
     }
 
     async fn list_resources(

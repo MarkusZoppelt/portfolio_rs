@@ -331,6 +331,7 @@ pub struct GetTransactionsInput {
     pub asset_class: Option<String>,
     pub types: Option<Vec<TxType>>,
     /// Page size, 1..=500. Default 100.
+    #[schemars(range(min = 1, max = 500))]
     pub limit: Option<u32>,
     /// Opaque cursor from a previous nextCursor.
     pub cursor: Option<String>,

@@ -49,6 +49,8 @@ pub struct ServedPortfolio {
     pub state: AppState,
     /// Why the policy could not be loaded, if it could not.
     pub policy_error: Option<String>,
+    /// Whether quotes may come from the network (false with --offline or a fixture).
+    pub network: bool,
 }
 
 impl ServedPortfolio {
@@ -87,12 +89,12 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
     {
         bail!("invalid portfolio id {id:?} (use letters, digits, - and _)");
     }
-    let state = AppState::with_quotes(
-        opts.currency.clone(),
-        opts.quotes
-            .clone()
-            .unwrap_or_else(|| quote_provider(opts.offline)),
-    );
+    let provider = opts
+        .quotes
+        .clone()
+        .unwrap_or_else(|| quote_provider(opts.offline));
+    let network = matches!(provider, AnyProvider::Yahoo);
+    let state = AppState::with_quotes(opts.currency.clone(), provider);
     let mut policy_error = None;
     let (mode, path, workspace_dir) = if let Some(dir) = &opts.workspace {
         let positions = Path::new(dir).join("positions.json");
@@ -147,6 +149,7 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
         workspace_dir,
         state,
         policy_error,
+        network,
     })
 }
 

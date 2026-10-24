@@ -219,12 +219,8 @@ async fn tools_list_has_the_six_read_only_tools() {
     for tool in &tools {
         let ann = tool.annotations.as_ref().expect("annotations");
         assert_eq!(ann.read_only_hint, Some(true), "{}", tool.name);
-        assert_eq!(
-            ann.open_world_hint,
-            Some(tool.name != "list_portfolios"),
-            "{}",
-            tool.name
-        );
+        // Fixture quotes: nothing reaches the network.
+        assert_eq!(ann.open_world_hint, Some(false), "{}", tool.name);
         assert_eq!(
             tool.input_schema.get("additionalProperties"),
             Some(&json!(false)),
@@ -642,16 +638,19 @@ async fn invalid_arguments_are_tool_errors() {
         err(&client, "get_transactions", json!({ "cursor": "garbage" })).await,
         "invalid_argument"
     );
-    // Unknown fields and bad enum values are rejected by the input schema.
-    assert!(err(&client, "get_positions", json!({ "bogus": true }))
-        .await
-        .contains("unknown field"));
-    assert!(err(&client, "get_positions", json!({ "sortBy": "random" }))
-        .await
-        .contains("unknown variant"));
-    assert!(err(&client, "get_context", json!({ "format": "html" }))
-        .await
-        .contains("unknown variant"));
+    // Unknown fields and bad enum values: structured invalid_argument.
+    assert_eq!(
+        err(&client, "get_positions", json!({ "bogus": true })).await,
+        "invalid_argument"
+    );
+    assert_eq!(
+        err(&client, "get_positions", json!({ "sortBy": "random" })).await,
+        "invalid_argument"
+    );
+    assert_eq!(
+        err(&client, "get_context", json!({ "format": "html" })).await,
+        "invalid_argument"
+    );
     for tool in [
         "get_positions",
         "get_allocation",
@@ -989,6 +988,32 @@ mod stdio {
         let (output, messages) = run(&[&example, "--workspace", "/tmp"], &[] as &[Value]);
         assert_eq!(output.status.code(), Some(2));
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn tools_call_without_name_is_invalid_params() {
+        let example = example_data();
+        let (_output, messages) = run(
+            &["--offline", &example],
+            &[
+                initialize(),
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{}}}),
+                json!({"jsonrpc":"2.0","id":3,"method":"prompts/list"}),
+                json!({"jsonrpc":"2.0","id":4,"method":"ping"}),
+            ],
+        );
+        assert_eq!(
+            response(&messages, 2)["error"]["code"],
+            -32602,
+            "{messages:?}"
+        );
+        assert_eq!(
+            response(&messages, 3)["error"]["code"],
+            -32601,
+            "{messages:?}"
+        );
+        assert!(response(&messages, 4)["result"].is_object());
     }
 }
 
@@ -1502,5 +1527,39 @@ async fn check_policy_separates_breaches_from_warnings() {
         untargeted,
         ["Bonds", "Cash", "Commodities", "Crypto", "Gold", "Stocks"]
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_edges_from_finance_low_items() {
+    let client = connect(opts()).await;
+    // Wrong type: structured invalid_argument, not rmcp's plain text.
+    assert_eq!(
+        err(&client, "get_positions", json!({"includeManual": "yes"})).await,
+        "invalid_argument"
+    );
+    // Limit schema states the real range.
+    let tools = client.list_all_tools().await.unwrap();
+    let tx = tools.iter().find(|t| t.name == "get_transactions").unwrap();
+    let limit = &Value::Object((*tx.input_schema).clone())["properties"]["limit"];
+    assert_eq!(limit["minimum"], 1, "{limit}");
+    assert_eq!(limit["maximum"], 500, "{limit}");
+    // Prompts are not advertised, so prompts/list is not served.
+    assert!(client.list_prompts(None).await.is_err());
+    client.cancel().await.unwrap();
+
+    // A live quote provider is open-world for the tools that price positions.
+    let mut live = opts();
+    live.quotes = Some(AnyProvider::Yahoo);
+    let client = connect(live).await;
+    for tool in client.list_all_tools().await.unwrap() {
+        let ann = tool.annotations.unwrap();
+        assert_eq!(
+            ann.open_world_hint,
+            Some(tool.name != "list_portfolios"),
+            "{}",
+            tool.name
+        );
+    }
     client.cancel().await.unwrap();
 }
