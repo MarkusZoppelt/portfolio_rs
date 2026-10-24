@@ -3074,3 +3074,35 @@ async fn base_currency_change_makes_performance_partial() {
     assert_eq!(v["dataStatus"], "partial", "{v}");
     client.cancel().await.unwrap();
 }
+
+/// Finance B3 (run6 S3): a position missing from the start snapshot whose
+/// only buy predates the window is an unknown flow, not a gain.
+#[tokio::test]
+async fn late_recorded_position_is_a_flow_not_a_gain() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_today(tmp.path()).await;
+    let mut old = today.clone();
+    old["date"] = json!(day(-2));
+    let positions = old["positions"].as_array_mut().unwrap();
+    let i = positions
+        .iter()
+        .position(|p| p["kind"] == "market" && p["valueBase"].as_f64().is_some_and(|v| v > 0.0))
+        .expect("a market position");
+    let gone = positions.remove(i);
+    let value = gone["valueBase"].as_f64().unwrap();
+    old["totalBase"] = json!(old["totalBase"].as_f64().unwrap() - value);
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    let w = has_code(&v, "untracked_position").expect("flag");
+    assert_eq!(w["detail"]["positionIds"][0], gone["positionId"], "{w}");
+    assert_eq!(v["dataStatus"], "partial", "{v}");
+    let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k}: {v}"));
+    assert!((f("netContributions") - value).abs() < 0.01, "{v}");
+    assert!(f("marketEffect").abs() < 0.01, "{v}");
+    client.cancel().await.unwrap();
+}

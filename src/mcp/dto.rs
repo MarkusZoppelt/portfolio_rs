@@ -281,6 +281,12 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "A valuation at the period start or end is missing prices or FX rates; performance figures are null.",
     ),
     (
+        "untracked_position",
+        "data_quality",
+        "warning",
+        "A position held at the end is missing from the start snapshot with no purchase dated in the period; its value is an unknown external flow and figures are partial.",
+    ),
+    (
         "base_currency_changed",
         "data_quality",
         "warning",

@@ -91,9 +91,10 @@ pub fn position_effects(
         };
         if any.kind == "cash" {
             eff.net_contributions = ev - sv;
-        } else if e.is_none() && !has_tx_in(txs, id, start, end) {
-            // Vanished without a sell entry: an unknown external flow, never
-            // a loss (see [`vanished`]).
+        } else if (e.is_none() || s.is_none()) && !has_tx_in(txs, id, start, end) {
+            // Vanished without a sell entry, or appeared without a buy
+            // dated in the interval: an unknown external flow, never a loss
+            // or a gain (see [`vanished`] and [`appeared`]).
             eff.net_contributions = ev - sv;
         } else {
             let mut flows = 0.0;
@@ -118,6 +119,25 @@ pub fn position_effects(
 fn has_tx_in(txs: &[Transaction], id: &str, start: &Snapshot, end: &Snapshot) -> bool {
     txs.iter()
         .any(|t| t.position_id == id && in_interval(t, &start.date, &end.date))
+}
+
+/// Non-cash positions held at the end (non-zero value) that are not in the
+/// start snapshot and have no transaction dated in the interval (Finance B3,
+/// S3: a buy recorded late, dated before the start). Flows follow the
+/// transaction dates, so their value is an unknown external flow, not a gain.
+pub fn appeared(start: &Snapshot, end: &Snapshot, txs: &[Transaction]) -> Vec<String> {
+    end.positions
+        .iter()
+        .filter(|p| p.kind != "cash" && p.value_base.is_some_and(|v| v != 0.0))
+        .filter(|p| {
+            !start
+                .positions
+                .iter()
+                .any(|s| s.position_id == p.position_id)
+        })
+        .filter(|p| !has_tx_in(txs, &p.position_id, start, end))
+        .map(|p| p.position_id.clone())
+        .collect()
 }
 
 /// Non-cash positions held at the start (non-zero value) that are gone at
