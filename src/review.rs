@@ -311,9 +311,10 @@ fn check_constraints(
         });
     }
 
-    // Single position concentration
+    // Single position concentration. Cash is excluded, as in `check_policy`
+    // and the context risk flags: a cash buffer is not a concentration risk.
     if let Some(limit) = policy.constraints.single_position_limit_percent {
-        for position in &portfolio.positions {
+        for position in portfolio.positions.iter().filter(|p| !p.is_cash()) {
             let weight = percent_of(position.balance_dec(), dec(total_value))
                 .map(to_f64)
                 .unwrap_or(0.0);

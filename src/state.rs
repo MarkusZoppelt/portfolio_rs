@@ -532,10 +532,12 @@ impl AppState {
         let portfolio = self.portfolio().await;
         let currency = self.currency.read().await.clone();
         let network_status = format!("{:?}", *self.network_status.read().await);
-        Ok(PortfolioContext::from_portfolio(
+        let policy = self.policy().await;
+        Ok(PortfolioContext::from_portfolio_with_policy(
             &portfolio,
             &currency,
             &network_status,
+            policy.as_ref(),
         ))
     }
 
