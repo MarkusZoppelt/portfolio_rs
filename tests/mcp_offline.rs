@@ -2078,3 +2078,49 @@ async fn incomplete_context_nulls_cash_weights_and_has_banner() {
     );
     assert!(md.contains("- Cash: ") && md.contains("(n/a)"), "{md}");
 }
+
+/// Finance item 8: check_policy `findings`, `breaches`, `warnings` and
+/// `counts` are views of one list (fixture and partial data, every minSeverity).
+#[tokio::test]
+async fn check_policy_counts_match_lists() {
+    for quotes in [
+        "quotes_example.json",
+        "quotes_no_fx.json",
+        "quotes_no_gsg.json",
+    ] {
+        let (_t, client) = connect_partial(quotes).await;
+        for min in ["info", "warning", "critical"] {
+            let v = ok(&client, "check_policy", json!({"minSeverity": min})).await;
+            let n = |k: &str| v[k].as_array().unwrap().len() as u64;
+            let counts = &v["counts"];
+            assert_eq!(
+                counts["warning"].as_u64().unwrap(),
+                n("warnings"),
+                "{quotes} {min} {v}"
+            );
+            assert_eq!(
+                counts["critical"].as_u64().unwrap(),
+                n("breaches"),
+                "{quotes} {min} {v}"
+            );
+            let sev = |s: &str| {
+                v["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|f| f["severity"] == s)
+                    .count() as u64
+            };
+            assert_eq!(counts["info"].as_u64().unwrap(), sev("info"), "{v}");
+            assert!(sev("critical") <= n("breaches"));
+            let expected = if n("breaches") > 0 {
+                "breach"
+            } else if n("warnings") > 0 {
+                "warnings"
+            } else {
+                "ok"
+            };
+            assert_eq!(v["status"], expected);
+        }
+    }
+}
