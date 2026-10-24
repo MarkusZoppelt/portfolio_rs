@@ -354,12 +354,21 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
         .iter()
         .any(|p| p.cost_basis_at_current_fx())
     {
-        out.push(Finding::new(
-            "cost_basis_current_fx",
-            Severity::Info,
-            Category::DataQuality,
-            "Invested and PnL of foreign-currency positions convert purchase costs at the current FX rate, not the rate on the purchase date.".to_string(),
-        ));
+        let estimates: Vec<&str> = portfolio
+            .positions
+            .iter()
+            .filter(|p| p.runtime.estimate_current_fx)
+            .filter_map(|p| p.id())
+            .collect();
+        out.push(
+            Finding::new(
+                "cost_basis_current_fx",
+                Severity::Info,
+                Category::DataQuality,
+                "Invested and PnL of foreign-currency positions (and the cost-basis estimate of excluded ones) convert purchase costs at the current FX rate, not the rate on the purchase date.".to_string(),
+            )
+            .detail(json!({ "estimatePositionIds": estimates })),
+        );
     }
     let mut dups: Vec<_> = tickers
         .into_iter()

@@ -139,6 +139,9 @@ pub struct PositionRuntime {
     /// The excluded estimate uses a cache entry past max-age (or with the
     /// cache fallback disabled); its as-of date (or "unknown").
     pub estimate_assumed_as_of: Option<String>,
+    /// The excluded cost-basis estimate converts a foreign purchase cost at
+    /// the current FX rate (Finance N4).
+    pub estimate_current_fx: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,7 +473,8 @@ impl PortfolioPosition {
     /// True when the cost basis is converted with today's FX rate (a foreign
     /// quote currency), not the rate on the purchase date.
     pub fn cost_basis_at_current_fx(&self) -> bool {
-        self.fx_rate.is_some() && self.total_invested_dec().is_some()
+        (self.fx_rate.is_some() && self.total_invested_dec().is_some())
+            || self.runtime.estimate_current_fx
     }
 
     /// [`Self::fx_rate`], or 1 when no conversion applies.
