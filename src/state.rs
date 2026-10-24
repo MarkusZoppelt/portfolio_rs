@@ -453,27 +453,10 @@ impl AppState {
             }
         }
 
-        movers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-        let gainers: Vec<TopMoverDto> = movers
-            .iter()
-            .take(3)
-            .map(|(n, pct, pnl)| TopMoverDto {
-                name: n.clone(),
-                percent: *pct,
-                pnl: *pnl,
-            })
-            .collect();
-
-        movers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        let losers: Vec<TopMoverDto> = movers
-            .iter()
-            .take(3)
-            .map(|(n, pct, pnl)| TopMoverDto {
-                name: n.clone(),
-                percent: *pct,
-                pnl: *pnl,
-            })
-            .collect();
+        let to_dto = |(name, percent, pnl): (String, f64, f64)| TopMoverDto { name, percent, pnl };
+        let (gainers, losers) = crate::portfolio::top_movers(movers, 3);
+        let gainers: Vec<TopMoverDto> = gainers.into_iter().map(to_dto).collect();
+        let losers: Vec<TopMoverDto> = losers.into_iter().map(to_dto).collect();
 
         PerformanceDto {
             total_value: current_value,

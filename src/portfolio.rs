@@ -845,10 +845,7 @@ impl Portfolio {
                 movers.push((position.get_name().to_string(), pct, day_pnl));
             }
         }
-        movers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let gainers = movers.iter().take(3).cloned().collect::<Vec<_>>();
-        movers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let losers = movers.iter().take(3).cloned().collect::<Vec<_>>();
+        let (gainers, losers) = top_movers(movers, 3);
 
         let mut top_gainers = Table::new();
         top_gainers
@@ -930,6 +927,23 @@ fn like_for_like_values<'a>(
         current += position.get_balance();
     }
     (historic, current)
+}
+
+/// Split `(name, %day, day pnl)` movers into the top `n` gainers (largest
+/// positive %day first) and top `n` losers (most negative first). A position
+/// is in at most one list; an unchanged one (0%) is in neither.
+pub fn top_movers<T: Clone>(
+    movers: Vec<(T, f64, f64)>,
+    n: usize,
+) -> (Vec<(T, f64, f64)>, Vec<(T, f64, f64)>) {
+    use std::cmp::Ordering;
+    let mut gainers: Vec<_> = movers.iter().filter(|m| m.1 > 0.0).cloned().collect();
+    gainers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    gainers.truncate(n);
+    let mut losers: Vec<_> = movers.into_iter().filter(|m| m.1 < 0.0).collect();
+    losers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    losers.truncate(n);
+    (gainers, losers)
 }
 
 /// Percentage return from `historic` to `current`; `None` if `historic <= 0`.
@@ -1117,6 +1131,24 @@ mod tests {
         assert_eq!(cash_only.cost_basis_totals(), (0.0, 0.0));
     }
 
+    #[test]
+    fn top_movers_lists_each_position_once_and_skips_unchanged() {
+        let movers = vec![
+            ("up", 2.0, 20.0),
+            ("flat", 0.0, 0.0),
+            ("down", -1.0, -5.0),
+            ("up2", 5.0, 1.0),
+        ];
+        let (gainers, losers) = top_movers(movers, 3);
+        fn names(v: &[(&'static str, f64, f64)]) -> Vec<&'static str> {
+            v.iter().map(|m| m.0).collect()
+        }
+        assert_eq!(names(&gainers), ["up2", "up"]);
+        assert_eq!(names(&losers), ["down"]);
+        let (gainers, losers) = top_movers(vec![("flat", 0.0, 0.0)], 3);
+        assert!(gainers.is_empty() && losers.is_empty());
+    }
+
     /// Fake holdings: a winner, a loser, cash and one position without a quote.
     fn snapshot_portfolio() -> Portfolio {
         let mut up = with_purchase(
@@ -1130,7 +1162,7 @@ mod tests {
             5.0,
             200.0,
         );
-        down.previous_close = Some(180.0);
+        down.previous_close = Some(190.0);
         let mut portfolio = Portfolio::new();
         portfolio.add_position(up);
         portfolio.add_position(down);
