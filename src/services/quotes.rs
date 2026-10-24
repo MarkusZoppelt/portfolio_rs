@@ -129,6 +129,10 @@ pub trait QuoteProvider: Send + Sync + 'static {
     fn last_known_as_of(&self, _symbol: &str) -> Option<String> {
         None
     }
+    /// Quotes come from a fixture (tests, demos), not the network.
+    fn is_fixture(&self) -> bool {
+        false
+    }
 }
 
 /// Yahoo Finance, using the process-wide caches in [`crate::position`].
@@ -394,6 +398,13 @@ impl QuoteProvider for AnyProvider {
         match self {
             Self::Cached(c) => c.last_known_as_of(symbol),
             _ => None,
+        }
+    }
+    fn is_fixture(&self) -> bool {
+        match self {
+            Self::Fixture(_) => true,
+            Self::Cached(c) => c.is_fixture(),
+            _ => false,
         }
     }
 }
