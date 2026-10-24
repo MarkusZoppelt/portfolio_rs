@@ -33,6 +33,9 @@ pub struct McpOptions {
     pub offline: bool,
     /// Base currency.
     pub currency: String,
+    /// Explicit quote provider (tests, embedders). Overrides `offline` and
+    /// `PORTFOLIO_RS_QUOTES` when set.
+    pub quotes: Option<AnyProvider>,
 }
 
 /// A loaded portfolio and everything the tools need about it.
@@ -83,7 +86,12 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
     {
         bail!("invalid portfolio id {id:?} (use letters, digits, - and _)");
     }
-    let state = AppState::with_quotes(opts.currency.clone(), quote_provider(opts.offline));
+    let state = AppState::with_quotes(
+        opts.currency.clone(),
+        opts.quotes
+            .clone()
+            .unwrap_or_else(|| quote_provider(opts.offline)),
+    );
     let mut policy_error = None;
     let (mode, path, workspace_dir) = if let Some(dir) = &opts.workspace {
         let positions = Path::new(dir).join("positions.json");
