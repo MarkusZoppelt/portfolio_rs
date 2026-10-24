@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Deserializer};
 
 /// Latest usable (positive) price of a symbol and its quote currency.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -25,14 +25,57 @@ pub enum QuoteError {
     Provider(String),
 }
 
+/// One daily bar: the exchange-local trading date and its close.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct DailyBar {
+    #[serde(deserialize_with = "de_date")]
+    pub date: NaiveDate,
+    pub close: f64,
+}
+
+fn de_date<'de, D: Deserializer<'de>>(d: D) -> Result<NaiveDate, D::Error> {
+    let s = String::deserialize(d)?;
+    NaiveDate::parse_from_str(&s, "%Y-%m-%d").map_err(serde::de::Error::custom)
+}
+
+fn usable(bar: &&DailyBar) -> bool {
+    bar.close > 0.0 && bar.close.is_finite()
+}
+
+/// Close of the first trading day on or after `date` (the price a buy on
+/// `date` got, also when it falls on a weekend or holiday).
+pub fn first_close_on_or_after(bars: &[DailyBar], date: NaiveDate) -> Option<f64> {
+    bars.iter()
+        .filter(usable)
+        .filter(|b| b.date >= date)
+        .min_by_key(|b| b.date)
+        .map(|b| b.close)
+}
+
+/// Close of the last trading day strictly before `date` (the value a period
+/// starting on `date` is measured from).
+pub fn last_close_before(bars: &[DailyBar], date: NaiveDate) -> Option<f64> {
+    bars.iter()
+        .filter(usable)
+        .filter(|b| b.date < date)
+        .max_by_key(|b| b.date)
+        .map(|b| b.close)
+}
+
 /// Source of quotes. Implementations must not print.
 pub trait QuoteProvider: Send + Sync + 'static {
     /// Latest positive close and its currency.
     fn latest(&self, symbol: &str) -> impl Future<Output = Result<Quote, QuoteError>> + Send;
     /// Previous close, used for the daily change.
     fn previous_close(&self, symbol: &str) -> impl Future<Output = Result<f64, QuoteError>> + Send;
-    /// Close on (or shortly after) `date`, in the quote currency.
-    fn close_on(
+    /// Close of the first trading day on or after `date` (purchase prices).
+    fn close_on_or_after(
+        &self,
+        symbol: &str,
+        date: DateTime<Utc>,
+    ) -> impl Future<Output = Result<f64, QuoteError>> + Send;
+    /// Close of the last trading day before `date` (period start values).
+    fn close_before(
         &self,
         symbol: &str,
         date: DateTime<Utc>,
@@ -54,8 +97,27 @@ impl QuoteProvider for YahooProvider {
         crate::position::yahoo_previous_close(symbol).await
     }
 
-    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
-        crate::position::yahoo_close_on(symbol, date).await
+    async fn close_on_or_after(
+        &self,
+        symbol: &str,
+        date: DateTime<Utc>,
+    ) -> Result<f64, QuoteError> {
+        let bars =
+            crate::position::yahoo_daily_bars(symbol, date, date + chrono::Duration::days(7))
+                .await?;
+        first_close_on_or_after(&bars, date.date_naive())
+            .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
+    }
+
+    async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        let bars = crate::position::yahoo_daily_bars(
+            symbol,
+            date - chrono::Duration::days(10),
+            date + chrono::Duration::days(1),
+        )
+        .await?;
+        last_close_before(&bars, date.date_naive())
+            .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
     }
 
     async fn name(&self, symbol: &str) -> Option<String> {
@@ -66,8 +128,10 @@ impl QuoteProvider for YahooProvider {
 /// Fixed prices from memory or JSON, for tests and fixtures.
 ///
 /// JSON shape: `{"latest": {"SYM": {"price": 1.0, "currency": "USD"}},
-/// "previous_close": {"SYM": 1.0}, "close_on": {"SYM": 1.0}, "names": {"SYM": "Name"}}`.
-/// `close_on` ignores the date.
+/// "previous_close": {"SYM": 1.0}, "close_on": {"SYM": 1.0}, "names": {"SYM": "Name"},
+/// "history": {"SYM": [{"date": "2025-01-02", "close": 1.0}]}}`.
+/// Historic lookups use `history` when the symbol has bars; otherwise
+/// `close_on`, which ignores the date.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FixtureProvider {
     #[serde(default)]
@@ -78,6 +142,8 @@ pub struct FixtureProvider {
     pub close_on: HashMap<String, f64>,
     #[serde(default)]
     pub names: HashMap<String, String>,
+    #[serde(default)]
+    pub history: HashMap<String, Vec<DailyBar>>,
 }
 
 impl FixtureProvider {
@@ -106,8 +172,24 @@ impl QuoteProvider for FixtureProvider {
         lookup(&self.previous_close, symbol)
     }
 
-    async fn close_on(&self, symbol: &str, _date: DateTime<Utc>) -> Result<f64, QuoteError> {
-        lookup(&self.close_on, symbol)
+    async fn close_on_or_after(
+        &self,
+        symbol: &str,
+        date: DateTime<Utc>,
+    ) -> Result<f64, QuoteError> {
+        match self.history.get(symbol) {
+            Some(bars) => first_close_on_or_after(bars, date.date_naive())
+                .ok_or_else(|| QuoteError::Unavailable(symbol.to_string())),
+            None => lookup(&self.close_on, symbol),
+        }
+    }
+
+    async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        match self.history.get(symbol) {
+            Some(bars) => last_close_before(bars, date.date_naive())
+                .ok_or_else(|| QuoteError::Unavailable(symbol.to_string())),
+            None => lookup(&self.close_on, symbol),
+        }
     }
 
     async fn name(&self, symbol: &str) -> Option<String> {
@@ -141,11 +223,23 @@ impl QuoteProvider for AnyProvider {
         }
     }
 
-    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+    async fn close_on_or_after(
+        &self,
+        symbol: &str,
+        date: DateTime<Utc>,
+    ) -> Result<f64, QuoteError> {
         match self {
-            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
-            Self::Offline => OfflineProvider.close_on(symbol, date).await,
-            Self::Fixture(f) => f.close_on(symbol, date).await,
+            Self::Yahoo => YahooProvider.close_on_or_after(symbol, date).await,
+            Self::Offline => OfflineProvider.close_on_or_after(symbol, date).await,
+            Self::Fixture(f) => f.close_on_or_after(symbol, date).await,
+        }
+    }
+
+    async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo => YahooProvider.close_before(symbol, date).await,
+            Self::Offline => OfflineProvider.close_before(symbol, date).await,
+            Self::Fixture(f) => f.close_before(symbol, date).await,
         }
     }
 
@@ -171,11 +265,75 @@ impl QuoteProvider for OfflineProvider {
         Err(QuoteError::Unavailable(symbol.to_string()))
     }
 
-    async fn close_on(&self, symbol: &str, _date: DateTime<Utc>) -> Result<f64, QuoteError> {
+    async fn close_on_or_after(
+        &self,
+        symbol: &str,
+        _date: DateTime<Utc>,
+    ) -> Result<f64, QuoteError> {
+        Err(QuoteError::Unavailable(symbol.to_string()))
+    }
+
+    async fn close_before(&self, symbol: &str, _date: DateTime<Utc>) -> Result<f64, QuoteError> {
         Err(QuoteError::Unavailable(symbol.to_string()))
     }
 
     async fn name(&self, _symbol: &str) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    // Fri 2025-01-03, Mon 2025-01-06, Tue 2025-01-07 (weekend in between).
+    fn bars() -> Vec<DailyBar> {
+        vec![
+            DailyBar {
+                date: d(2025, 1, 7),
+                close: 12.0,
+            },
+            DailyBar {
+                date: d(2025, 1, 3),
+                close: 10.0,
+            },
+            DailyBar {
+                date: d(2025, 1, 6),
+                close: 11.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_purchase_uses_first_bar_on_or_after_date() {
+        assert_eq!(first_close_on_or_after(&bars(), d(2025, 1, 3)), Some(10.0));
+        // Saturday buy -> Monday close, not the last bar of the window.
+        assert_eq!(first_close_on_or_after(&bars(), d(2025, 1, 4)), Some(11.0));
+        assert_eq!(first_close_on_or_after(&bars(), d(2025, 1, 8)), None);
+    }
+
+    #[test]
+    fn test_period_start_uses_last_bar_before_date() {
+        // Period starting Monday is measured from Friday's close.
+        assert_eq!(last_close_before(&bars(), d(2025, 1, 6)), Some(10.0));
+        assert_eq!(last_close_before(&bars(), d(2025, 1, 8)), Some(12.0));
+        assert_eq!(last_close_before(&bars(), d(2025, 1, 3)), None);
+    }
+
+    #[tokio::test]
+    async fn test_fixture_history_is_date_aware() {
+        let fixture = FixtureProvider::from_json(
+            r#"{"history": {"FAKE": [{"date": "2025-01-03", "close": 10.0},
+                                     {"date": "2025-01-06", "close": 11.0}]}}"#,
+        )
+        .unwrap();
+        let sat = Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap();
+        assert_eq!(fixture.close_on_or_after("FAKE", sat).await.unwrap(), 11.0);
+        assert_eq!(fixture.close_before("FAKE", sat).await.unwrap(), 10.0);
     }
 }

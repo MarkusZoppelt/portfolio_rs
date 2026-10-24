@@ -172,7 +172,7 @@ impl Portfolio {
         let tasks = positions
             .iter()
             .filter_map(|position| position.get_ticker())
-            .map(|ticker| provider.close_on(ticker, date));
+            .map(|ticker| provider.close_before(ticker, date));
         let results = join_all(tasks).await;
 
         let mut errors = Vec::new();
@@ -1194,5 +1194,31 @@ mod tests {
             .render_performance_with(&provider, 2000.0, now)
             .await;
         assert_snapshot("performance", &rendered);
+    }
+
+    #[tokio::test]
+    async fn test_ytd_start_uses_last_close_of_previous_year() {
+        use crate::position::PriceStatus;
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("FAKE"),
+            "Stocks",
+            2.0,
+            30.0,
+            PriceStatus::Live,
+        ));
+        let provider = crate::services::quotes::FixtureProvider::from_json(
+            r#"{"history": {"FAKE": [{"date": "2025-12-30", "close": 18.0},
+                                     {"date": "2025-12-31", "close": 20.0},
+                                     {"date": "2026-01-02", "close": 25.0}]}}"#,
+        )
+        .unwrap();
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (historic, current) = portfolio
+            .historic_and_current_securities_value_with(&provider, start)
+            .await
+            .unwrap();
+        assert_eq!(historic, 40.0, "YTD base is Dec 31's close");
+        assert_eq!(current, 60.0);
     }
 }
