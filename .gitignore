@@ -7,3 +7,6 @@ positions.json
 positions.json.bak
 .positions.json.tmp-*
 .*.quotes-cache.json
+snapshots.jsonl
+.snapshots.jsonl.tmp-*
+portfolio/history/

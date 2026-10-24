@@ -66,6 +66,7 @@ data.
 | `agent init/skill` | Agent instructions + portable skill management |
 | `api` | Local HTTP API server |
 | `mcp` | Read-only MCP server for AI agents (stdio) |
+| `snapshot` | Record today's valuation for `get_performance` (`<data-dir>/<portfolio>/snapshots.jsonl`, 0600) |
 | `config` | Show config file location |
 | `components` | List TUI components for `--disable` |
 
@@ -139,6 +140,7 @@ network listener.
     portfolio_rs mcp example_data.json --policy policy.toml
     portfolio_rs mcp --workspace ~/finance                # positions.json + portfolio/policy.toml
     portfolio_rs mcp --offline --portfolio demo example_data.json   # portfolio id (default: main)
+    portfolio_rs mcp --data-dir /tmp/pf-history example_data.json  # snapshots for get_performance
 
 With no FILE or `--workspace`, it serves the configured workspace (if the last
 mode was workspace) or the configured portfolio file. `--policy` has no
@@ -183,6 +185,52 @@ only base-currency values (`valueBase`, `weightPercent`, ...) are null. Its
 Quote fixtures do not use the cache, and encrypted (`.gpg`) files never get one,
 so no plaintext ticker list ends up next to an encrypted portfolio. The cache
 pattern is in the workspace `.gitignore` template and checked by `doctor`.
+
+### Performance and snapshots
+
+`get_performance` reports a period's change split into `netContributions`,
+`marketEffect` (price and FX on market positions), `incomeEffect` and
+`manualRevaluation`; `change` always equals their sum (within 0.01).
+Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
+`1y`, `since_inception` and `custom` (with `from` and `to`, YYYY-MM-DD).
+`groupBy` is `none`, `assetClass` or `position`.
+
+The start value is the last stored snapshot dated before `from`
+(`dataCoverage.startPointDate`); the end is today's live valuation, or for a
+past `to` the last snapshot on or before it. Contributions are buys minus
+sells dated in that window (from the purchases) plus the change in cash
+balances, so a deposit is never return, and interest or dividends paid to cash
+count as contributions (`incomeEffect` is 0 until there is an income ledger).
+`twrPercent` is chained daily (`method: daily_twr`) when there is a snapshot
+for every day, otherwise Modified Dietz over the stored points
+(`modified_dietz`), with each cash change dated at the snapshot that shows it.
+`fxEffect` and `mwrPercent` are null for now, and nothing is reconstructed from
+historic closes (`reconstructed: false`).
+
+Figures are null, never 0, when they are unknown: no snapshot before the
+period (`insufficient_history`), or a missing price or FX rate in the start or
+end valuation (`performance_partial`, `dataStatus: partial`). A stale start,
+end or live price makes `dataStatus: stale`.
+
+The MCP server only reads snapshots. Write them with:
+
+    portfolio_rs snapshot example_data.json --data-dir /tmp/pf-history
+    portfolio_rs snapshot --workspace ~/finance       # same portfolio selection as `mcp`
+
+Each run values the portfolio and stores one line per day (a second run that
+day replaces it) in `<data-dir>/<portfolio>/snapshots.jsonl`, written
+atomically with mode 0600 (the directory gets 0700). The data dir is
+`--data-dir`, else `PORTFOLIO_RS_DATA_DIR`, else `<workspace>/portfolio/history`
+in workspace mode, else `$XDG_DATA_HOME/portfolio_rs` (`~/.local/share/portfolio_rs`);
+never the current directory. Pass the same `--data-dir` to `mcp`. A daily cron
+entry:
+
+    55 23 * * * portfolio_rs snapshot --workspace ~/finance --offline
+
+(`--offline` uses cached prices; drop it to fetch quotes.) Each line is
+`{date, baseCurrency, positions: [{positionId, kind, assetClass, quantity,
+price, priceCurrency, fxRate, valueBase}], cashBase, totalBase, netFlowsBase,
+complete, dataStatus}`; `snapshots.jsonl` is in `.gitignore`.
 
 ### Client configuration
 
@@ -266,6 +314,7 @@ governed by the cash-buffer and asset-class rules instead.
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); one deduplicated list (policy findings + warning-severity data quality, filtered by `minSeverity`) feeds `findings` (policy part), `breaches` (critical), top-level `warnings` (warning severity), `counts` and `status`, so `counts.warning` = `warnings` length and `counts.critical` = `breaches` length; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with `synthesized: true`, dated at the earliest purchase date or else the file date, reported in `dateSource`: `earliest_purchase` | `file_mtime`, fees 0); `fees` is 0 when none is recorded; `complete` covers current values only; matching transactions whose `amountBase` is null (no historic FX) are counted in `fxHistoricMissing` with an `fx_historic_unavailable` warning; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
 | `list_portfolios` | The served portfolio with its `dataStatus` and `quoteSource` (`yahoo`, `offline` or `fixture`; paths only with `includePaths`) |
+| `get_performance` | Change over `period` split into `netContributions`, `marketEffect`, `incomeEffect` and `manualRevaluation`, with `twrPercent`, `method`, `dataCoverage` and an optional `breakdown` (see [Performance and snapshots](#performance-and-snapshots)) |
 | `get_context` | The `portfolio_rs context` report as Markdown or JSON (money and percentages rounded to 2 decimals, as in `/api/context`). When a position is unpriced, `summary.incomplete` carries a banner (also the first line of the markdown) and `cashPercent`, cash weights and `largestPositionPercent` are null |
 
 Errors come back as tool results with `isError: true` and

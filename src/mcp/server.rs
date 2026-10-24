@@ -516,6 +516,227 @@ impl PortfolioServer {
     }
 
     #[tool(
+        name = "get_performance",
+        description = "Performance for a period (day, week, month, mtd, ytd, 1y, since_inception, custom), split into net contributions, market (price + FX) effect and manual revaluation, with a time-weighted return. Read-only: uses local snapshots written by `portfolio_rs snapshot`, ending at today's live valuation.",
+        annotations(
+            title = "Get performance",
+            read_only_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn get_performance(
+        &self,
+        Parameters(input): Parameters<GetPerformanceInput>,
+    ) -> Result<Json<PerformanceOutput>, ToolError> {
+        use super::performance as perf;
+        use super::snapshots;
+        use chrono::{Datelike, Duration, NaiveDate};
+        self.check_id(&input.portfolio_id)?;
+        let today = chrono::Local::now().date_naive();
+        let parse = |v: &Option<String>, name: &str| -> Result<Option<NaiveDate>, ToolError> {
+            v.as_deref()
+                .map(|d| {
+                    NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                        ToolError::new("invalid_argument", format!("{name} must be YYYY-MM-DD"))
+                    })
+                })
+                .transpose()
+        };
+        let (cfrom, cto) = (parse(&input.from, "from")?, parse(&input.to, "to")?);
+        if input.period != Period::Custom && (cfrom.is_some() || cto.is_some()) {
+            return Err(ToolError::new(
+                "invalid_argument",
+                "from and to are only allowed with period custom",
+            ));
+        }
+        let path = self.served.snapshots_path.clone();
+        let (snaps, skipped) = path.as_deref().map(snapshots::read).unwrap_or_default();
+        let (from, to) = match input.period {
+            Period::Day => (today, today),
+            Period::Week => (today - Duration::days(6), today),
+            Period::Month => (today - Duration::days(29), today),
+            Period::Mtd => (today.with_day(1).unwrap_or(today), today),
+            Period::Ytd => (
+                NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today),
+                today,
+            ),
+            Period::OneYear => (today - Duration::days(364), today),
+            Period::SinceInception => (
+                snaps
+                    .first()
+                    .and_then(|s| NaiveDate::parse_from_str(&s.date, "%Y-%m-%d").ok())
+                    .map(|d| d + Duration::days(1))
+                    .unwrap_or(today),
+                today,
+            ),
+            Period::Custom => match (cfrom, cto) {
+                (Some(f), Some(t)) if f <= t && t <= today => (f, t),
+                (Some(_), Some(_)) => {
+                    return Err(ToolError::new(
+                        "invalid_argument",
+                        "from must be on or before to, and to not in the future",
+                    ))
+                }
+                _ => {
+                    return Err(ToolError::new(
+                        "invalid_argument",
+                        "period custom needs from and to",
+                    ))
+                }
+            },
+        };
+        let (from_s, to_s) = (
+            from.format("%Y-%m-%d").to_string(),
+            to.format("%Y-%m-%d").to_string(),
+        );
+        let portfolio = self.portfolio(false).await;
+        let base = self.base_currency().await;
+        let mut warnings = analytics::data_quality(&portfolio);
+        let mut meta = self.meta(&portfolio, Vec::new()).await;
+        let end_is_live = to == today;
+        let end = if end_is_live {
+            Some(snapshots::from_portfolio(
+                &portfolio,
+                &base,
+                &to_s,
+                meta.has_stale,
+            ))
+        } else {
+            snaps.iter().rev().find(|s| s.date <= to_s).cloned()
+        };
+        let start = snaps.iter().rev().find(|s| s.date < from_s).cloned();
+        let snapshot_days = snaps
+            .iter()
+            .filter(|s| s.date >= from_s && s.date <= to_s)
+            .count();
+        let period_days = (to - from).num_days() + 1;
+        let covered =
+            snapshot_days + usize::from(end_is_live && !snaps.iter().any(|s| s.date == to_s));
+        let coverage = DataCoverage {
+            snapshot_days,
+            missing_days: (period_days - covered as i64).max(0),
+            reconstructed: false,
+            start_point_date: start.as_ref().map(|s| s.date.clone()),
+            end_point_date: end.as_ref().map(|s| s.date.clone()),
+            end_is_live,
+            skipped_lines: skipped,
+        };
+        let mut out = PerformanceOutput {
+            meta: self.meta(&portfolio, Vec::new()).await,
+            period: serde_json::to_value(input.period)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            from: from_s.clone(),
+            to: to_s.clone(),
+            start_value: None,
+            end_value: None,
+            change: None,
+            net_contributions: None,
+            market_effect: None,
+            income_effect: None,
+            manual_revaluation: None,
+            fx_effect: None,
+            twr_percent: None,
+            mwr_percent: None,
+            method: "none".to_string(),
+            data_coverage: coverage,
+            breakdown: Vec::new(),
+        };
+        let (Some(start), Some(end)) = (start, end) else {
+            warnings.push(Finding::new(
+                "insufficient_history",
+                Severity::Warning,
+                Category::DataQuality,
+                "No snapshot before the period start; run `portfolio_rs snapshot` daily to build history.".to_string(),
+            ));
+            meta.warnings = warnings;
+            out.meta = meta;
+            return Ok(Json(out));
+        };
+        // Data status over the live valuation and both end points.
+        let complete = start.complete && end.complete;
+        let has_stale =
+            meta.has_stale || start.data_status == "stale" || end.data_status == "stale";
+        meta.complete = meta.complete && complete;
+        meta.has_stale = has_stale;
+        meta.data_status = analytics::data_status(meta.complete, has_stale).to_string();
+        let txs = analytics::transactions(&portfolio, &base, None);
+        let effects = if complete {
+            perf::position_effects(&start, &end, &txs)
+        } else {
+            None
+        };
+        let Some(effects) = effects else {
+            meta.complete = false;
+            meta.data_status = analytics::data_status(false, has_stale).to_string();
+            warnings.push(Finding::new(
+                "performance_partial",
+                Severity::Warning,
+                Category::DataQuality,
+                "A valuation at the period start or end is missing prices, FX rates or flow amounts; figures are null.".to_string(),
+            ));
+            meta.warnings = warnings;
+            out.meta = meta;
+            return Ok(Json(out));
+        };
+        let t = perf::total(&effects);
+        out.start_value = Some(perf::r2(t.start_value));
+        out.end_value = Some(perf::r2(t.end_value));
+        out.change = Some(perf::r2(t.change()));
+        out.net_contributions = Some(perf::r2(t.net_contributions));
+        out.market_effect = Some(perf::r2(t.market_effect));
+        out.income_effect = Some(0.0);
+        out.manual_revaluation = Some(perf::r2(t.manual_revaluation));
+        let mut points = vec![start.clone()];
+        points.extend(
+            snaps
+                .iter()
+                .filter(|s| s.date > start.date && s.date < end.date)
+                .cloned(),
+        );
+        points.push(end.clone());
+        let (twr, method) = if points.iter().all(|p| p.complete) {
+            perf::twr(&points, &txs)
+        } else {
+            (None, "modified_dietz")
+        };
+        if twr.is_none() {
+            warnings.push(Finding::new(
+                "performance_twr_unavailable",
+                Severity::Info,
+                Category::DataQuality,
+                "The time-weighted return could not be computed for this period.".to_string(),
+            ));
+        }
+        out.twr_percent = twr.map(|v| (v * 100.0).round() / 100.0);
+        out.method = method.to_string();
+        let row = |key: String, e: &perf::Effects| PerformanceBreakdown {
+            key,
+            start_value: perf::r2(e.start_value),
+            end_value: perf::r2(e.end_value),
+            change: perf::r2(e.change()),
+            net_contributions: perf::r2(e.net_contributions),
+            market_effect: perf::r2(e.market_effect),
+            manual_revaluation: perf::r2(e.manual_revaluation),
+        };
+        out.breakdown = match input.group_by.unwrap_or_default() {
+            GroupBy::None => Vec::new(),
+            GroupBy::AssetClass => perf::group_by_class(&effects)
+                .iter()
+                .map(|(k, e)| row(k.clone(), e))
+                .collect(),
+            GroupBy::Position => effects
+                .iter()
+                .map(|(k, (_, e))| row(k.clone(), e))
+                .collect(),
+        };
+        meta.warnings = warnings;
+        out.meta = meta;
+        Ok(Json(out))
+    }
+
+    #[tool(
         name = "get_context",
         description = "LLM-ready portfolio context: totals, allocation and positions, as markdown (default) or JSON.",
         annotations(title = "Get context", read_only_hint = true, open_world_hint = true)

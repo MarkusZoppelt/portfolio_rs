@@ -449,7 +449,7 @@ pub fn build_cli() -> Command {
                     JSON-RPC over stdin/stdout (logs go to stderr).\n\
                     \n\
                     Tools (read-only): get_positions, get_allocation, check_policy,\n\
-                    get_transactions, list_portfolios, get_context.\n\
+                    get_transactions, list_portfolios, get_context, get_performance.\n\
                     Resources: portfolio://<id>/policy, portfolio://<id>/policy.md,\n\
                     portfolio://<id>/context.md, portfolio://schema/positions,\n\
                     portfolio://schema/findings.\n\
@@ -459,6 +459,8 @@ pub fn build_cli() -> Command {
                     Last known prices are cached in .<datafile>.quotes-cache.json next to\n\
                     the data file (0600; the only file the server writes) and used, marked\n\
                     stale, when a fetch fails. --offline reads the cache but never fetches.\n\
+                    Snapshots for get_performance are only read (write them with\n\
+                    `portfolio_rs snapshot`).\n\
                     The app config is read, never written."
                 )
                 .arg(file_arg())
@@ -514,6 +516,54 @@ pub fn build_cli() -> Command {
                         .value_name("PERCENT")
                         .value_parser(clap::value_parser!(f64))
                         .help("No possible_breach when unpriced positions can be at most PERCENT of the total (default: 0.5)"),
+                )
+                .arg(
+                    Arg::new("data-dir")
+                        .long("data-dir")
+                        .value_name("DIR")
+                        .help("Snapshot dir (default: PORTFOLIO_RS_DATA_DIR, <workspace>/portfolio/history, else $XDG_DATA_HOME/portfolio_rs)"),
+                ),
+        )
+        .subcommand(
+            Command::new("snapshot")
+                .about("Record today's valuation in <data-dir>/<portfolio>/snapshots.jsonl (for get_performance)")
+                .long_about(
+                    "Value the portfolio and write today's snapshot (one line per day; a second\n\
+                    run the same day replaces it) to <data-dir>/<portfolio>/snapshots.jsonl,\n\
+                    atomically and with mode 0600. Run it daily from cron or a systemd timer.\n\
+                    Uses the same quotes, cache and portfolio selection as `mcp`."
+                )
+                .arg(file_arg())
+                .arg(
+                    Arg::new("workspace")
+                        .long("workspace")
+                        .value_name("DIR")
+                        .conflicts_with("FILE")
+                        .help("Snapshot a workspace (positions.json)"),
+                )
+                .arg(
+                    Arg::new("portfolio")
+                        .long("portfolio")
+                        .value_name("ID")
+                        .help("Portfolio id (default: main)"),
+                )
+                .arg(
+                    Arg::new("offline")
+                        .long("offline")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Never fetch quotes from the network"),
+                )
+                .arg(
+                    Arg::new("no-cache")
+                        .long("no-cache")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Neither read nor write the last-known-price cache"),
+                )
+                .arg(
+                    Arg::new("data-dir")
+                        .long("data-dir")
+                        .value_name("DIR")
+                        .help("Snapshot dir (default: PORTFOLIO_RS_DATA_DIR, <workspace>/portfolio/history, else $XDG_DATA_HOME/portfolio_rs)"),
                 ),
         )
         .subcommand(
@@ -597,6 +647,9 @@ pub async fn run() -> Result<()> {
         Some(("doctor", sub_matches)) => handle_doctor(sub_matches)?,
         Some(("validate", sub_matches)) => handle_validate(sub_matches, &cfg).await?,
         Some(("mcp", sub_matches)) => handle_mcp(sub_matches, &cfg).await?,
+        Some(("snapshot", sub_matches)) => {
+            crate::commands::mcp::handle_snapshot(sub_matches, &cfg).await?
+        }
         Some(("api", sub_matches)) => {
             let host =
                 get_arg_value(Some(sub_matches), "host").unwrap_or_else(|| "127.0.0.1".to_string());
