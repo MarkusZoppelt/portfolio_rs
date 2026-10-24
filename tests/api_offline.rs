@@ -8,7 +8,9 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use portfolio_rs::api::{create_router, ApiState};
+use portfolio_rs::api::{
+    create_guarded_router, create_router, write_token_file, ApiGuard, ApiState,
+};
 
 const CASH_ONLY: &str = r#"[
   {
@@ -363,4 +365,148 @@ async fn test_dry_run_preview_does_not_block_writes() {
     // must not trip the overwrite guard.
     state.inner.generate_report(None, true).await.unwrap();
     state.inner.generate_report(None, false).await.unwrap();
+}
+
+fn get_with_host(uri: &str, host: &str, token: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().uri(uri).header("host", host);
+    if let Some(t) = token {
+        b = b.header("authorization", format!("Bearer {}", t));
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+async fn guarded(token: Option<&str>) -> axum::Router {
+    let state = ApiState::new(CASH_ONLY.to_string(), None, None, "EUR".to_string())
+        .await
+        .unwrap();
+    create_guarded_router(state, ApiGuard::new(3000, token.map(String::from)))
+}
+
+#[tokio::test]
+async fn test_host_allowlist() {
+    let app = guarded(None).await;
+    for host in [
+        "localhost:3000",
+        "127.0.0.1:3000",
+        "[::1]:3000",
+        "LOCALHOST:3000",
+    ] {
+        let r = app
+            .clone()
+            .oneshot(get_with_host("/api/portfolio", host, None));
+        assert_eq!(r.await.unwrap().status(), StatusCode::OK, "{host}");
+    }
+    for host in [
+        "evil.example:3000",
+        "localhost:3001",
+        "localhost",
+        "127.0.0.1",
+    ] {
+        let r = app.clone().oneshot(get_with_host("/health", host, None));
+        assert_eq!(
+            r.await.unwrap().status(),
+            StatusCode::MISDIRECTED_REQUEST,
+            "{host}"
+        );
+    }
+    // No Host header at all.
+    let r = app.oneshot(get("/api/portfolio")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn test_bearer_token() {
+    let app = guarded(Some("fake-test-token")).await;
+    let host = "127.0.0.1:3000";
+    let cases = [
+        ("/api/portfolio", None, StatusCode::UNAUTHORIZED),
+        ("/api/portfolio", Some("wrong"), StatusCode::UNAUTHORIZED),
+        ("/api/portfolio", Some("fake-test-token"), StatusCode::OK),
+        ("/health", None, StatusCode::OK),
+    ];
+    for (uri, token, want) in cases {
+        let r = app.clone().oneshot(get_with_host(uri, host, token));
+        assert_eq!(r.await.unwrap().status(), want, "{uri} {token:?}");
+    }
+    let r = app.oneshot(get_with_host(
+        "/api/portfolio",
+        "evil:3000",
+        Some("fake-test-token"),
+    ));
+    assert_eq!(r.await.unwrap().status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_token_file_is_private_and_replaced() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("api-token");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let token = write_token_file(&path).unwrap();
+    assert_eq!(token.len(), 64);
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(on_disk.trim(), token);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert_ne!(write_token_file(&path).unwrap(), token);
+}
+
+#[tokio::test]
+async fn test_positions_by_stable_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    let two = r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 1000.0},
+                  {"Id": "pos_fixed", "Name": "Savings", "AssetClass": "Cash", "Amount": 5.0}]"#;
+    std::fs::write(&file, two).unwrap();
+    let app = router_with(two, Some(file.to_str().unwrap().to_string()), None).await;
+
+    let list = body_json(app.clone().oneshot(get("/api/positions")).await.unwrap()).await;
+    let first_id = list[0]["positionId"].as_str().unwrap().to_string();
+    assert!(first_id.starts_with("pos_"));
+    assert_eq!(list[1]["positionId"], "pos_fixed");
+
+    let r = app
+        .clone()
+        .oneshot(get("/api/positions/pos_fixed"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(r).await["name"], "Savings");
+
+    // Delete the first one; pos_fixed still resolves although its index moved.
+    let del = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/positions/{}", first_id))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(del).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let r = app
+        .clone()
+        .oneshot(json_request(
+            "PUT",
+            "/api/positions/pos_fixed",
+            serde_json::json!({"amount": 7.0}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    assert_eq!(body["amount"], 7.0);
+    assert_eq!(body["id"], 0);
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("pos_fixed"));
+
+    let r = app
+        .clone()
+        .oneshot(get("/api/positions/pos_missing"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let r = app.oneshot(get("/api/positions/not-an-id")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }

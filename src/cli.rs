@@ -399,10 +399,18 @@ pub fn build_cli() -> Command {
                     allocation, performance, context, review, simulate,\n\
                     validate, and doctor.\n\
                     \n\
-                    The server has NO authentication and is intended for\n\
-                    local use only (scripts, agents, GUIs on this machine).\n\
-                    Keep the default 127.0.0.1 bind unless you know what\n\
-                    you are doing.\n\
+                    The server is intended for local use only (scripts,\n\
+                    agents, GUIs on this machine). It only answers requests\n\
+                    whose Host header is localhost, 127.0.0.1 or [::1] with\n\
+                    the configured port (421 otherwise). With --token-file,\n\
+                    a random bearer token is written to that file (mode\n\
+                    0600, never printed) and every /api/* request needs\n\
+                    'Authorization: Bearer <token>'. Keep the default\n\
+                    127.0.0.1 bind unless you know what you are doing.\n\
+                    \n\
+                    Positions are addressed by their stable pos_ id\n\
+                    (/api/positions/pos_...); a numeric index still works\n\
+                    for older clients.\n\
                     \n\
                     Position mutations are persisted back to the portfolio\n\
                     file, except for .gpg files, which are never rewritten."
@@ -410,7 +418,7 @@ pub fn build_cli() -> Command {
                 .arg(
                     arg!(--host <HOST> "Host to bind to")
                         .default_value("127.0.0.1")
-                        .help("Host for API server (local use only; no authentication)"),
+                        .help("Host for API server (local use only)"),
                 )
                 .arg(
                     arg!(-p --port <PORT> "Port to bind to")
@@ -423,6 +431,12 @@ pub fn build_cli() -> Command {
                         .long("policy")
                         .value_name("FILE")
                         .help("Investment policy file (enables /api/review and /api/simulate)"),
+                )
+                .arg(
+                    Arg::new("token-file")
+                        .long("token-file")
+                        .value_name("PATH")
+                        .help("Require a bearer token, generated into PATH (mode 0600)"),
                 )
                 .arg(file_arg()),
         )
@@ -541,6 +555,7 @@ pub async fn run() -> Result<()> {
                 file_path: Some(filename).filter(|s| !s.is_empty()),
                 policy_file,
                 currency: cfg.currency.clone(),
+                token_file: get_arg_value(Some(sub_matches), "token-file").map(Into::into),
             })
             .await?;
         }
