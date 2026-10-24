@@ -1,3 +1,4 @@
+use crate::money::{dec, div, to_f64};
 use eyre::{bail, Result, WrapErr};
 use std::fs::read_to_string;
 
@@ -210,7 +211,13 @@ pub(crate) fn apply_fx(
         return;
     }
     match fx_prices.get(&symbol).copied().flatten() {
-        Some(price) if price > 0.0 && price.is_finite() => position.fx_rate = Some(scale / price),
+        Some(price) if price > 0.0 && price.is_finite() => {
+            // Rate in Decimal; stored as f64 like the rest of the position.
+            position.fx_rate = div(dec(scale), dec(price)).map(to_f64);
+            if position.fx_rate.is_none() {
+                position.price_status = PriceStatus::FxUnavailable;
+            }
+        }
         _ => position.price_status = PriceStatus::FxUnavailable,
     }
 }
