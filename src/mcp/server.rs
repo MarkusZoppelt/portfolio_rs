@@ -244,42 +244,56 @@ impl PortfolioServer {
                 Vec::new(),
             ),
         };
-        // Data-quality warnings live once, in the top-level warnings.
-        findings.retain(|f| f.severity >= min);
+        // One source: the policy findings plus the warning-severity data
+        // quality items, deduplicated by (code, position, class) and filtered
+        // by minSeverity. `findings` (the policy part), `breaches` (critical),
+        // top-level `warnings` (warning severity) and `counts` are all views
+        // of this one list, so counts.warning == warnings.len() and
+        // counts.critical == breaches.len().
+        let same = |a: &Finding, b: &Finding| {
+            a.code == b.code && a.position_id == b.position_id && a.asset_class == b.asset_class
+        };
+        let mut all: Vec<(Finding, bool)> = Vec::new();
+        for f in findings.drain(..) {
+            if !all.iter().any(|(u, _)| same(u, &f)) {
+                all.push((f, true));
+            }
+        }
+        for q in analytics::data_quality(&portfolio)
+            .into_iter()
+            .filter(|q| q.severity == Severity::Warning)
+        {
+            if !all.iter().any(|(u, _)| same(u, &q)) {
+                all.push((q, false));
+            }
+        }
+        all.retain(|(f, _)| f.severity >= min);
         let mut counts = SeverityCounts::default();
-        for f in &findings {
+        for (f, _) in &all {
             match f.severity {
                 Severity::Info => counts.info += 1,
                 Severity::Warning => counts.warning += 1,
                 Severity::Critical => counts.critical += 1,
             }
         }
-        // Breaches: critical findings only, one per (code, position, class).
-        let mut breaches: Vec<Finding> = Vec::new();
-        for f in findings.iter().filter(|f| f.severity == Severity::Critical) {
-            let dup = breaches.iter().any(|b| {
-                b.code == f.code && b.position_id == f.position_id && b.asset_class == f.asset_class
-            });
-            if !dup {
-                breaches.push(f.clone());
-            }
-        }
-        let status = if !breaches.is_empty() {
+        let view = |sev: Option<Severity>, policy_only: bool| -> Vec<Finding> {
+            all.iter()
+                .filter(|(f, is_policy)| {
+                    sev.is_none_or(|s| f.severity == s) && (!policy_only || *is_policy)
+                })
+                .map(|(f, _)| f.clone())
+                .collect()
+        };
+        let breaches = view(Some(Severity::Critical), false);
+        let warnings = view(Some(Severity::Warning), false);
+        let findings = view(None, true);
+        let status = if counts.critical > 0 {
             "breach"
-        } else if findings.iter().any(|f| f.severity >= Severity::Warning) {
+        } else if counts.warning > 0 {
             "warnings"
         } else {
             "ok"
         };
-        // Top-level warnings: data quality plus warning-severity policy findings.
-        let mut warnings = analytics::data_quality(&portfolio);
-        for f in findings.iter().filter(|f| f.severity == Severity::Warning) {
-            if !warnings.iter().any(|w| {
-                w.code == f.code && w.position_id == f.position_id && w.asset_class == f.asset_class
-            }) {
-                warnings.push(f.clone());
-            }
-        }
         let cash_buffer = crate::context::CashBuffer::new(&portfolio, policy.as_ref());
         Ok(Json(PolicyCheckOutput {
             meta: self.meta(&portfolio, warnings).await,
