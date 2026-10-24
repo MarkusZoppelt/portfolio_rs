@@ -31,6 +31,14 @@ pub fn percent_change(current: Decimal, base: Decimal) -> Option<Decimal> {
     div(current - base, base).map(|r| r * Decimal::ONE_HUNDRED)
 }
 
+/// `part / whole * 100`; `None` unless `whole > 0`.
+pub fn percent_of(part: Decimal, whole: Decimal) -> Option<Decimal> {
+    if whole <= Decimal::ZERO {
+        return None;
+    }
+    div(part * Decimal::ONE_HUNDRED, whole)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

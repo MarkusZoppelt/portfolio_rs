@@ -336,6 +336,22 @@ impl PortfolioPosition {
         percent_change(self.balance_dec(), self.total_invested_dec()?).map(to_f64)
     }
 
+    /// Base-currency value at the previous close (current quantity and FX
+    /// rate), or the current value when no daily change is known.
+    pub fn previous_day_value_dec(&self) -> Decimal {
+        let value = self.balance_dec();
+        match (self.daily_variation_percent(), self.previous_close) {
+            (Some(_), Some(prev)) => div(value * dec(prev), dec(self.last_spot)).unwrap_or(value),
+            _ => value,
+        }
+    }
+
+    /// Base-currency change since the previous close, if a daily change is known.
+    pub fn day_pnl_dec(&self) -> Option<Decimal> {
+        self.daily_variation_percent()?;
+        Some(self.balance_dec() - self.previous_day_value_dec())
+    }
+
     pub fn daily_variation_percent(&self) -> Option<f64> {
         if !self.has_market_price() {
             return None;
@@ -925,5 +941,27 @@ mod tests {
         assert!(!position.has_market_price());
         assert_eq!(position.get_balance(), 0.0);
         assert_eq!(position.pnl(), None);
+    }
+
+    #[test]
+    fn test_decimal_money_math_is_exact() {
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKEUS"), "Stocks", 0.0, 10.1, PriceStatus::Live);
+        position.fx_rate = Some(0.5);
+        position.previous_close = Some(10.0);
+        position.purchases = (0..3)
+            .map(|_| Purchase {
+                date: None,
+                quantity: 0.1,
+                price: Some(10.0),
+                fees: Some(0.1),
+            })
+            .collect();
+        // In f64, 0.1 + 0.1 + 0.1 == 0.30000000000000004.
+        assert_eq!(position.get_amount(), 0.3);
+        assert_eq!(position.get_balance(), 1.515);
+        assert_eq!(position.total_invested(), Some(1.65));
+        assert_eq!(position.previous_day_value_dec(), dec(1.5));
+        assert_eq!(position.day_pnl_dec(), Some(dec(0.015)));
     }
 }
