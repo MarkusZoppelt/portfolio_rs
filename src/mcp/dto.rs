@@ -55,6 +55,9 @@ pub struct Meta {
     pub price_as_of: Option<String>,
     /// `pos_` ids whose price or FX rate came from the cache.
     pub stale_positions: Vec<String>,
+    /// complete (every value known and fresh) | partial (`complete` is
+    /// false) | stale (all known, but some from the quote cache).
+    pub data_status: String,
     /// Data-quality and policy warnings, each emitted once per response.
     pub warnings: Vec<Finding>,
 }
@@ -186,6 +189,12 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "policy",
         "warning",
         "Prices or FX rates are missing; allocation and limits are judged on the priced part and only certain breaches are reported.",
+    ),
+    (
+        "stale_prices",
+        "data_quality",
+        "warning",
+        "Some prices or FX rates are last-known values from the quote cache; dataStatus is stale.",
     ),
     (
         "possible_breach",
@@ -541,8 +550,11 @@ pub struct PolicyCheckOutput {
     #[serde(flatten)]
     pub meta: Meta,
     pub policy_name: Option<String>,
-    /// ok | warnings | breach
+    /// ok | warnings | breach: same as `policyStatus` (kept for clients).
     pub status: String,
+    /// ok | warnings | breaches, from the policy findings only. Data quality
+    /// is reported separately in `dataStatus`, `dataQuality` and `warnings`.
+    pub policy_status: String,
     /// Critical findings only (hard limits exceeded, allocation far outside
     /// its band, invalid policy), deduplicated. Warning-severity findings are
     /// in the top-level `warnings`, next to the data-quality warnings.
@@ -550,6 +562,7 @@ pub struct PolicyCheckOutput {
     /// Every policy finding at or above `minSeverity`.
     pub findings: Vec<Finding>,
     pub constraint_checks: Vec<ConstraintCheckRow>,
+    /// Counts of `findings` (policy only; data-quality items excluded).
     pub counts: SeverityCounts,
     /// Cash vs. the policy's minimum cash amount (base currency).
     pub cash_buffer: crate::context::CashBuffer,

@@ -97,6 +97,8 @@ fn round2_opt<S: serde::Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::E
 struct ContextSummary {
     /// Banner first in the summary; null when every position is priced.
     incomplete: Option<String>,
+    /// complete | partial | stale (cached prices or FX rates in use).
+    data_status: &'static str,
     #[serde(serialize_with = "round2")]
     total_value: f64,
     #[serde(serialize_with = "round2")]
@@ -324,6 +326,13 @@ impl PortfolioContext {
 
         let summary = ContextSummary {
             incomplete: (!complete).then(|| incomplete_banner(unpriced)),
+            data_status: if !complete {
+                "partial"
+            } else if positions.iter().any(|p| p.is_stale) {
+                "stale"
+            } else {
+                "complete"
+            },
             total_value: to_f64(total),
             cash_value: to_f64(breakdown.cash),
             securities_value: to_f64(breakdown.securities),
@@ -394,6 +403,7 @@ impl PortfolioContext {
         out.push_str(&format!("Generated: {}\n", self.generated_at));
         out.push_str(&format!("Currency: {}\n", self.currency));
         out.push_str(&format!("Network Status: {}\n", self.network_status));
+        out.push_str(&format!("Data Status: {}\n", self.summary.data_status));
         out.push('\n');
 
         out.push_str("## Summary\n\n");
@@ -464,10 +474,17 @@ impl PortfolioContext {
                     .unwrap_or_else(|| "-".to_string()),
                 escape_markdown(&position.asset_class),
                 quantity(position.quantity),
-                opt(position.price.map(|value| money(
-                    value,
-                    position.price_currency.as_deref().unwrap_or(&self.currency)
-                ))),
+                opt(position.price.map(|value| {
+                    let shown = money(
+                        value,
+                        position.price_currency.as_deref().unwrap_or(&self.currency),
+                    );
+                    if position.is_stale {
+                        format!("{shown} (stale)")
+                    } else {
+                        shown
+                    }
+                })),
                 opt(position.value.map(|v| money(v, &self.currency))),
                 opt(position.weight_percent.map(pct)),
                 position

@@ -74,6 +74,17 @@ pub fn price_freshness(portfolio: &Portfolio) -> (Option<String>, Vec<String>) {
     (oldest, stale)
 }
 
+/// complete | partial | stale (see `Meta::data_status`).
+pub fn data_status(complete: bool, has_stale: bool) -> &'static str {
+    if !complete {
+        "partial"
+    } else if has_stale {
+        "stale"
+    } else {
+        "complete"
+    }
+}
+
 /// Base-currency value, `None` when unknown (no live price or FX rate).
 pub fn value_base(p: &PortfolioPosition) -> Option<Decimal> {
     if p.get_ticker().is_some() && !p.has_market_price() {
@@ -236,6 +247,22 @@ pub fn position_rows(
 /// Data-quality findings that also go into every response's `warnings`.
 pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
     let mut out = Vec::new();
+    let (oldest, stale) = price_freshness(portfolio);
+    if !stale.is_empty() {
+        out.push(
+            Finding::new(
+                "stale_prices",
+                Severity::Warning,
+                Category::DataQuality,
+                format!(
+                    "{} position(s) use last-known prices or FX rates from the quote cache (oldest as of {}); values are not current.",
+                    stale.len(),
+                    oldest.as_deref().unwrap_or("unknown")
+                ),
+            )
+            .detail(json!({ "stalePositions": stale, "priceAsOf": oldest })),
+        );
+    }
     let mut tickers: HashMap<String, Vec<String>> = HashMap::new();
     for p in &portfolio.positions {
         let id = p.id();

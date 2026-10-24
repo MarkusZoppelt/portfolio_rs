@@ -223,6 +223,13 @@ warning, and `checks_incomplete` summarizes what was judged on a partial basis.
 rate), `partial` (some fresh quotes, or quotes without FX) or `offline` (no
 fresh quotes; cached prices do not count as connected). Each position row
 carries `priceSource` (`live`, `cache`, `fixture` or `none`) and `isStale`.
+Every response also carries `dataStatus`: `complete`, `partial` (some
+position unpriced) or `stale` (all priced, but some from an expired price; a
+`stale_prices` data-quality warning lists them and the context table marks
+them `(stale)`). `check_policy` keeps policy and data quality apart:
+`policyStatus` (`ok` | `warnings` | `breaches`), `findings`, `counts` and
+`breaches` cover policy findings only; data-quality warnings appear only in
+the top-level `warnings` (subject to `minSeverity`).
 
 The policy's `single_position_limit_percent` applies to non-cash positions
 only, identically in `portfolio_rs review`, `check_policy` and the
