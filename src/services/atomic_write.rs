@@ -79,6 +79,32 @@ pub fn write_atomic_with_backup(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Atomically replace `path` with `contents` as an owner-only (0600) file,
+/// without a backup. For derived files such as the quote cache.
+pub fn write_atomic_private(path: &Path, contents: &[u8]) -> Result<()> {
+    if is_gpg_path(path) {
+        bail!("refusing to write {}", path.display());
+    }
+    let (tmp_path, mut file) = create_temp_file(path)?;
+    let mut guard = TempFileGuard::arm(tmp_path.clone());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .wrap_err_with(|| format!("failed to set permissions on {}", tmp_path.display()))?;
+    }
+    file.write_all(contents)
+        .wrap_err_with(|| format!("failed to write temp file: {}", tmp_path.display()))?;
+    file.sync_all()
+        .wrap_err_with(|| format!("failed to flush temp file to disk: {}", tmp_path.display()))?;
+    drop(file);
+    std::fs::rename(&tmp_path, path)
+        .wrap_err_with(|| format!("failed to replace {}", path.display()))?;
+    guard.disarm();
+    sync_parent_dir(path);
+    Ok(())
+}
+
 /// `OpenOptions` that create new files as owner-only (0600) on unix.
 ///
 /// The mode only applies when a file is created; existing files keep theirs.

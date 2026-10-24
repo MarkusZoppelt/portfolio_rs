@@ -138,6 +138,14 @@ pub struct PortfolioPosition {
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) price_as_of: Option<String>,
 
+    // Not persisted. Where `last_spot` came from; None when unpriced.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) price_source: Option<crate::services::quotes::PriceSource>,
+
+    // Not persisted. Whether the FX rate came from the last-known-price cache.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) fx_from_cache: bool,
+
     // Not persisted. Base-currency units per 1 unit of `price_currency`.
     // None means no conversion (same currency or unknown).
     #[serde(skip_serializing, skip_deserializing)]
@@ -359,6 +367,16 @@ impl PortfolioPosition {
         self.price_as_of.as_deref()
     }
 
+    /// live | cache | fixture for a priced market position, None otherwise.
+    pub fn price_source(&self) -> Option<crate::services::quotes::PriceSource> {
+        self.price_source
+    }
+
+    /// Whether the price or its FX rate came from the last-known-price cache.
+    pub fn is_stale(&self) -> bool {
+        self.price_source == Some(crate::services::quotes::PriceSource::Cache) || self.fx_from_cache
+    }
+
     /// Base-currency units per 1 unit of the quote currency, if a conversion applies.
     pub fn fx_rate(&self) -> Option<f64> {
         self.fx_rate.map(to_f64)
@@ -537,6 +555,8 @@ impl PortfolioPosition {
             price_status,
             price_currency: None,
             price_as_of: None,
+            price_source: None,
+            fx_from_cache: false,
             fx_rate: None,
         }
     }
@@ -718,6 +738,7 @@ pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
         price,
         currency,
         as_of,
+        source: crate::services::quotes::PriceSource::Live,
     })
 }
 
@@ -793,12 +814,19 @@ pub async fn handle_position_with<P: QuoteProvider>(
 ) -> PortfolioPosition {
     if let Some(ticker_owned) = position.ticker.clone() {
         let ticker = ticker_owned.as_str();
-        let (close, currency, as_of) = match provider.latest(ticker).await {
-            Ok(quote) => (Some(quote.price), quote.currency, quote.as_of),
-            Err(_) => (None, None, None),
+        let (close, currency, as_of, source) = match provider.latest(ticker).await {
+            Ok(quote) => (
+                Some(quote.price),
+                quote.currency,
+                quote.as_of,
+                Some(quote.source),
+            ),
+            Err(_) => (None, None, None, None),
         };
         position.price_currency = currency;
         position.price_as_of = as_of;
+        position.price_source = source;
+        position.fx_from_cache = false;
         apply_quote_result(position, close);
 
         // Quote-dependent enrichment is useless without a live price, and a
@@ -954,6 +982,8 @@ mod tests {
             price_status: PriceStatus::Live,
             price_currency: None,
             price_as_of: None,
+            price_source: None,
+            fx_from_cache: false,
             fx_rate: None,
             purchases: vec![],
             previous_close: None,
@@ -991,6 +1021,8 @@ mod tests {
             price_status: PriceStatus::Live,
             price_currency: None,
             price_as_of: None,
+            price_source: None,
+            fx_from_cache: false,
             fx_rate: None,
             purchases: vec![Purchase {
                 date: Some("2024-01-15".to_string()),

@@ -88,6 +88,7 @@ impl PortfolioServer {
     async fn meta(&self, portfolio: &Portfolio, warnings: Vec<Finding>) -> Meta {
         let base_currency = self.base_currency().await;
         let data_quality = analytics::data_quality_summary(portfolio, &base_currency);
+        let (price_as_of, stale_positions) = analytics::price_freshness(portfolio);
         Meta {
             schema_version: SCHEMA_VERSION,
             portfolio_id: self.served.id.clone(),
@@ -95,6 +96,9 @@ impl PortfolioServer {
             base_currency,
             complete: data_quality.affected_positions.is_empty(),
             data_quality,
+            has_stale: !stale_positions.is_empty(),
+            price_as_of,
+            stale_positions,
             warnings,
         }
     }

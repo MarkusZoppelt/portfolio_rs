@@ -455,6 +455,9 @@ pub fn build_cli() -> Command {
                     \n\
                     Quotes follow PORTFOLIO_RS_QUOTES (yahoo, offline, fixture:<path>);\n\
                     --offline forces offline quotes unless a fixture is configured.\n\
+                    Last known prices are cached in .<datafile>.quotes-cache.json next to\n\
+                    the data file (0600; the only file the server writes) and used, marked\n\
+                    stale, when a fetch fails. --offline reads the cache but never fetches.\n\
                     The app config is read, never written."
                 )
                 .arg(file_arg())
@@ -483,6 +486,19 @@ pub fn build_cli() -> Command {
                         .long("offline")
                         .action(clap::ArgAction::SetTrue)
                         .help("Never fetch quotes from the network"),
+                )
+                .arg(
+                    Arg::new("no-cache")
+                        .long("no-cache")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Neither read nor write the last-known-price cache"),
+                )
+                .arg(
+                    Arg::new("cache-max-age")
+                        .long("cache-max-age")
+                        .value_name("DAYS")
+                        .value_parser(clap::value_parser!(i64).range(0..))
+                        .help("Cached prices older than DAYS do not count (default: 7)"),
                 ),
         )
         .subcommand(

@@ -32,10 +32,45 @@ fn price_status(p: &PortfolioPosition) -> &'static str {
         "cash" => "cash",
         "manual" => "manual",
         _ => match p.price_status() {
+            PriceStatus::Live if p.has_market_price() && p.is_stale() => "stale",
             PriceStatus::Live if p.has_market_price() => "live",
             _ => "unavailable",
         },
     }
+}
+
+/// live | cache | fixture | none (cash and manual positions: none).
+pub fn price_source(p: &PortfolioPosition) -> &'static str {
+    match p.price_source() {
+        Some(src) if kind(p) == "market" && p.has_market_price() => src.as_str(),
+        _ => "none",
+    }
+}
+
+/// Oldest `priceAsOf` among the priced market positions, and the ids of
+/// those whose price or FX rate came from the cache.
+pub fn price_freshness(portfolio: &Portfolio) -> (Option<String>, Vec<String>) {
+    let priced: Vec<_> = portfolio
+        .positions
+        .iter()
+        .filter(|p| kind(p) == "market" && value_base(p).is_some())
+        .collect();
+    let oldest = priced
+        .iter()
+        .filter_map(|p| {
+            let t = p.price_as_of()?;
+            chrono::DateTime::parse_from_rfc3339(t)
+                .ok()
+                .map(|d| (d.with_timezone(&chrono::Utc), t.to_string()))
+        })
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, t)| t);
+    let stale = priced
+        .iter()
+        .filter(|p| p.is_stale())
+        .map(|p| pid(p))
+        .collect();
+    (oldest, stale)
 }
 
 /// Base-currency value, `None` when unknown (no live price or FX rate).
@@ -136,6 +171,8 @@ pub fn position_rows(
                 } else {
                     Some(base.to_string())
                 },
+                is_stale: market && p.has_market_price() && p.is_stale(),
+                price_source: price_source(p).to_string(),
                 fx_rate: if market { p.fx_rate() } else { None },
                 price_status: price_status(p).to_string(),
                 value_base: value.map(money),
@@ -314,17 +351,31 @@ pub fn data_quality_summary(portfolio: &Portfolio, base: &str) -> DataQuality {
     dq
 }
 
-/// connected | partial | offline, from the quotes actually present.
+/// connected | partial | offline, from the quotes actually present: offline
+/// when no market position has a fresh (non-cached) quote, connected when
+/// every market position has a fresh quote and FX rate, partial otherwise
+/// (including quotes without FX).
 pub fn network_status(portfolio: &Portfolio) -> &'static str {
     let market: Vec<_> = portfolio
         .positions
         .iter()
         .filter(|p| kind(p) == "market")
         .collect();
-    let priced = market.iter().filter(|p| value_base(p).is_some()).count();
-    if priced == market.len() {
+    let fresh_quote = |p: &&&PortfolioPosition| {
+        matches!(
+            p.price_status(),
+            PriceStatus::Live | PriceStatus::FxUnavailable
+        ) && p.price_source() != Some(crate::services::quotes::PriceSource::Cache)
+    };
+    let quoted = market.iter().filter(fresh_quote).count();
+    let complete = market
+        .iter()
+        .filter(fresh_quote)
+        .filter(|p| value_base(p).is_some() && !p.is_stale())
+        .count();
+    if complete == market.len() {
         "connected"
-    } else if priced == 0 {
+    } else if quoted == 0 {
         "offline"
     } else {
         "partial"

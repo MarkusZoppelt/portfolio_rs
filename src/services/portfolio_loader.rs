@@ -139,7 +139,9 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
             continue;
         }
         ticker_positions += 1;
-        if position.price_status() == PriceStatus::Live {
+        if position.price_status() == PriceStatus::Live
+            && position.price_source() != Some(crate::services::quotes::PriceSource::Cache)
+        {
             live_ticker_positions += 1;
         }
     }
@@ -162,15 +164,27 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
         .filter(|symbol| !symbol.is_empty())
         .collect();
     let mut fx_prices = HashMap::new();
+    let mut fx_cached = HashSet::new();
     for symbol in symbols {
-        let price = provider.latest(&symbol).await.ok().map(|q| q.price);
-        if price.is_none() && log_errors {
+        let quote = provider.latest(&symbol).await.ok();
+        if quote.is_none() && log_errors {
             eprintln!("Warning: no FX rate {symbol}; affected positions excluded from totals");
         }
-        fx_prices.insert(symbol, price);
+        if quote
+            .as_ref()
+            .is_some_and(|q| q.source == crate::services::quotes::PriceSource::Cache)
+        {
+            fx_cached.insert(symbol.clone());
+        }
+        fx_prices.insert(symbol, quote.map(|q| q.price));
     }
     for position in &mut portfolio.positions {
         apply_fx(position, base_currency, &fx_prices);
+        position.fx_from_cache = position.fx_rate.is_some()
+            && position
+                .price_currency()
+                .and_then(|ccy| fx_symbol(base_currency, ccy))
+                .is_some_and(|(symbol, _)| fx_cached.contains(&symbol));
     }
 
     if log_errors {

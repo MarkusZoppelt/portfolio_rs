@@ -13,6 +13,7 @@ pub mod stdio;
 
 pub use server::PortfolioServer;
 
+use crate::services::quote_cache::{cache_path_for, CachedProvider, DEFAULT_MAX_AGE_DAYS};
 use crate::services::quotes::AnyProvider;
 use crate::state::AppState;
 use eyre::{bail, Result, WrapErr};
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// How the served portfolio is selected.
 #[derive(Debug, Clone, Default)]
 pub struct McpOptions {
-    /// Id clients use in `portfolioId` and resource URIs. Default `default`.
+    /// Id clients use in `portfolioId` and resource URIs. Default `main`.
     pub portfolio_id: Option<String>,
     /// Positions file (plaintext or `.gpg`).
     pub file: Option<String>,
@@ -37,6 +38,22 @@ pub struct McpOptions {
     /// Explicit quote provider (tests, embedders). Overrides `offline` and
     /// `PORTFOLIO_RS_QUOTES` when set.
     pub quotes: Option<AnyProvider>,
+    /// Last-known-price cache next to the data file.
+    pub cache: CacheMode,
+    /// Max age of cached prices in days (default 7).
+    pub cache_max_age_days: Option<i64>,
+}
+
+/// Whether the server uses the last-known-price cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CacheMode {
+    /// On for Yahoo and offline quotes, off for fixtures and `.gpg` files.
+    #[default]
+    Auto,
+    /// Never read or write the cache (`--no-cache`).
+    Off,
+    /// Also for fixtures (tests). Never for `.gpg` files.
+    On,
 }
 
 /// A loaded portfolio and everything the tools need about it.
@@ -51,6 +68,10 @@ pub struct ServedPortfolio {
     pub policy_error: Option<String>,
     /// Whether quotes may come from the network (false with --offline or a fixture).
     pub network: bool,
+    /// yahoo | offline | fixture
+    pub quote_source: &'static str,
+    /// The last-known-price cache file, when enabled.
+    pub cache_path: Option<PathBuf>,
 }
 
 impl ServedPortfolio {
@@ -94,6 +115,34 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
         .clone()
         .unwrap_or_else(|| quote_provider(opts.offline));
     let network = matches!(provider, AnyProvider::Yahoo);
+    let quote_source = provider.source_name();
+    let data_file = match (&opts.workspace, &opts.file) {
+        (Some(dir), _) => Some(Path::new(dir).join("positions.json")),
+        (None, Some(file)) => Some(PathBuf::from(file)),
+        _ => None,
+    };
+    let use_cache = match opts.cache {
+        CacheMode::Off => false,
+        CacheMode::On => true,
+        CacheMode::Auto => !matches!(provider, AnyProvider::Fixture(_)),
+    };
+    // Never a plaintext list of tickers next to an encrypted portfolio.
+    let cache_path = data_file
+        .as_deref()
+        .filter(|f| use_cache && !f.to_string_lossy().ends_with(".gpg"))
+        .and_then(cache_path_for);
+    let provider = match &cache_path {
+        Some(path) => {
+            let write = !matches!(provider, AnyProvider::Offline);
+            AnyProvider::Cached(std::sync::Arc::new(CachedProvider::new(
+                provider,
+                Some(path.clone()),
+                opts.cache_max_age_days.unwrap_or(DEFAULT_MAX_AGE_DAYS),
+                write,
+            )))
+        }
+        None => provider,
+    };
     let state = AppState::with_quotes(opts.currency.clone(), provider);
     let mut policy_error = None;
     let (mode, path, workspace_dir) = if let Some(dir) = &opts.workspace {
@@ -150,6 +199,8 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
         state,
         policy_error,
         network,
+        quote_source,
+        cache_path,
     })
 }
 

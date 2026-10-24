@@ -225,6 +225,7 @@ impl AppState {
         let currency = self.currency().await;
         let (portfolio, status) =
             create_live_portfolio_with(Arc::new(self.quotes.clone()), json, &currency, false).await;
+        self.quotes.flush_cache();
         *self.network_status.write().await = status;
         *self.portfolio_cache.write().await = Some(CachedPortfolio {
             portfolio: portfolio.clone(),
@@ -415,6 +416,8 @@ impl AppState {
             price_status: crate::position::PriceStatus::Live,
             price_currency: None,
             price_as_of: None,
+            price_source: None,
+            fx_from_cache: false,
             fx_rate: None,
             purchases: req
                 .purchases

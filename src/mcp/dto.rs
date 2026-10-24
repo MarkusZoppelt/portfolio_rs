@@ -43,6 +43,15 @@ pub struct Meta {
     /// allocation then cover only the priced positions (see `dataQuality`).
     pub complete: bool,
     pub data_quality: DataQuality,
+    /// True when any used price or FX rate came from the last-known-price
+    /// cache (see `stalePositions`). Cached prices within the max age count
+    /// towards `complete`.
+    pub has_stale: bool,
+    /// Oldest `priceAsOf` among the priced market positions; null when none
+    /// reports one.
+    pub price_as_of: Option<String>,
+    /// `pos_` ids whose price or FX rate came from the cache.
+    pub stale_positions: Vec<String>,
     /// Data-quality and policy warnings, each emitted once per response.
     pub warnings: Vec<Finding>,
 }
@@ -388,9 +397,13 @@ pub struct PositionRow {
     /// Currency the holding is denominated in: the quote currency for market
     /// positions (null when unknown), the base currency for cash and manual.
     pub currency: Option<String>,
+    /// True when the price or its FX rate came from the last-known-price cache.
+    pub is_stale: bool,
+    /// live | cache | fixture | none
+    pub price_source: String,
     /// Base-currency units per unit of priceCurrency; null when no conversion applies.
     pub fx_rate: Option<f64>,
-    /// live | stale | unavailable | manual | cash
+    /// live | stale (from the cache) | unavailable | manual | cash
     pub price_status: String,
     /// Value in the base currency; null when the price or FX rate is unavailable.
     pub value_base: Option<f64>,
