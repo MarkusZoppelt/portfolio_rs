@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::money::{dec, div, percent_change, percent_of, to_f64, Decimal};
 use crate::position::{PortfolioPosition, PriceStatus};
-use crate::services::quotes::{QuoteError, QuoteProvider, YahooProvider};
+use crate::services::quotes::{AnyProvider, QuoteError, QuoteProvider};
 
 use chrono::prelude::*;
 use eyre::bail;
@@ -167,7 +167,7 @@ impl Portfolio {
         &self,
         date: DateTime<Utc>,
     ) -> Result<(f64, f64)> {
-        self.historic_and_current_securities_value_with(&YahooProvider, date)
+        self.historic_and_current_securities_value_with(AnyProvider::configured(), date)
             .await
     }
 
@@ -630,7 +630,7 @@ impl Portfolio {
         };
         print!(
             "{}",
-            self.render_performance_with(&YahooProvider, last_db, Utc::now())
+            self.render_performance_with(AnyProvider::configured(), last_db, Utc::now())
                 .await
         );
     }

@@ -11,7 +11,7 @@ use crate::position::{
     apply_quote_result, from_string, fx_symbol, handle_position_with, PortfolioPosition,
     PriceStatus,
 };
-use crate::services::quotes::{QuoteProvider, YahooProvider};
+use crate::services::quotes::{AnyProvider, QuoteProvider};
 use crate::tui::NetworkStatus;
 
 /// Read a plaintext file or decrypt a `.gpg` file.
@@ -72,8 +72,9 @@ pub async fn create_live_portfolio_with_logging(
 /// Returns a portfolio with the latest quotes, with values converted to
 /// `base_currency`.
 ///
-/// Positions quoted in another currency are converted with one Yahoo FX quote
-/// per currency (e.g. `EURUSD=X`; only the ticker symbol is sent). If that FX
+/// Positions quoted in another currency are converted with one FX quote per
+/// currency (e.g. `EURUSD=X`; only the ticker symbol is sent) from the
+/// provider chosen by `PORTFOLIO_RS_QUOTES` (Yahoo by default). If that FX
 /// quote fails, those positions become [`PriceStatus::FxUnavailable`]: kept,
 /// flagged, and excluded from totals. Currencies are never mixed silently.
 pub async fn create_live_portfolio_in(
@@ -82,7 +83,7 @@ pub async fn create_live_portfolio_in(
     log_errors: bool,
 ) -> (Portfolio, NetworkStatus) {
     create_live_portfolio_with(
-        Arc::new(YahooProvider),
+        Arc::new(AnyProvider::configured().clone()),
         positions_str,
         base_currency,
         log_errors,

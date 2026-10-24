@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
 use crate::money::{dec, div, percent_change, to_f64, Decimal};
-use crate::services::quotes::{DailyBar, Quote, QuoteError, QuoteProvider, YahooProvider};
+use crate::services::quotes::{DailyBar, Quote, QuoteError, QuoteProvider};
 
 // Type alias to reduce type complexity
 type HistoricCacheMap = HashMap<(String, i64, i64), Arc<yahoo::YResponse>>;
@@ -645,7 +645,7 @@ pub(crate) fn apply_quote_result(position: &mut PortfolioPosition, close: Option
 pub async fn handle_position(
     position: &mut PortfolioPosition,
 ) -> Result<PortfolioPosition, yahoo::YahooError> {
-    Ok(handle_position_with(&YahooProvider, position).await)
+    Ok(handle_position_with(crate::services::quotes::AnyProvider::configured(), position).await)
 }
 
 /// [`handle_position`] with an explicit [`QuoteProvider`]. Never drops the position.

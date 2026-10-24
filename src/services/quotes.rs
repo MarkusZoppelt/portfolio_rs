@@ -218,6 +218,51 @@ pub enum AnyProvider {
     Fixture(Box<FixtureProvider>),
 }
 
+/// Environment variable that selects the quote source.
+///
+/// `yahoo` (or unset) uses Yahoo Finance, `offline` makes every lookup fail
+/// without network access, and `fixture:<path>` serves prices from a
+/// [`FixtureProvider`] JSON file.
+pub const QUOTES_ENV: &str = "PORTFOLIO_RS_QUOTES";
+
+impl AnyProvider {
+    /// Parse a [`QUOTES_ENV`] value.
+    pub fn from_spec(spec: &str) -> Result<Self, String> {
+        let spec = spec.trim();
+        match spec {
+            "" | "yahoo" => Ok(Self::Yahoo),
+            "offline" => Ok(Self::Offline),
+            _ => match spec.strip_prefix("fixture:") {
+                Some(path) if !path.is_empty() => {
+                    let json = std::fs::read_to_string(path)
+                        .map_err(|e| format!("cannot read quote fixture {path}: {e}"))?;
+                    let fixture = FixtureProvider::from_json(&json)
+                        .map_err(|e| format!("invalid quote fixture {path}: {e}"))?;
+                    Ok(Self::Fixture(Box::new(fixture)))
+                }
+                _ => Err(format!(
+                    "unknown {QUOTES_ENV} value {spec:?} (expected yahoo, offline or fixture:<path>)"
+                )),
+            },
+        }
+    }
+
+    /// The provider selected by [`QUOTES_ENV`], resolved once per process.
+    ///
+    /// An invalid value never falls back to the network: it prints a warning
+    /// and uses [`AnyProvider::Offline`].
+    pub fn configured() -> &'static AnyProvider {
+        static CONFIGURED: std::sync::OnceLock<AnyProvider> = std::sync::OnceLock::new();
+        CONFIGURED.get_or_init(|| {
+            let spec = std::env::var(QUOTES_ENV).unwrap_or_default();
+            Self::from_spec(&spec).unwrap_or_else(|err| {
+                eprintln!("Warning: {err}; using offline quotes");
+                Self::Offline
+            })
+        })
+    }
+}
+
 impl QuoteProvider for AnyProvider {
     async fn latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
         match self {
@@ -349,5 +394,35 @@ mod tests {
         assert_eq!(fixture.close_on("FAKE", sat).await.unwrap(), 11.0);
         assert_eq!(fixture.close_on_or_after("FAKE", sat).await.unwrap(), 11.0);
         assert_eq!(fixture.close_before("FAKE", sat).await.unwrap(), 10.0);
+    }
+
+    #[test]
+    fn test_quotes_spec_parsing() {
+        assert!(matches!(AnyProvider::from_spec(""), Ok(AnyProvider::Yahoo)));
+        assert!(matches!(
+            AnyProvider::from_spec("yahoo"),
+            Ok(AnyProvider::Yahoo)
+        ));
+        assert!(matches!(
+            AnyProvider::from_spec("offline"),
+            Ok(AnyProvider::Offline)
+        ));
+        assert!(AnyProvider::from_spec("live").is_err());
+        assert!(AnyProvider::from_spec("fixture:").is_err());
+        assert!(AnyProvider::from_spec("fixture:/nonexistent/fake.json").is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("quotes.json");
+        std::fs::write(
+            &path,
+            r#"{"latest": {"FAKE": {"price": 2.5, "currency": "EUR"}}}"#,
+        )
+        .unwrap();
+        match AnyProvider::from_spec(&format!("fixture:{}", path.display())) {
+            Ok(AnyProvider::Fixture(f)) => assert_eq!(f.latest["FAKE"].price, 2.5),
+            other => panic!("unexpected {other:?}"),
+        }
+        std::fs::write(&path, "not json").unwrap();
+        assert!(AnyProvider::from_spec(&format!("fixture:{}", path.display())).is_err());
     }
 }

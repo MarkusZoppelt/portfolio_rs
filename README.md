@@ -72,6 +72,15 @@ data.
 If no file is specified, commands use the portfolio file (or workspace) from
 your config. Run `portfolio_rs <COMMAND> --help` for details.
 
+Quotes come from Yahoo Finance by default. Set `PORTFOLIO_RS_QUOTES` to choose
+another source: `offline` makes no network calls (nothing gets a price), and
+`fixture:<path>` serves prices from a JSON file with the shape of
+[`tests/fixtures/quotes_example.json`](tests/fixtures/quotes_example.json). An
+invalid value prints a warning and uses offline quotes; it never falls back to
+the network.
+
+    PORTFOLIO_RS_QUOTES=fixture:tests/fixtures/quotes_example.json portfolio_rs context example_data.json
+
 `performance` period returns (1W, 1M, 3M, 6M, YTD, 1Y) are the market return
 of the ticker positions you hold now, at current quantities, compared like for
 like: cash, ticker-less holdings, unpriced positions, and positions without a
