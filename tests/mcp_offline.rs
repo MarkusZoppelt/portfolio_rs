@@ -1936,10 +1936,8 @@ async fn context_json_is_rounded_to_two_decimals() {
             _ => {}
         }
     }
-    for client in [
-        connect(opts()).await,
-        connect_partial("quotes_no_gsg.json").await.1,
-    ] {
+    let partial = connect_partial("quotes_no_gsg.json").await;
+    for (client, complete) in [(connect(opts()).await, true), (partial.1, false)] {
         let v = ok(&client, "get_context", json!({"format": "json"})).await;
         let mut bad = Vec::new();
         check(&v["context"], "", &mut bad);
@@ -1950,7 +1948,11 @@ async fn context_json_is_rounded_to_two_decimals() {
                 saw_fraction |= w.fract() != 0.0;
             }
         }
-        assert!(saw_fraction, "fixture should yield fractional weights");
+        // Partial data has no weights at all (retest B3).
+        assert_eq!(
+            saw_fraction, complete,
+            "fractional weights only when complete"
+        );
     }
 }
 
@@ -2103,6 +2105,36 @@ async fn incomplete_context_nulls_cash_weights_and_has_banner() {
         "{md}"
     );
     assert!(md.contains("- Cash: ") && md.contains("(n/a)"), "{md}");
+}
+
+/// Finance retest B3: with partial data no tool derives a weight or class
+/// share from the incomplete total (cash or not).
+#[tokio::test]
+async fn partial_data_has_no_weights_anywhere() {
+    for quotes in ["quotes_no_gsg.json", "quotes_no_fx.json"] {
+        let (_t, client) = connect_partial(quotes).await;
+        let v = ok(&client, "get_positions", json!({})).await;
+        assert_eq!(v["complete"], false);
+        for p in v["positions"].as_array().unwrap() {
+            assert!(p["weightPercent"].is_null(), "{quotes} {p}");
+        }
+        let v = ok(&client, "get_allocation", json!({})).await;
+        for c in v["classes"].as_array().unwrap() {
+            assert!(c["actualPercent"].is_null(), "{quotes} {c}");
+            assert!(c["actualPercentMin"].is_number(), "{quotes} {c}");
+        }
+        let v = ok(&client, "get_context", json!({"format": "json"})).await;
+        let ctx = &v["context"];
+        for p in ctx["positions"].as_array().unwrap() {
+            assert!(p["weightPercent"].is_null(), "{quotes} {p}");
+        }
+        for a in ctx["allocation"].as_array().unwrap() {
+            assert!(a["percent"].is_null(), "{quotes} {a}");
+        }
+        assert!(ctx["summary"]["cashPercent"].is_null());
+        assert!(ctx["summary"]["largestPositionPercent"].is_null());
+        client.cancel().await.unwrap();
+    }
 }
 
 /// Finance item 8 / retest A6: `counts`, `breaches` and `policyStatus` come
