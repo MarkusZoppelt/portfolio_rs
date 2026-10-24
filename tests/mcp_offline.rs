@@ -390,6 +390,7 @@ async fn get_allocation_against_policy_bands() {
     assert_eq!(real_estate["tolerancePercent"], 5.0);
     assert_eq!(real_estate["status"], "below_band");
     assert_eq!(v["missingClasses"], json!(["RealEstate"]));
+    assert_untargeted_in_class_order(&v);
     let mut untargeted: Vec<_> = v["untargetedClasses"]
         .as_array()
         .unwrap()
@@ -1551,6 +1552,7 @@ async fn check_policy_separates_breaches_from_warnings() {
 
     let client = connect(opts()).await;
     let v = ok(&client, "get_allocation", json!({})).await;
+    assert_untargeted_in_class_order(&v);
     let mut untargeted: Vec<String> = v["untargetedClasses"]
         .as_array()
         .unwrap()
@@ -2331,6 +2333,19 @@ async fn price_shown_without_fx_reports_its_source() {
         .clone();
     assert_eq!(row["isStale"], true, "{row}");
     client.cancel().await.unwrap();
+}
+
+/// Finance retest L4: untargetedClasses lists classes in `classes` order.
+fn assert_untargeted_in_class_order(v: &Value) {
+    let untargeted: Vec<&Value> = v["untargetedClasses"].as_array().unwrap().iter().collect();
+    let in_order: Vec<&Value> = v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["assetClass"])
+        .filter(|c| untargeted.contains(c))
+        .collect();
+    assert_eq!(untargeted, in_order, "{v}");
 }
 
 /// A fixture without the given symbols' latest quotes.
