@@ -114,7 +114,7 @@ impl PortfolioServer {
     }
 
     fn policy_options(&self) -> analytics::PolicyOptions {
-        self.served.policy_options
+        self.served.policy_options.clone()
     }
 
     fn policy_finding(&self) -> Option<Finding> {
@@ -205,7 +205,7 @@ impl PortfolioServer {
             policy.as_ref(),
             input.include_cash.unwrap_or(true),
             input.include_manual.unwrap_or(true),
-            self.policy_options().possible_breach_min_share,
+            &self.policy_options(),
         );
         let mut warnings = analytics::data_quality(&portfolio);
         if policy.is_none() {

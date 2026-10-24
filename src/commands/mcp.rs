@@ -52,6 +52,12 @@ fn options(matches: &ArgMatches, cfg: &AppConfig) -> McpOptions {
             .ok()
             .flatten()
             .copied(),
+        gain_factors: matches
+            .try_get_many::<(String, Option<f64>)>("gain-factor")
+            .ok()
+            .flatten()
+            .map(|v| v.cloned().collect())
+            .unwrap_or_default(),
         data_dir: get("data-dir").map(std::path::PathBuf::from),
     }
 }

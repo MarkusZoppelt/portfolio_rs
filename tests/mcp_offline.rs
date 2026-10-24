@@ -2616,10 +2616,11 @@ async fn cost_basis_is_no_bound_for_a_material_unpriced_position() {
     client.cancel().await.unwrap();
 }
 
-/// Finance A1(b) (t24 L2): estimated share below the threshold: judged on
-/// the priced part with normal severity, plus a note.
+/// Finance L2 (t24): a crypto cost-basis estimate is never immaterial, however
+/// small: BTC falls through to rule (c). Only the true breaches (Stocks and
+/// Bonds below their bands) are critical; the rest is possible_breach.
 #[tokio::test]
-async fn immaterial_estimated_share_judges_priced_part_with_a_note() {
+async fn crypto_cost_basis_is_never_immaterial() {
     let (_tmp, data, policy) = low_btc_files(r#", "Currency": "USD""#);
     let client = connect(McpOptions {
         file: Some(data),
@@ -2631,23 +2632,117 @@ async fn immaterial_estimated_share_judges_priced_part_with_a_note() {
     let a = ok(&client, "get_allocation", json!({})).await;
     assert!(a["excludedValueShare"].as_f64().unwrap() < 0.5, "{a}");
     let v = ok(&client, "check_policy", json!({})).await;
-    assert!(finding(&v, "breaches", "allocation_out_of_band", "Stocks").is_some());
-    assert!(
-        !codes(&v["findings"]).contains(&"possible_breach".to_string())
-            || v["findings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|f| f["code"] != "possible_breach" || f["assetClass"] == "Crypto"),
-        "{v}"
-    );
-    let note = v["warnings"]
+    let mut criticals: Vec<(String, String)> = v["breaches"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|w| w["code"] == "checks_incomplete")
-        .expect("note");
+        .filter(|f| f["severity"] == "critical")
+        .map(|f| {
+            (
+                f["code"].as_str().unwrap().to_string(),
+                f["assetClass"].to_string(),
+            )
+        })
+        .collect();
+    criticals.sort();
+    assert_eq!(
+        criticals,
+        vec![
+            (
+                "allocation_out_of_band".to_string(),
+                "\"Bonds\"".to_string()
+            ),
+            (
+                "allocation_out_of_band".to_string(),
+                "\"Stocks\"".to_string()
+            ),
+        ],
+        "{v}"
+    );
+    assert!(has_code(&v, "possible_breach").is_some(), "{v}");
+    let note = has_code(&v, "checks_incomplete").expect("note");
+    assert_ne!(note["detail"]["basis"], "priced_part", "{note}");
+    client.cancel().await.unwrap();
+}
+
+/// Finance L2 (t25 OK-nogsg): a commodities cost-basis estimate of 0.08% ×
+/// the default 3× factor = 0.24% stays immaterial, and the note names the
+/// factor. With the factor configured to `never` it becomes material.
+const OK_POSITIONS: &str = r#"[{"Amount": 0.45, "AssetClass": "Crypto", "Name": "Bitcoin", "Purchases": [{"Date": "2025/05/28", "Quantity": 0.45}], "Ticker": "BTC-USD"}, {"Amount": 50000, "AssetClass": "Cash", "Name": "Cash", "Purchases": [{"Date": "2025/07/10", "Quantity": 50000}]}, {"Amount": 50, "AssetClass": "Stocks", "Name": "Stocks", "Purchases": [{"Date": "2025/04/15", "Quantity": 37}, {"Date": "2025/07/03", "Quantity": 13}], "Ticker": "SPY"}, {"Amount": 55, "AssetClass": "Bonds", "Name": "Bonds", "Purchases": [{"Date": "2025/05/10", "Quantity": 55}], "Ticker": "TLT"}, {"Amount": 10, "AssetClass": "Gold", "Name": "Gold", "Purchases": [{"Date": "2025/06/18", "Quantity": 10.0}], "Ticker": "GLD"}, {"Amount": 3, "AssetClass": "Commodities", "Name": "Diversified Commodities", "Purchases": [{"Date": "2025/03/22", "Quantity": 3.0}], "Ticker": "GSG"}]"#;
+
+const OK_POLICY: &str = r#"version = "1.0"
+name = "Fake OK"
+base_currency = "EUR"
+time_horizon_years = 15
+risk_profile = "moderate"
+[constraints]
+minimum_cash_amount = 30000.0
+single_position_limit_percent = 60.0
+asset_class_limit_percent = 60.0
+[[allocations]]
+asset_class = "Stocks"
+target_percent = 20.0
+tolerance_percent = 10.0
+[[allocations]]
+asset_class = "Bonds"
+target_percent = 5.0
+tolerance_percent = 5.0
+[[allocations]]
+asset_class = "Cash"
+target_percent = 50.0
+tolerance_percent = 9.0
+[[allocations]]
+asset_class = "Crypto"
+target_percent = 22.0
+tolerance_percent = 10.0
+[[allocations]]
+asset_class = "Gold"
+target_percent = 2.0
+tolerance_percent = 2.0
+[[allocations]]
+asset_class = "Commodities"
+target_percent = 1.0
+tolerance_percent = 1.0
+"#;
+
+async fn connect_ok_without_gsg(gain_factors: Vec<(String, Option<f64>)>) -> (TempDir, Client) {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("positions.json");
+    let policy = tmp.path().join("policy.toml");
+    std::fs::write(&data, OK_POSITIONS).unwrap();
+    std::fs::write(&policy, OK_POLICY).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data.to_string_lossy().into_owned()),
+        policy: Some(policy.to_string_lossy().into_owned()),
+        quotes: Some(fixture_without(&["GSG"])),
+        gain_factors,
+        ..opts()
+    })
+    .await;
+    (tmp, client)
+}
+
+#[tokio::test]
+async fn commodity_cost_basis_uses_its_gain_factor() {
+    let (_t, client) = connect_ok_without_gsg(vec![]).await;
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert_eq!(v["policyStatus"], "ok", "{v}");
+    let note = has_code(&v, "checks_incomplete").expect("note");
     assert_eq!(note["detail"]["basis"], "priced_part", "{note}");
+    assert_eq!(note["detail"]["gainFactors"]["Commodities"], 3.0, "{note}");
+    let m = note["detail"]["materialityShare"].as_f64().unwrap();
+    let e = note["detail"]["excludedValueShare"].as_f64().unwrap();
+    assert!((m - 3.0 * e).abs() < 0.01 && m < 0.5, "{note}");
+    assert!(
+        note["message"].as_str().unwrap().contains("3x Commodities"),
+        "{note}"
+    );
+    client.cancel().await.unwrap();
+
+    let (_t2, client) = connect_ok_without_gsg(vec![("commodities".into(), None)]).await;
+    let v = ok(&client, "check_policy", json!({})).await;
+    let note = has_code(&v, "checks_incomplete").expect("note");
+    assert_ne!(note["detail"]["basis"], "priced_part", "{note}");
     client.cancel().await.unwrap();
 }
 

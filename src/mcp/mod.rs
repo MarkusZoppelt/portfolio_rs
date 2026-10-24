@@ -50,6 +50,10 @@ pub struct McpOptions {
     /// Drop possible_breach findings when the excluded positions can be at
     /// most this percent of the total (default 0.5).
     pub possible_breach_min_share: Option<f64>,
+    /// Plausible-gain factor overrides for cost-basis estimates (lowercase
+    /// class → factor; `None`: never immaterial). See
+    /// [`analytics::PolicyOptions::gain_factor`].
+    pub gain_factors: Vec<(String, Option<f64>)>,
     /// Snapshot data dir (default: `PORTFOLIO_RS_DATA_DIR`, the workspace's
     /// `portfolio/history`, else the XDG data dir).
     pub data_dir: Option<PathBuf>,
@@ -225,6 +229,7 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
             possible_breach_min_share: opts
                 .possible_breach_min_share
                 .unwrap_or(analytics::DEFAULT_POSSIBLE_BREACH_MIN_SHARE),
+            gain_factors: opts.gain_factors.clone(),
         },
     })
 }

@@ -509,6 +509,12 @@ pub struct Allocation {
     /// Partial, but the excluded positions' estimated share is below the
     /// materiality threshold: judged on the priced part as if complete.
     pub immaterial: bool,
+    /// Excluded share with cost-basis estimates scaled by their class's
+    /// plausible-gain factor (what `immaterial` compares to the threshold);
+    /// `None` when an estimate or a factor is missing.
+    pub materiality_share: Option<f64>,
+    /// Plausible-gain factor used per class with a cost-basis estimate.
+    pub gain_factors: std::collections::BTreeMap<String, f64>,
     pub classes: Vec<ClassAllocation>,
     pub untargeted: Vec<String>,
     pub missing: Vec<String>,
@@ -534,20 +540,24 @@ pub fn allocation(
         policy,
         include_cash,
         include_manual,
-        DEFAULT_POSSIBLE_BREACH_MIN_SHARE,
+        &PolicyOptions::default(),
     )
 }
 
-/// [`allocation`] with the materiality threshold: when the excluded
-/// positions' estimated share is below `min_share` percent, everything is
-/// judged on the priced part as if complete (`immaterial: true`).
+/// [`allocation`] with the materiality rule: the excluded positions are
+/// immaterial (`immaterial: true`, judged on the priced part as if complete)
+/// when every one has an estimate and the estimated share, with each
+/// cost-basis estimate scaled by its class's plausible-gain factor, is below
+/// `opts.possible_breach_min_share`. A cost-basis estimate in a class without
+/// a factor (crypto, single stocks) is never immaterial.
 pub fn allocation_with(
     portfolio: &Portfolio,
     policy: Option<&Policy>,
     include_cash: bool,
     include_manual: bool,
-    min_share: f64,
+    opts: &PolicyOptions,
 ) -> Allocation {
+    let min_share = opts.possible_breach_min_share;
     let included: Vec<&PortfolioPosition> = portfolio
         .positions
         .iter()
@@ -585,7 +595,31 @@ pub fn allocation_with(
             )
         }
     };
-    let immaterial = !complete && excluded_value_share.is_some_and(|v| v < min_share);
+    // Plausible-gain factors: 1 for a last price (rule b), the class factor
+    // for a cost basis; `None` when one has no estimate or no factor.
+    let mut gain_factors: std::collections::BTreeMap<String, f64> = Default::default();
+    let weighted: Option<Decimal> = excluded
+        .iter()
+        .map(|p| {
+            let (v, basis) = p.excluded_estimate()?;
+            let f = match basis {
+                ExcludedBasis::LastPrice => 1.0,
+                _ => {
+                    let f = opts.gain_factor(p.get_asset_class())?;
+                    gain_factors.insert(p.get_asset_class().to_string(), f);
+                    f
+                }
+            };
+            Some(v * dec(f))
+        })
+        .sum();
+    let estimated: Decimal = excluded
+        .iter()
+        .filter_map(|p| p.excluded_estimate().map(|(v, _)| v))
+        .sum();
+    let materiality_share =
+        weighted.map(|w| pct(percent_of(w, total + estimated).unwrap_or(Decimal::ZERO)));
+    let immaterial = !complete && materiality_share.is_some_and(|v| v < min_share);
     // Group case-insensitively, keeping the first spelling seen. A class with
     // any unpriced position has an unknown value (never a partial sum or 0).
     let mut order: Vec<String> = Vec::new();
@@ -683,6 +717,8 @@ pub fn allocation_with(
         total,
         complete,
         immaterial,
+        materiality_share,
+        gain_factors,
         classes,
         untargeted,
         missing,
@@ -770,19 +806,44 @@ pub struct PolicyCheck {
 }
 
 /// Tuning for [`check_policy_with`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PolicyOptions {
     /// When the excluded positions' estimated share is below this percent
     /// of the total, judge the priced part with normal severity (and a note).
     pub possible_breach_min_share: f64,
+    /// Per-class overrides of the plausible-gain factor applied to cost-basis
+    /// estimates (lowercase class → factor; `None`: never immaterial).
+    pub gain_factors: Vec<(String, Option<f64>)>,
 }
 
 pub const DEFAULT_POSSIBLE_BREACH_MIN_SHARE: f64 = 0.5;
+
+/// Default plausible-gain factor for a cost-basis estimate (Finance L2):
+/// diversified classes (funds, ETFs, bonds, gold, commodities) can plausibly
+/// be worth up to 3× cost; crypto, single stocks and any other class have no
+/// plausible bound, so their cost-basis estimate is never immaterial.
+pub const DEFAULT_GAIN_FACTOR: f64 = 3.0;
+
+impl PolicyOptions {
+    /// The plausible-gain factor for a cost-basis estimate in `class`.
+    pub fn gain_factor(&self, class: &str) -> Option<f64> {
+        let key = class.to_lowercase();
+        if let Some((_, f)) = self.gain_factors.iter().find(|(c, _)| *c == key) {
+            return *f;
+        }
+        match key.as_str() {
+            "fund" | "funds" | "etf" | "etfs" | "bond" | "bonds" | "gold" | "commodity"
+            | "commodities" => Some(DEFAULT_GAIN_FACTOR),
+            _ => None,
+        }
+    }
+}
 
 impl Default for PolicyOptions {
     fn default() -> Self {
         Self {
             possible_breach_min_share: DEFAULT_POSSIBLE_BREACH_MIN_SHARE,
+            gain_factors: Vec::new(),
         }
     }
 }
@@ -806,13 +867,7 @@ pub fn check_policy_with(
             format!("Policy failed validation: {e}"),
         ));
     }
-    let alloc = allocation_with(
-        portfolio,
-        Some(policy),
-        true,
-        true,
-        opts.possible_breach_min_share,
-    );
+    let alloc = allocation_with(portfolio, Some(policy), true, true, &opts);
     // Share of the priced positions only (what the priced part alone says).
     let priced_only = |v: Decimal| percent_of(v, alloc.total).map(pct).unwrap_or(0.0);
     let class_priced = |class: &str| -> Decimal {
@@ -1148,13 +1203,27 @@ pub fn check_policy_with(
                 Severity::Warning,
                 Category::DataQuality,
                 format!(
-                    "{} position(s) have no price or FX rate, but their estimated share ({}, {}) is below the {:.2}% \
+                    "{} position(s) have no price or FX rate, but their estimated share ({}, {}{}) is below the {:.2}% \
                      materiality threshold: allocation and limits are judged on the priced part with normal severity.",
                     alloc.excluded_positions.len(),
                     alloc
                         .excluded_value_share
                         .map_or("unknown".to_string(), |s| format!("{s:.2}%")),
                     alloc.excluded_value_basis.unwrap_or("estimate"),
+                    if alloc.gain_factors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {:.2}% with plausible-gain factor {}",
+                            alloc.materiality_share.unwrap_or(0.0),
+                            alloc
+                                .gain_factors
+                                .iter()
+                                .map(|(c, f)| format!("{f}x {c}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    },
                     opts.possible_breach_min_share
                 ),
             )
@@ -1162,6 +1231,8 @@ pub fn check_policy_with(
                             "excludedPositions": alloc.excluded_positions,
                             "excludedValueShare": alloc.excluded_value_share,
                             "excludedValueBasis": alloc.excluded_value_basis,
+                            "materialityShare": alloc.materiality_share,
+                            "gainFactors": alloc.gain_factors,
                             "minShare": opts.possible_breach_min_share })),
         );
     }
