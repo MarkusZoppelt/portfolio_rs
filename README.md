@@ -124,7 +124,8 @@ total portfolio values (including cash).
 
 `portfolio_rs mcp` starts a local, read-only [Model Context Protocol](https://modelcontextprotocol.io)
 server on stdio. The MCP client spawns it as a child process; JSON-RPC goes over
-stdin/stdout and diagnostics go to stderr. It never writes your files or the
+stdin/stdout and diagnostics go to stderr. A line that is not JSON gets a
+JSON-RPC `-32700` parse error (`id: null`) and the server keeps serving. It never writes your files or the
 app config, and it has no network listener.
 
     portfolio_rs mcp example_data.json                    # one positions file
