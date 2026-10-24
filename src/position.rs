@@ -170,10 +170,13 @@ const POSITION_ID_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x7c1e_4a5b_9d2f_4e60_8b3a_1f0c_d5e2_9a47);
 
 /// A deterministic id for a position that has no stored `Id`: `pos_` + a
-/// UUID v5 over name, ticker, asset class and the first purchase (date and
-/// quantity). `occurrence` separates otherwise identical positions. The same
-/// file always yields the same ids, so read-only readers (MCP, API before the
-/// first save) stay stable across restarts.
+/// UUID v5. Market positions are keyed by ticker and asset class only, so
+/// renaming a position or adding a purchase keeps its id. Positions without a
+/// ticker (cash, manual) have nothing better than name, asset class and the
+/// first purchase (date and quantity). `occurrence` separates otherwise
+/// identical positions. The same file always yields the same ids, so read-only
+/// readers (MCP, API before the first save) stay stable across restarts.
+/// Stored ids always win (see [`ensure_position_ids`]).
 pub fn derived_position_id(
     name: Option<&str>,
     ticker: Option<&str>,
@@ -181,6 +184,18 @@ pub fn derived_position_id(
     first_purchase: Option<(Option<&str>, Decimal)>,
     occurrence: usize,
 ) -> String {
+    let ticker = ticker.map(str::trim).filter(|t| !t.is_empty());
+    if let Some(ticker) = ticker {
+        let key = format!(
+            "v2\u{1f}{}\u{1f}{}\u{1f}{occurrence}",
+            ticker.to_uppercase(),
+            asset_class.trim().to_lowercase(),
+        );
+        return format!(
+            "pos_{}",
+            uuid::Uuid::new_v5(&POSITION_ID_NAMESPACE, key.as_bytes()).simple()
+        );
+    }
     let (date, quantity) = match first_purchase {
         Some((d, q)) => (d.unwrap_or(""), q.normalize().to_string()),
         None => ("", String::new()),
@@ -188,7 +203,7 @@ pub fn derived_position_id(
     let key = format!(
         "v1\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{date}\u{1f}{quantity}\u{1f}{occurrence}",
         name.unwrap_or("").trim(),
-        ticker.unwrap_or("").trim().to_uppercase(),
+        "",
         asset_class.trim().to_lowercase(),
     );
     format!(
@@ -916,6 +931,32 @@ mod tests {
         assert_eq!(values[0]["Custom"], 1);
         assert_eq!(values[1]["Id"], "pos_keep");
         assert_ne!(new_position_id(), new_position_id());
+    }
+
+    #[test]
+    fn test_derived_id_ignores_name_for_ticker_positions() {
+        let a = derived_position_id(Some("S&P 500"), Some("spy"), "Stocks", None, 0);
+        let b = derived_position_id(
+            Some("Renamed"),
+            Some(" SPY "),
+            "stocks",
+            Some((Some("2025/01/02"), Decimal::ONE)),
+            0,
+        );
+        assert_eq!(a, b, "name and purchases do not change a ticker id");
+        assert_ne!(
+            a,
+            derived_position_id(Some("S&P 500"), Some("SPY"), "Bonds", None, 0)
+        );
+        assert_ne!(
+            a,
+            derived_position_id(Some("S&P 500"), Some("SPY"), "Stocks", None, 1)
+        );
+        // Stored ids still win.
+        let json = r#"[{"Id": "pos_keep", "Name": "X", "Ticker": "SPY", "AssetClass": "Stocks", "Amount": 1}]"#;
+        let mut v: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(!ensure_json_position_ids(&mut v));
+        assert_eq!(v[0]["Id"], "pos_keep");
     }
 
     #[test]
