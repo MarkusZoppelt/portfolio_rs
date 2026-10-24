@@ -4,6 +4,7 @@ use chrono::Local;
 use eyre::{eyre, Result};
 use serde::Serialize;
 
+use crate::money::{percent_of, to_f64, Decimal};
 use crate::portfolio::Portfolio;
 use crate::position::PriceStatus;
 
@@ -83,26 +84,22 @@ struct PositionContext {
 
 impl PortfolioContext {
     pub fn from_portfolio(portfolio: &Portfolio, currency: &str, network_status: &str) -> Self {
-        let total_value = portfolio.get_total_value();
-        let mut cash_value = 0.0;
-        let mut securities_value = 0.0;
-        let mut allocation: HashMap<String, (f64, usize)> = HashMap::new();
+        let breakdown = portfolio.value_breakdown();
+        let total = breakdown.total;
+        let mut allocation: HashMap<String, (Decimal, usize)> = HashMap::new();
         let mut positions = Vec::new();
         let mut data_quality_flags = Vec::new();
 
         for position in &portfolio.positions {
-            let value = position.market_value();
+            let value_dec = position.balance_dec();
+            let value = to_f64(value_dec);
             let asset_class = position.get_asset_class().to_string();
             let is_cash = position.is_cash();
 
-            if is_cash {
-                cash_value += value;
-            } else {
-                securities_value += value;
-            }
-
-            let allocation_entry = allocation.entry(asset_class.clone()).or_insert((0.0, 0));
-            allocation_entry.0 += value;
+            let allocation_entry = allocation
+                .entry(asset_class.clone())
+                .or_insert((Decimal::ZERO, 0));
+            allocation_entry.0 += value_dec;
             allocation_entry.1 += 1;
 
             if position.get_ticker().is_some() && position.total_invested().is_none() {
@@ -139,7 +136,7 @@ impl PortfolioContext {
                 quantity: position.get_amount(),
                 price: position.get_ticker().map(|_| position.market_price()),
                 value,
-                weight_percent: percent(value, total_value),
+                weight_percent: percent(value_dec, total),
                 average_cost: position.average_cost(),
                 invested: position.total_invested(),
                 pnl: position.pnl(),
@@ -152,8 +149,8 @@ impl PortfolioContext {
             .into_iter()
             .map(|(asset_class, (value, position_count))| AllocationContext {
                 asset_class,
-                value,
-                percent: percent(value, total_value),
+                value: to_f64(value),
+                percent: percent(value, total),
                 position_count,
             })
             .collect::<Vec<_>>();
@@ -165,10 +162,10 @@ impl PortfolioContext {
         let largest_position_percent = positions.first().map(|p| p.weight_percent);
 
         let summary = ContextSummary {
-            total_value,
-            cash_value,
-            securities_value,
-            cash_percent: percent(cash_value, total_value),
+            total_value: to_f64(total),
+            cash_value: to_f64(breakdown.cash),
+            securities_value: to_f64(breakdown.securities),
+            cash_percent: percent(breakdown.cash, total),
             position_count: positions.len(),
             largest_position,
             largest_position_percent,
@@ -349,12 +346,8 @@ fn risk_flags(
     flags
 }
 
-fn percent(value: f64, total: f64) -> f64 {
-    if total > 0.0 {
-        value / total * 100.0
-    } else {
-        0.0
-    }
+fn percent(value: Decimal, total: Decimal) -> f64 {
+    percent_of(value, total).map(to_f64).unwrap_or(0.0)
 }
 
 fn money(value: f64, currency: &str) -> String {
