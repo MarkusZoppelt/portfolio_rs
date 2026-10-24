@@ -2036,3 +2036,45 @@ async fn no_fx_keeps_native_price() {
         .to_string();
     assert!(md.contains("500.00 USD"), "{md}");
 }
+
+/// Finance item 3: an incomplete context nulls the cash weights and shares
+/// derived from the partial total, and leads with an incomplete banner.
+#[tokio::test]
+async fn incomplete_context_nulls_cash_weights_and_has_banner() {
+    let (_t, client) = connect_partial("quotes_no_fx.json").await;
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await["context"].clone();
+    assert_eq!(ctx["complete"], false);
+    let summary = &ctx["summary"];
+    assert!(summary["incomplete"]
+        .as_str()
+        .unwrap()
+        .starts_with("INCOMPLETE"));
+    assert!(summary["cashPercent"].is_null(), "{summary}");
+    assert!(summary["largestPositionPercent"].is_null(), "{summary}");
+    for p in ctx["positions"].as_array().unwrap() {
+        if p["isCash"] == true {
+            assert!(p["weightPercent"].is_null(), "{p}");
+        }
+    }
+    let cash_alloc = ctx["allocation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["assetClass"] == "Cash")
+        .unwrap()
+        .clone();
+    assert!(cash_alloc["percent"].is_null(), "{cash_alloc}");
+    assert!(
+        cash_alloc["value"].is_number(),
+        "cash value itself is known"
+    );
+    let md = ok(&client, "get_context", json!({})).await["markdown"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        md.starts_with("# Portfolio Context\n\n> **INCOMPLETE"),
+        "{md}"
+    );
+    assert!(md.contains("- Cash: ") && md.contains("(n/a)"), "{md}");
+}
