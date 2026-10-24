@@ -200,11 +200,12 @@ impl PortfolioServer {
         self.check_id(&input.portfolio_id)?;
         let portfolio = self.portfolio(false).await;
         let policy = self.served.state.policy().await;
-        let alloc = analytics::allocation(
+        let alloc = analytics::allocation_with(
             &portfolio,
             policy.as_ref(),
             input.include_cash.unwrap_or(true),
             input.include_manual.unwrap_or(true),
+            self.policy_options().possible_breach_min_share,
         );
         let mut warnings = analytics::data_quality(&portfolio);
         if policy.is_none() {

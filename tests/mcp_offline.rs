@@ -2514,10 +2514,10 @@ async fn possible_breaches_are_one_per_class_and_limit() {
     client.cancel().await.unwrap();
 }
 
-/// Finance N2: a bound from a cache entry past max-age is an assumption:
-/// named with its as-of date, and severity is capped at warning.
+/// Finance A1/A2: an expired cache entry only estimates the excluded share;
+/// a 0.01% GSG must not cap BTC's 86% concentration at warning.
 #[tokio::test]
-async fn expired_cache_bounds_cap_severity_at_warning() {
+async fn expired_cache_estimate_is_no_bound_and_tiny_share_keeps_critical() {
     let (tmp, data, policy) = big_files("");
     let seed = McpOptions {
         file: Some(data.clone()),
@@ -2540,16 +2540,114 @@ async fn expired_cache_bounds_cap_severity_at_warning() {
     })
     .await;
     let v = ok(&client, "check_policy", json!({})).await;
-    let f = finding(&v, "warnings", "allocation_out_of_band", "Crypto").expect("capped");
-    assert_eq!(f["severity"], "warning", "{f}");
-    assert_eq!(f["detail"]["severityCappedFrom"], "critical");
-    let a = &f["detail"]["assumptions"][0];
-    assert!(a["asOf"].is_string(), "{f}");
-    assert!(f["message"]
-        .as_str()
+    for code in [
+        "allocation_out_of_band",
+        "single_position_limit",
+        "asset_class_limit",
+    ] {
+        let f = finding(&v, "breaches", code, "Crypto").unwrap_or_else(|| panic!("{code}: {v}"));
+        assert_eq!(f["severity"], "critical", "{f}");
+        assert!(f["detail"].get("severityCappedFrom").is_none(), "{f}");
+    }
+    assert!(!codes(&v["findings"]).contains(&"possible_breach".to_string()));
+    let note = v["warnings"]
+        .as_array()
         .unwrap()
-        .contains("last cached price from"));
-    assert!(finding(&v, "breaches", "allocation_out_of_band", "Crypto").is_none());
+        .iter()
+        .find(|w| w["code"] == "checks_incomplete")
+        .expect("note");
+    assert_eq!(note["detail"]["basis"], "priced_part", "{note}");
+    client.cancel().await.unwrap();
+}
+
+fn low_btc_files(currency: &str) -> (TempDir, String, String) {
+    let (tmp, data, policy) = big_files("");
+    let s = std::fs::read_to_string(&data).unwrap().replace(
+        r#"{"Amount": 10, "AssetClass": "Crypto", "Name": "Bitcoin", "Purchases": [{"Date": "2025/05/28", "Quantity": 10}], "Ticker": "BTC-USD"}"#,
+        &format!(r#"{{"Amount": 0.45, "AssetClass": "Crypto", "Name": "Bitcoin", "Purchases": [{{"Date": "2025/05/28", "Quantity": 0.45, "Price": 1000.0}}], "Ticker": "BTC-USD"{currency}}}"#),
+    );
+    assert!(s.contains("1000.0"));
+    std::fs::write(&data, s).unwrap();
+    (tmp, data, policy)
+}
+
+/// Finance A1 (t21 L1): a cost basis far below the market value is no
+/// bound. With a material estimated share the unpriced BTC is [0, inf):
+/// only certain breaches are critical, the rest is one possible_breach per
+/// class and limit.
+#[tokio::test]
+async fn cost_basis_is_no_bound_for_a_material_unpriced_position() {
+    let (_tmp, data, policy) = low_btc_files("");
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["BTC-USD"])),
+        ..opts()
+    })
+    .await;
+    let a = ok(&client, "get_allocation", json!({})).await;
+    let share = a["excludedValueShare"].as_f64().unwrap();
+    assert!(share > 0.5, "{a}");
+    let v = ok(&client, "check_policy", json!({})).await;
+    // Cash 66% of the priced part could be 51% (truth) or less: not certain.
+    assert!(
+        finding(&v, "breaches", "asset_class_limit", "Cash").is_none(),
+        "{v}"
+    );
+    assert!(
+        finding(&v, "breaches", "allocation_out_of_band", "Cash").is_none(),
+        "{v}"
+    );
+    // Stocks is below its band whatever BTC is worth.
+    let f = finding(&v, "breaches", "allocation_out_of_band", "Stocks").expect("certain");
+    assert_eq!(f["severity"], "critical");
+    let mut seen = std::collections::HashSet::new();
+    for f in v["warnings"].as_array().unwrap() {
+        if f["code"] == "possible_breach" {
+            let key = (f["detail"]["code"].to_string(), f["assetClass"].to_string());
+            assert!(seen.insert(key), "duplicate {f}");
+            assert!(f["message"]
+                .as_str()
+                .unwrap()
+                .contains("of the priced part"));
+        }
+    }
+    assert!(seen.len() >= 2, "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// Finance A1(b) (t24 L2): estimated share below the threshold: judged on
+/// the priced part with normal severity, plus a note.
+#[tokio::test]
+async fn immaterial_estimated_share_judges_priced_part_with_a_note() {
+    let (_tmp, data, policy) = low_btc_files(r#", "Currency": "USD""#);
+    let client = connect(McpOptions {
+        file: Some(data),
+        policy: Some(policy),
+        quotes: Some(fixture_without(&["BTC-USD"])),
+        ..opts()
+    })
+    .await;
+    let a = ok(&client, "get_allocation", json!({})).await;
+    assert!(a["excludedValueShare"].as_f64().unwrap() < 0.5, "{a}");
+    let v = ok(&client, "check_policy", json!({})).await;
+    assert!(finding(&v, "breaches", "allocation_out_of_band", "Stocks").is_some());
+    assert!(
+        !codes(&v["findings"]).contains(&"possible_breach".to_string())
+            || v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["code"] != "possible_breach" || f["assetClass"] == "Crypto"),
+        "{v}"
+    );
+    let note = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "checks_incomplete")
+        .expect("note");
+    assert_eq!(note["detail"]["basis"], "priced_part", "{note}");
     client.cancel().await.unwrap();
 }
 
