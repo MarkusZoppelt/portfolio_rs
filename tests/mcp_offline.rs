@@ -866,7 +866,7 @@ mod stdio {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    fn run(args: &[&str], lines: &[Value]) -> (std::process::Output, Vec<Value>) {
+    fn run<L: std::fmt::Display>(args: &[&str], lines: &[L]) -> (std::process::Output, Vec<Value>) {
         let home = TempDir::new().unwrap();
         let mut child = Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
             .arg("mcp")
@@ -911,6 +911,32 @@ mod stdio {
             .iter()
             .find(|m| m["id"] == id)
             .unwrap_or_else(|| panic!("no response {id}"))
+    }
+
+    /// Finance item 4: a malformed line gets -32700 (id null), the server
+    /// keeps serving, and the diagnostic goes to stderr only.
+    #[test]
+    fn malformed_line_gets_parse_error_and_server_keeps_serving() {
+        let example = example_data();
+        let lines = vec![
+            initialize().to_string(),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
+            "this is not json".to_string(),
+            "{\"jsonrpc\": \"2.0\", \"id\": 7,".to_string(),
+            json!({"jsonrpc":"2.0","id":2,"method":"ping"}).to_string(),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_allocation","arguments":{}}}).to_string(),
+        ];
+        let (output, messages) = run(&["--offline", &example], &lines);
+        let parse_errors: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m["error"]["code"] == -32700)
+            .collect();
+        assert_eq!(parse_errors.len(), 2, "{messages:?}");
+        assert!(parse_errors.iter().all(|m| m["id"].is_null()));
+        assert!(response(&messages, 2)["result"].is_object());
+        assert!(response(&messages, 3)["result"]["structuredContent"]["classes"].is_array());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("malformed input line"), "{stderr}");
     }
 
     #[test]
@@ -960,7 +986,7 @@ mod stdio {
     #[test]
     fn stdio_conflicting_selection_is_a_usage_error() {
         let example = example_data();
-        let (output, messages) = run(&[&example, "--workspace", "/tmp"], &[]);
+        let (output, messages) = run(&[&example, "--workspace", "/tmp"], &[] as &[Value]);
         assert_eq!(output.status.code(), Some(2));
         assert!(messages.is_empty());
     }

@@ -9,6 +9,7 @@
 pub mod analytics;
 pub mod dto;
 mod server;
+pub mod stdio;
 
 pub use server::PortfolioServer;
 
@@ -156,13 +157,14 @@ pub async fn serve_stdio(opts: McpOptions) -> Result<()> {
         "portfolio_rs MCP server: serving portfolio {:?} ({}) on stdio",
         served.id, served.mode
     );
+    let (rx, tx, writer) = stdio::filtered(tokio::io::stdin(), tokio::io::stdout());
     let service = PortfolioServer::new(served)
-        .serve(rmcp::transport::stdio())
+        .serve((rx, tx))
         .await
         .wrap_err("MCP initialization failed")?;
-    service
-        .waiting()
-        .await
-        .wrap_err("MCP server stopped with an error")?;
+    let quit = service.waiting().await;
+    // Let queued responses reach stdout before the process exits.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
+    quit.wrap_err("MCP server stopped with an error")?;
     Ok(())
 }
