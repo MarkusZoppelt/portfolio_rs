@@ -280,9 +280,13 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
             if let Some(date_str) = &purchase.date {
                 if let Some(date) = parse_purchase_date(date_str) {
                     if let Some(price) = purchase.price {
-                        if price > 0.0 && purchase.quantity > 0.0 {
+                        if price > Decimal::ZERO && purchase.quantity > Decimal::ZERO {
                             let days_ago = (now - date).num_days() as f64;
-                            purchase_events.push((date, days_ago, purchase.quantity * price));
+                            purchase_events.push((
+                                date,
+                                days_ago,
+                                to_f64(purchase.quantity * price),
+                            ));
                         }
                     }
                 }
@@ -772,7 +776,7 @@ impl App {
                         self.mode = AppMode::EditPurchase;
                         self.edit_field = EditField::Date;
                         self.purchase_date_input = purchase.date.clone().unwrap_or_default();
-                        self.purchase_quantity_input = purchase.quantity.to_string();
+                        self.purchase_quantity_input = to_f64(purchase.quantity).to_string();
                         // Only prefill price input if Price existed in the original JSON
                         // Otherwise keep empty so auto prices don't get saved accidentally
                         let mut price_from_json: Option<String> = None;
@@ -1839,9 +1843,9 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
         // Add existing purchases (sorted by date, newest first)
         for (display_index, (_original_index, purchase)) in purchase_list.iter().enumerate() {
             let date = purchase.date.as_deref().unwrap_or("No date");
-            let quantity = purchase.quantity;
-            let price = purchase.price.unwrap_or(0.0);
-            let total = quantity * price;
+            let total = to_f64(purchase.quantity * purchase.price.unwrap_or(Decimal::ZERO));
+            let quantity = to_f64(purchase.quantity);
+            let price = purchase.price.map(to_f64).unwrap_or(0.0);
 
             // selected_purchase: 0 = Add New, 1+ = existing purchases
             let style = if (display_index + 1) == app.selected_purchase {

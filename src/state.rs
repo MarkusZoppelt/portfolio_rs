@@ -403,7 +403,7 @@ impl AppState {
             name: req.name,
             ticker: req.ticker,
             asset_class: req.asset_class,
-            amount: req.amount,
+            amount: dec(req.amount),
             last_spot: Decimal::ZERO,
             price_status: crate::position::PriceStatus::Live,
             price_currency: None,
@@ -413,9 +413,9 @@ impl AppState {
                 .into_iter()
                 .map(|p| Purchase {
                     date: p.date,
-                    quantity: p.quantity,
-                    price: p.price,
-                    fees: p.fees,
+                    quantity: dec(p.quantity),
+                    price: p.price.map(dec),
+                    fees: p.fees.map(dec),
                 })
                 .collect(),
             previous_close: None,
@@ -470,9 +470,9 @@ impl AppState {
                     .into_iter()
                     .map(|p| Purchase {
                         date: p.date,
-                        quantity: p.quantity,
-                        price: p.price,
-                        fees: p.fees,
+                        quantity: dec(p.quantity),
+                        price: p.price.map(dec),
+                        fees: p.fees.map(dec),
                     })
                     .collect();
             }
@@ -960,9 +960,9 @@ fn position_to_dto(id: usize, position: &PortfolioPosition) -> PositionDto {
             .iter()
             .map(|p| PurchaseDto {
                 date: p.date.clone(),
-                quantity: p.quantity,
-                price: p.price,
-                fees: p.fees,
+                quantity: to_f64(p.quantity),
+                price: p.price.map(to_f64),
+                fees: p.fees.map(to_f64),
             })
             .collect(),
     }
@@ -1165,8 +1165,8 @@ mod tests {
             PortfolioPosition::for_test(Some("FAKE"), "Stocks", 10.0, 80.0, PriceStatus::Live);
         stock.purchases.push(Purchase {
             date: None,
-            quantity: 10.0,
-            price: Some(100.0),
+            quantity: dec(10.0),
+            price: Some(dec(100.0)),
             fees: None,
         });
         // Balance would count as profit under total-value-minus-invested; the
@@ -1174,8 +1174,8 @@ mod tests {
         let mut cash = PortfolioPosition::for_test(None, "Cash", 5_000.0, 0.0, PriceStatus::Live);
         cash.purchases.push(Purchase {
             date: None,
-            quantity: 1.0,
-            price: Some(8_000.0),
+            quantity: dec(1.0),
+            price: Some(dec(8_000.0)),
             fees: None,
         });
 

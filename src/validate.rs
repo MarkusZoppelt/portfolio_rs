@@ -1,6 +1,7 @@
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
+use crate::money::{to_f64, Decimal};
 use crate::position::from_string;
 use crate::services::portfolio_loader::load_portfolio_file;
 
@@ -97,8 +98,8 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
 
         let purchases = pos.get_purchases();
         if !purchases.is_empty() {
-            let purchase_sum: f64 = purchases.iter().map(|p| p.quantity).sum();
-            // Tolerate float noise from summing purchase quantities.
+            let purchase_sum = to_f64(purchases.iter().map(|p| p.quantity).sum::<Decimal>());
+            // Tolerance kept from the f64 era (input numbers are parsed from f64).
             if (purchase_sum - amount).abs() > 1e-6 {
                 issues.push(ValidationIssue {
                     severity: ValidationSeverity::Warning,
@@ -111,7 +112,7 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
             }
 
             for purchase in purchases {
-                if let Some(price) = purchase.price {
+                if let Some(price) = purchase.price.map(to_f64) {
                     if price < 0.0 {
                         issues.push(ValidationIssue {
                             severity: ValidationSeverity::Error,
