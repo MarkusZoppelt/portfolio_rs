@@ -791,35 +791,7 @@ impl App {
                                     // Find the position in original data by matching identifiers
                                     for pos_val in original_data.iter() {
                                         if let Some(obj) = pos_val.as_object() {
-                                            let name_match = match (
-                                                selected_pos.get_name_option(),
-                                                obj.get("Name"),
-                                            ) {
-                                                (Some(sel_name), Some(json_name)) => {
-                                                    json_name.as_str() == Some(sel_name)
-                                                }
-                                                (None, None) => true,
-                                                _ => false,
-                                            };
-
-                                            let ticker_match = match (
-                                                selected_pos.get_ticker(),
-                                                obj.get("Ticker"),
-                                            ) {
-                                                (Some(sel_ticker), Some(json_ticker)) => {
-                                                    json_ticker.as_str() == Some(sel_ticker)
-                                                }
-                                                (None, None) => true,
-                                                _ => false,
-                                            };
-
-                                            let asset_class_match = obj
-                                                .get("AssetClass")
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s == selected_pos.get_asset_class())
-                                                .unwrap_or(false);
-
-                                            if name_match && ticker_match && asset_class_match {
+                                            if json_matches_position(obj, selected_pos) {
                                                 // Found the matching position, now get the purchase price
                                                 if let Some(purchases_val) = obj.get("Purchases") {
                                                     if let Some(arr) = purchases_val.as_array() {
@@ -998,27 +970,7 @@ impl App {
             let mut found = false;
             for pos_val in original_data.iter_mut() {
                 if let Some(obj) = pos_val.as_object() {
-                    let name_match = match (selected_position.get_name_option(), obj.get("Name")) {
-                        (Some(sel_name), Some(json_name)) => json_name.as_str() == Some(sel_name),
-                        (None, None) => true,
-                        _ => false,
-                    };
-
-                    let ticker_match = match (selected_position.get_ticker(), obj.get("Ticker")) {
-                        (Some(sel_ticker), Some(json_ticker)) => {
-                            json_ticker.as_str() == Some(sel_ticker)
-                        }
-                        (None, None) => true,
-                        _ => false,
-                    };
-
-                    let asset_class_match = obj
-                        .get("AssetClass")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == selected_position.get_asset_class())
-                        .unwrap_or(false);
-
-                    if name_match && ticker_match && asset_class_match {
+                    if json_matches_position(obj, selected_position) {
                         // Apply the update function to this position
                         updater(pos_val)?;
                         found = true;
@@ -2895,4 +2847,63 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
         .style(Style::default().fg(Color::White));
 
     f.render_widget(list, area);
+}
+
+/// Whether a raw JSON position object is the same position as `pos`.
+///
+/// Matches by `Id` when both sides have one, so two positions with the same
+/// name, ticker and class are never confused. Falls back to name + ticker +
+/// asset class for files written before ids existed.
+fn json_matches_position(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    pos: &crate::position::PortfolioPosition,
+) -> bool {
+    if let (Some(id), Some(json_id)) = (pos.id(), obj.get("Id").and_then(|v| v.as_str())) {
+        return id == json_id;
+    }
+    let str_field = |key: &str| obj.get(key).and_then(|v| v.as_str());
+    let name_match = match (pos.get_name_option(), obj.get("Name")) {
+        (Some(name), Some(_)) => str_field("Name") == Some(name),
+        (None, None) => true,
+        _ => false,
+    };
+    let ticker_match = match (pos.get_ticker(), obj.get("Ticker")) {
+        (Some(ticker), Some(_)) => str_field("Ticker") == Some(ticker),
+        (None, None) => true,
+        _ => false,
+    };
+    let asset_class_match = str_field("AssetClass") == Some(pos.get_asset_class());
+    name_match && ticker_match && asset_class_match
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::position::{PortfolioPosition, PriceStatus};
+
+    fn raw(id: Option<&str>, class: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut v = serde_json::json!({"Ticker": "FAKE", "AssetClass": class, "Amount": 1});
+        if let Some(id) = id {
+            v["Id"] = serde_json::json!(id);
+        }
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn test_json_matches_position_prefers_id() {
+        let mut pos =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 1.0, 10.0, PriceStatus::Live);
+        // No ids: legacy ticker/class match.
+        assert!(json_matches_position(&raw(None, "Stocks"), &pos));
+        assert!(!json_matches_position(&raw(None, "Bonds"), &pos));
+        // Same ticker and class but another id is a different position.
+        pos.id = Some("pos_aaa".to_string());
+        assert!(json_matches_position(&raw(Some("pos_aaa"), "Stocks"), &pos));
+        assert!(!json_matches_position(
+            &raw(Some("pos_bbb"), "Stocks"),
+            &pos
+        ));
+        // Id on one side only: legacy match.
+        assert!(json_matches_position(&raw(None, "Stocks"), &pos));
+    }
 }
