@@ -64,6 +64,28 @@ pub struct CacheFile {
     pub quotes: BTreeMap<String, CacheEntry>,
     #[serde(default)]
     pub fx: BTreeMap<String, CacheEntry>,
+    /// Historic closes used to fill purchase prices, keyed
+    /// `SYMBOL|on|after|before|YYYY-MM-DD`; they never expire.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub closes: BTreeMap<String, f64>,
+}
+
+/// Largest accepted clock skew for a cached `asOf` in the future.
+const MAX_FUTURE_SKEW: Duration = Duration::days(1);
+
+/// Whether a cached entry can be served at all (any age): a positive finite
+/// price, a parseable timestamp at most [`MAX_FUTURE_SKEW`] ahead, and a
+/// currency for quotes (an FX pair implies its currencies).
+fn usable(symbol: &str, e: &CacheEntry) -> bool {
+    e.price > 0.0
+        && e.price.is_finite()
+        && e.timestamp()
+            .is_some_and(|t| t <= Utc::now() + MAX_FUTURE_SKEW)
+        && (is_fx(symbol) || e.currency.as_deref().is_some_and(|c| !c.trim().is_empty()))
+}
+
+fn close_key(symbol: &str, kind: &str, date: DateTime<Utc>) -> String {
+    format!("{symbol}|{kind}|{}", date.format("%Y-%m-%d"))
 }
 
 fn is_fx(symbol: &str) -> bool {
@@ -113,7 +135,15 @@ impl CachedProvider {
             .as_deref()
             .and_then(|p| match std::fs::read_to_string(p) {
                 Ok(json) => match serde_json::from_str::<CacheFile>(&json) {
-                    Ok(f) => Some(f),
+                    Ok(f) if f.version == VERSION => Some(f),
+                    Ok(f) => {
+                        eprintln!(
+                            "Warning: ignoring quote cache {} with unknown version {}",
+                            p.display(),
+                            f.version
+                        );
+                        None
+                    }
                     Err(e) => {
                         eprintln!("Warning: ignoring invalid quote cache {}: {e}", p.display());
                         None
@@ -144,6 +174,47 @@ impl CachedProvider {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Last known quote for `symbol` at any age (valid entries only).
+    pub fn last_known_entry(&self, symbol: &str) -> Option<(f64, Option<String>)> {
+        let st = self.lock();
+        let map = if is_fx(symbol) {
+            &st.file.fx
+        } else {
+            &st.file.quotes
+        };
+        map.get(symbol)
+            .filter(|e| usable(symbol, e))
+            .map(|e| (e.price, e.currency.clone()))
+    }
+
+    async fn cached_close(
+        &self,
+        symbol: &str,
+        kind: &str,
+        date: DateTime<Utc>,
+        fetched: Result<f64, QuoteError>,
+    ) -> Result<f64, QuoteError> {
+        let key = close_key(symbol, kind, date);
+        match fetched {
+            Ok(v) if v > 0.0 && v.is_finite() => {
+                let mut st = self.lock();
+                if st.file.closes.get(&key) != Some(&v) {
+                    st.file.closes.insert(key, v);
+                    st.dirty = true;
+                }
+                Ok(v)
+            }
+            other => self
+                .lock()
+                .file
+                .closes
+                .get(&key)
+                .copied()
+                .filter(|v| *v > 0.0 && v.is_finite())
+                .map_or(other, Ok),
+        }
     }
 
     fn fresh(&self, entry: &CacheEntry) -> bool {
@@ -212,8 +283,12 @@ impl QuoteProvider for CachedProvider {
                 } else {
                     &st.file.quotes
                 };
-                match map.get(symbol).filter(|e| self.fresh(e)).cloned() {
-                    Some(e) if e.price > 0.0 && e.price.is_finite() => {
+                match map
+                    .get(symbol)
+                    .filter(|e| usable(symbol, e) && self.fresh(e))
+                    .cloned()
+                {
+                    Some(e) => {
                         st.served.insert(symbol.to_string());
                         Ok(Quote {
                             price: e.price,
@@ -251,7 +326,8 @@ impl QuoteProvider for CachedProvider {
     }
 
     async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
-        self.inner.base_close_on(symbol, date).await
+        let fetched = self.inner.base_close_on(symbol, date).await;
+        self.cached_close(symbol, "on", date, fetched).await
     }
 
     async fn close_on_or_after(
@@ -259,11 +335,17 @@ impl QuoteProvider for CachedProvider {
         symbol: &str,
         date: DateTime<Utc>,
     ) -> Result<f64, QuoteError> {
-        self.inner.base_close_on(symbol, date).await
+        let fetched = self.inner.base_close_on(symbol, date).await;
+        self.cached_close(symbol, "on", date, fetched).await
     }
 
     async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
-        self.inner.base_close_before(symbol, date).await
+        let fetched = self.inner.base_close_before(symbol, date).await;
+        self.cached_close(symbol, "before", date, fetched).await
+    }
+
+    fn last_known(&self, symbol: &str) -> Option<(f64, Option<String>)> {
+        self.last_known_entry(symbol)
     }
 
     async fn name(&self, symbol: &str) -> Option<String> {
@@ -323,5 +405,83 @@ mod tests {
         let expired = CachedProvider::new(AnyProvider::Offline, Some(path.clone()), 0, false);
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(expired.latest("FAKE").await.is_err());
+    }
+
+    fn write(path: &Path, json: &str) {
+        std::fs::write(path, json).unwrap();
+    }
+
+    /// Finance retest B5/B6/L3: future timestamps beyond a day, entries
+    /// without a currency and unknown versions are not served.
+    #[tokio::test]
+    async fn test_invalid_entries_and_versions_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        let now = Utc::now();
+        let ts = |d: Duration| (now + d).to_rfc3339();
+        let file = serde_json::json!({
+            "version": 1,
+            "quotes": {
+                "OK": {"price": 1.0, "currency": "EUR", "asOf": ts(Duration::hours(-1)), "fetchedAt": ts(Duration::zero())},
+                "SKEW": {"price": 1.0, "currency": "EUR", "asOf": ts(Duration::hours(12)), "fetchedAt": ts(Duration::zero())},
+                "FUTURE": {"price": 1.0, "currency": "EUR", "asOf": "2030-01-01T00:00:00Z", "fetchedAt": "2030-01-01T00:00:00Z"},
+                "NOCCY": {"price": 1.0, "asOf": ts(Duration::hours(-1)), "fetchedAt": ts(Duration::zero())},
+                "BLANKCCY": {"price": 1.0, "currency": " ", "asOf": ts(Duration::hours(-1)), "fetchedAt": ts(Duration::zero())}
+            },
+            "fx": {"EURUSD=X": {"price": 1.1, "asOf": ts(Duration::hours(-1)), "fetchedAt": ts(Duration::zero())}}
+        });
+        write(&path, &file.to_string());
+        let c = CachedProvider::new(AnyProvider::Offline, Some(path.clone()), 7, false);
+        assert!(c.latest("OK").await.is_ok());
+        assert!(c.latest("SKEW").await.is_ok(), "small skew is tolerated");
+        assert!(c.latest("FUTURE").await.is_err());
+        assert!(c.latest("NOCCY").await.is_err());
+        assert!(c.latest("BLANKCCY").await.is_err());
+        assert!(
+            c.latest("EURUSD=X").await.is_ok(),
+            "FX pairs need no currency"
+        );
+        assert!(c.last_known_entry("FUTURE").is_none());
+
+        let mut v99 = file.clone();
+        v99["version"] = 99.into();
+        write(&path, &v99.to_string());
+        let c = CachedProvider::new(AnyProvider::Offline, Some(path.clone()), 7, false);
+        assert!(c.latest("OK").await.is_err(), "unknown version is ignored");
+        assert!(c.last_known_entry("OK").is_none());
+    }
+
+    /// B7 / A5: historic closes are cached for offline cost basis; the last
+    /// known price is available beyond the max age.
+    #[tokio::test]
+    async fn test_closes_cached_and_last_known_ignores_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        let date = DateTime::parse_from_rfc3339("2025-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let live = CachedProvider::new(
+            fixture(
+                r#"{"latest": {"FAKE": {"price": 2.5, "currency": "EUR"}}, "close_on": {"FAKE": 2.0}}"#,
+            ),
+            Some(path.clone()),
+            7,
+            true,
+        );
+        live.latest("FAKE").await.unwrap();
+        assert_eq!(live.close_on_or_after("FAKE", date).await.unwrap(), 2.0);
+        live.flush().unwrap();
+        let offline = CachedProvider::new(AnyProvider::Offline, Some(path.clone()), 0, false);
+        assert_eq!(offline.close_on_or_after("FAKE", date).await.unwrap(), 2.0);
+        assert!(offline
+            .close_on_or_after("FAKE", date + Duration::days(1))
+            .await
+            .is_err());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(
+            offline.latest("FAKE").await.is_err(),
+            "expired for current values"
+        );
+        assert_eq!(offline.last_known_entry("FAKE").map(|e| e.0), Some(2.5));
     }
 }

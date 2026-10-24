@@ -204,7 +204,7 @@ impl PortfolioContext {
                 && !position.has_complete_cost_basis()
             {
                 data_quality_flags.push(format!(
-                    "Missing cost basis for {}; add Purchase Price entries to improve PnL analysis.",
+                    "Missing cost basis for {}; historic closes or FX rates for its purchases are unavailable (recorded Purchase Price entries avoid the lookup).",
                     position.get_name()
                 ));
             }

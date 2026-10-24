@@ -157,6 +157,11 @@ measured from `asOf`): the position gets `priceSource: "cache"`,
 count toward `complete`; every response adds `hasStale`, `stalePositions` and
 `priceAsOf` (the oldest price used).
 
+The cache also keeps the historic closes used to fill missing purchase prices,
+so cost basis and PnL survive offline runs. Entries are only served with a
+positive price, a timestamp at most one day in the future and (for quotes) a
+currency; a cache file with an unknown `version` is ignored with a warning.
+
 Without an FX rate for its quote currency a position keeps its native `price`,
 `priceCurrency`, `priceAsOf` and day change (`priceStatus: "fx_unavailable"`);
 only base-currency values (`valueBase`, `weightPercent`, ...) are null.
