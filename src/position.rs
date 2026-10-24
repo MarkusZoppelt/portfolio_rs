@@ -21,6 +21,22 @@ static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> =
 static HISTORIC_CACHE: Lazy<Mutex<HistoricCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// How an unpriced position's value was estimated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExcludedBasis {
+    LastPrice,
+    CostBasis,
+}
+
+impl ExcludedBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LastPrice => "last_price",
+            Self::CostBasis => "cost_basis",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct Purchase {
@@ -145,6 +161,12 @@ pub struct PortfolioPosition {
     // Not persisted. Whether the FX rate came from the last-known-price cache.
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) fx_from_cache: bool,
+
+    // Not persisted. Estimated base value of an unpriced position (last
+    // cached price at any age, else cost basis) and which basis was used.
+    // Only used to size what is excluded from totals, never as a value.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) excluded_estimate: Option<(Decimal, ExcludedBasis)>,
 
     // Not persisted. Base-currency units per 1 unit of `price_currency`.
     // None means no conversion (same currency or unknown).
@@ -383,6 +405,11 @@ impl PortfolioPosition {
     }
 
     /// live | cache | fixture for a priced market position, None otherwise.
+    /// Estimated base value while unpriced; see `excluded_estimate`.
+    pub fn excluded_estimate(&self) -> Option<(Decimal, ExcludedBasis)> {
+        self.excluded_estimate
+    }
+
     pub fn price_source(&self) -> Option<crate::services::quotes::PriceSource> {
         self.price_source
     }
@@ -593,6 +620,7 @@ impl PortfolioPosition {
             price_as_of: None,
             price_source: None,
             fx_from_cache: false,
+            excluded_estimate: None,
             fx_rate: None,
         }
     }
@@ -1046,6 +1074,7 @@ mod tests {
             price_as_of: None,
             price_source: None,
             fx_from_cache: false,
+            excluded_estimate: None,
             fx_rate: None,
             purchases: vec![],
             previous_close: None,
@@ -1085,6 +1114,7 @@ mod tests {
             price_as_of: None,
             price_source: None,
             fx_from_cache: false,
+            excluded_estimate: None,
             fx_rate: None,
             purchases: vec![Purchase {
                 date: Some("2024-01-15".to_string()),

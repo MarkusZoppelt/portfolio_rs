@@ -418,6 +418,7 @@ impl AppState {
             price_as_of: None,
             price_source: None,
             fx_from_cache: false,
+            excluded_estimate: None,
             fx_rate: None,
             purchases: req
                 .purchases

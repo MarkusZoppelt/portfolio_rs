@@ -185,7 +185,13 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "checks_incomplete",
         "policy",
         "warning",
-        "Data is incomplete; drift and percentage limits that cannot be judged were skipped.",
+        "Prices or FX rates are missing; allocation and limits are judged on the priced part and only certain breaches are reported.",
+    ),
+    (
+        "possible_breach",
+        "allocation|constraint",
+        "warning",
+        "With missing prices a band or limit might be violated; checked on a partial basis, not a confirmed breach.",
     ),
     (
         "no_live_price",
@@ -456,19 +462,28 @@ pub struct ClassAllocation {
     pub asset_class: String,
     /// Null when a position in the class has no price or FX rate.
     pub value: Option<f64>,
-    /// Share of the priced total; null when the class value is unknown.
+    /// Share of the total; null when the class value or the total is unknown
+    /// (any included position unpriced).
     pub actual_percent: Option<f64>,
+    /// With unpriced positions: the lowest and highest possible share,
+    /// whatever the excluded positions are worth (0 up to their maximum
+    /// plausible value, see README). Absent when the total is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_percent_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_percent_max: Option<f64>,
     pub target_percent: Option<f64>,
     pub tolerance_percent: Option<f64>,
     pub band_low: Option<f64>,
     pub band_high: Option<f64>,
     /// actualPercent - targetPercent, in percentage points.
     pub drift_points: Option<f64>,
-    /// within_band | below_band | above_band | untargeted | unknown
-    /// (unknown: targeted, but the class holds an unpriced position).
+    /// within_band | below_band | above_band | untargeted | unknown. With
+    /// unpriced positions a band status is only set when it holds for the
+    /// whole possible range; otherwise unknown.
     pub status: String,
     /// Base-currency amount to buy (positive) or sell (negative) to reach the
-    /// target against the priced total; null when the class value is unknown.
+    /// target; null when the class value or the total is unknown.
     pub amount_to_target: Option<f64>,
 }
 
@@ -485,17 +500,25 @@ pub struct AllocationOutput {
     /// Ids of positions without a base value; drift and percentages cover the
     /// priced part only.
     pub excluded_positions: Vec<String>,
-    /// Excluded positions' share at cost basis (percent of priced total plus
-    /// their cost basis); null when a cost basis is unknown too.
+    /// Excluded positions' estimated share (percent of priced total plus
+    /// their estimate); null when one of them has no estimate.
     pub excluded_value_share: Option<f64>,
+    /// last_price (last cached price, any age) | cost_basis (at least one
+    /// position fell back to cost basis); null without a share.
+    pub excluded_value_basis: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConstraintCheckRow {
     pub code: String,
     pub limit_percent: Option<f64>,
+    /// Null when judged on a partial total; see the min/max range then.
     pub actual_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_percent_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_percent_max: Option<f64>,
     pub limit_amount: Option<f64>,
     pub actual_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

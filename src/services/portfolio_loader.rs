@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::config::configured_base_currency;
 use crate::position::{
-    apply_quote_result, from_string, fx_symbol, handle_position_with, PortfolioPosition,
-    PriceStatus,
+    apply_quote_result, from_string, fx_symbol, handle_position_with, ExcludedBasis,
+    PortfolioPosition, PriceStatus,
 };
 use crate::services::quotes::{AnyProvider, QuoteProvider};
 use crate::tui::NetworkStatus;
@@ -185,6 +185,56 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
                 .price_currency()
                 .and_then(|ccy| fx_symbol(base_currency, ccy))
                 .is_some_and(|(symbol, _)| fx_cached.contains(&symbol));
+    }
+
+    // Size what is excluded from totals: last cached price (any age), else
+    // cost basis, converted with the current or last cached FX rate.
+    let fx_for = |ccy: &str| -> Option<crate::money::Decimal> {
+        let (symbol, scale) = fx_symbol(base_currency, ccy)?;
+        if symbol.is_empty() {
+            return Some(dec(scale));
+        }
+        let price = fx_prices
+            .get(&symbol)
+            .copied()
+            .flatten()
+            .or_else(|| provider.last_known(&symbol).map(|(p, _)| p))
+            .filter(|p| *p > 0.0 && p.is_finite())?;
+        div(dec(scale), dec(price))
+    };
+    for position in &mut portfolio.positions {
+        let Some(ticker) = position.get_ticker().map(str::to_string) else {
+            continue;
+        };
+        if position.has_market_price() {
+            continue;
+        }
+        let qty = position.quantity_dec();
+        let last = if position.has_native_price() {
+            position
+                .price_currency()
+                .map(|c| (position.last_spot, c.to_string()))
+        } else {
+            provider
+                .last_known(&ticker)
+                .and_then(|(p, c)| Some((dec(p), c?)))
+        };
+        let from_last = last.and_then(|(price, ccy)| Some(price * qty * fx_for(&ccy)?));
+        position.excluded_estimate = match from_last {
+            Some(v) if v > crate::money::Decimal::ZERO => Some((v, ExcludedBasis::LastPrice)),
+            _ => {
+                let ccy = position
+                    .price_currency()
+                    .map(str::to_string)
+                    .or_else(|| provider.last_known(&ticker).and_then(|(_, c)| c));
+                position
+                    .average_cost_dec()
+                    .zip(ccy.and_then(|c| fx_for(&c)))
+                    .map(|(cost, fx)| cost * qty * fx)
+                    .filter(|v| *v > crate::money::Decimal::ZERO)
+                    .map(|v| (v, ExcludedBasis::CostBasis))
+            }
+        };
     }
 
     if log_errors {

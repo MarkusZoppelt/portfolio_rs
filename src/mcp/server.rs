@@ -219,6 +219,7 @@ impl PortfolioServer {
             missing_classes: alloc.missing,
             excluded_positions: alloc.excluded_positions,
             excluded_value_share: alloc.excluded_value_share,
+            excluded_value_basis: alloc.excluded_value_basis.map(String::from),
         }))
     }
 
