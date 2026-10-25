@@ -2965,7 +2965,8 @@ async fn performance_from_seeded_snapshots_splits_change() {
     )
     .await;
     assert_eq!(v["dataStatus"], "complete", "{v}");
-    assert_eq!(v["from"], day(-6));
+    // Reported `from` is the base snapshot, not the requested week start.
+    assert_eq!(v["from"], day(-8));
     assert_eq!(v["dataCoverage"]["startPointDate"], day(-8));
     assert_eq!(v["dataCoverage"]["endIsLive"], true);
     let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k} null: {v}"));
@@ -3000,6 +3001,10 @@ async fn performance_without_history_or_with_partial_data_is_null() {
     .await;
     let v = ok(&client, "get_performance", json!({"period": "ytd"})).await;
     assert!(v["change"].is_null(), "{v}");
+    assert!(v["startValue"].is_null(), "{v}");
+    assert_eq!(v["method"], "none", "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "insufficient_history", "{v}");
     assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
     assert_eq!(
         err(
@@ -3077,6 +3082,8 @@ async fn performance_start_point_has_a_maximum_age() {
     let v = ok(&client, "get_performance", json!({"period": "week"})).await;
     assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
     assert!(v["change"].is_null(), "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "insufficient_history", "{v}");
     assert!(v["endValue"].is_number(), "live end kept: {v}");
     let v = ok(
         &client,
@@ -3085,6 +3092,8 @@ async fn performance_start_point_has_a_maximum_age() {
     )
     .await;
     assert!(v["change"].is_number(), "{v}");
+    assert_eq!(v["from"], day(-20), "{v}");
+    assert_eq!(v["dataCoverage"]["startPointDate"], day(-20), "{v}");
     assert!(has_code(&v, "start_point_gap").is_some(), "{v}");
     // Custom range after the only snapshot: never start = end from before.
     let v = ok(
@@ -3696,8 +3705,11 @@ async fn since_inception_with_only_today_is_insufficient_history() {
     .await;
     assert_eq!(v["method"], "none", "{v}");
     assert!(v["change"].is_null(), "{v}");
+    assert!(v["startValue"].is_null(), "{v}");
     assert!(v["netContributions"].is_null(), "{v}");
     assert!(v["marketEffect"].is_null(), "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "insufficient_history", "{v}");
     let from = v["from"].as_str().unwrap();
     let to = v["to"].as_str().unwrap();
     assert!(from <= to, "{from} > {to}: {v}");
@@ -3705,6 +3717,153 @@ async fn since_inception_with_only_today_is_insufficient_history() {
     assert_eq!((from, to), (today.as_str(), today.as_str()), "{v}");
     assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
     assert!(has_code(&v, "performance_twr_unavailable").is_none(), "{v}");
+
+    // Same path: period day with only today's snapshot has no start before today.
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert_eq!(v["method"], "none", "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "insufficient_history", "{v}");
+    assert!(v["change"].is_null() && v["startValue"].is_null(), "{v}");
+    assert!(
+        v["netContributions"].is_null() && v["marketEffect"].is_null(),
+        "{v}"
+    );
+    assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
+    assert!(has_code(&v, "performance_twr_unavailable").is_none(), "{v}");
+    let from = v["from"].as_str().unwrap();
+    let to = v["to"].as_str().unwrap();
+    assert!(from <= to, "{from} > {to}: {v}");
+    assert_eq!((from, to), (today.as_str(), today.as_str()), "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// Snapshots only on D-1 and D: `from` is the base when one is used, and
+/// `snapshotDays` counts the same points in every period.
+#[tokio::test]
+async fn performance_from_and_snapshot_days_follow_the_base_point() {
+    let tmp = TempDir::new().unwrap();
+    seed_history(tmp.path(), &[-1, 0]).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let mut days = Vec::new();
+    for period in ["day", "since_inception"] {
+        let v = ok(&client, "get_performance", json!({"period": period})).await;
+        assert_eq!(v["from"], day(-1), "{period}: {v}");
+        assert_eq!(v["to"], day(0), "{period}: {v}");
+        assert!(
+            v["from"].as_str().unwrap() <= v["to"].as_str().unwrap(),
+            "{v}"
+        );
+        assert_eq!(
+            v["dataCoverage"]["startPointDate"],
+            day(-1),
+            "{period}: {v}"
+        );
+        assert_eq!(v["dataCoverage"]["snapshotDays"], 2, "{period}: {v}");
+        assert_eq!(v["dataCoverage"]["missingDays"], 0, "{period}: {v}");
+        assert!(v["change"].is_number(), "{period}: {v}");
+        assert_eq!(v["dataStatus"], "complete", "{period}: {v}");
+        days.push(v["dataCoverage"]["snapshotDays"].as_u64().unwrap());
+    }
+    assert_eq!(days, [2, 2]);
+
+    let v = ok(&client, "get_performance", json!({"period": "week"})).await;
+    assert_eq!(v["from"], day(-6), "{v}");
+    assert_eq!(v["to"], day(0), "{v}");
+    assert!(v["dataCoverage"]["startPointDate"].is_null(), "{v}");
+    assert_eq!(v["dataCoverage"]["snapshotDays"], 2, "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["dataStatus"], "insufficient_history", "{v}");
+    assert_eq!(v["method"], "none", "{v}");
+    assert!(has_code(&v, "insufficient_history").is_some(), "{v}");
+    assert!(
+        v["startValue"].is_null() && v["change"].is_null() && v["marketEffect"].is_null(),
+        "{v}"
+    );
+    for period in ["month", "ytd"] {
+        let v = ok(&client, "get_performance", json!({"period": period})).await;
+        assert_eq!(v["dataStatus"], "insufficient_history", "{period}: {v}");
+        assert_eq!(v["complete"], false, "{period}: {v}");
+        assert_eq!(v["method"], "none", "{period}: {v}");
+        assert!(
+            v["startValue"].is_null() && v["change"].is_null(),
+            "{period}: {v}"
+        );
+    }
+    client.cancel().await.unwrap();
+}
+
+/// Totals are the sum of rounded per-position values, not a rounding of the
+/// unrounded sum (1.375 + 1.375 → 2.76, not 2.75).
+#[tokio::test]
+async fn totals_match_the_sum_of_rounded_position_values() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("positions.json");
+    let positions = json!([
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 1.375},
+        {"Name": "Bar", "AssetClass": "Gold", "Amount": 1.375}
+    ]);
+    std::fs::write(&data, positions.to_string()).unwrap();
+    let data = data.to_string_lossy().into_owned();
+    let client = connect(McpOptions {
+        file: Some(data.clone()),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let values: Vec<f64> = v["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["valueBase"].as_f64().unwrap())
+        .collect();
+    assert_eq!(values, vec![1.38, 1.38], "{v}");
+    let sum: f64 = values.iter().sum();
+    let rounded_sum = (sum * 100.0).round() / 100.0;
+    assert_eq!(v["totalValue"], rounded_sum, "{v}");
+    assert_eq!(v["totalValue"], 2.76, "{v}");
+    assert_eq!(v["cashValue"], 1.38, "{v}");
+
+    let a = ok(&client, "get_allocation", json!({})).await;
+    assert_eq!(a["totalValue"], v["totalValue"], "{a}");
+    let classes = a["classes"].as_array().unwrap();
+    assert!(
+        classes.iter().all(|c| c["value"].as_f64() == Some(1.38)),
+        "{a}"
+    );
+    let class_sum: f64 = classes.iter().map(|c| c["value"].as_f64().unwrap()).sum();
+    assert_eq!((class_sum * 100.0).round() / 100.0, a["totalValue"], "{a}");
+
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    assert_eq!(
+        ctx["context"]["summary"]["totalValue"], v["totalValue"],
+        "{ctx}"
+    );
+    assert_eq!(ctx["context"]["summary"]["cashValue"], 1.38, "{ctx}");
+
+    let (path, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
+        file: Some(data),
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await
+    .unwrap();
+    let mut snap: Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    snap["date"] = json!(day(-1));
+    std::fs::write(&path, format!("{snap}\n")).unwrap();
+    let p = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert_eq!(p["endValue"], v["totalValue"], "{p}");
     client.cancel().await.unwrap();
 }
 

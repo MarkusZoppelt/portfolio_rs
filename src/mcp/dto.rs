@@ -30,6 +30,17 @@ pub fn money_f(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Sum of already-rounded money amounts, rounded once more so binary float
+/// noise cannot move the total by a cent.
+///
+/// Portfolio totals must be this sum of the reported per-position values, not
+/// `money` of the unrounded sum: those differ by 0.01 when several `.xx5`
+/// fractions round the same way (1.375 + 1.375 is 2.75 rounded, but 1.38 + 1.38
+/// is 2.76).
+pub fn sum_money(values: impl IntoIterator<Item = f64>) -> f64 {
+    money_f(values.into_iter().sum())
+}
+
 /// Common fields of every tool response.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +68,10 @@ pub struct Meta {
     pub stale_positions: Vec<String>,
     /// complete (every value known and fresh) | partial (`complete` is
     /// false) | stale (all known, but some from the quote cache).
+    /// `get_performance` may also report `insufficient_history` when there is
+    /// no usable start snapshot (`complete` is false, `method` is `none`).
+    /// Other tools never use that value; `complete` | `partial` | `stale` are
+    /// unchanged.
     pub data_status: String,
     /// Data-quality and policy warnings, each emitted once per response.
     pub warnings: Vec<Finding>,
@@ -260,7 +275,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "insufficient_history",
         "data_quality",
         "warning",
-        "No usable snapshot for the period (none recent enough before the start, or none inside the window); run `portfolio_rs snapshot` daily (cron or a systemd timer).",
+        "No usable snapshot for the period (none recent enough before the start, or none inside the window); dataStatus is insufficient_history and complete is false. Run `portfolio_rs snapshot` daily (cron or a systemd timer).",
     ),
     (
         "start_point_gap",
@@ -508,7 +523,13 @@ pub struct PositionRow {
 pub struct PositionsOutput {
     #[serde(flatten)]
     pub meta: Meta,
+    /// Sum of the rounded per-position `valueBase` figures (then rounded once
+    /// more). Portfolio-wide: filters do not change it. Matches
+    /// `get_allocation.totalValue` (cash and manual included), snapshot
+    /// `totalBase`, `get_context` summary `totalValue` and `get_performance`
+    /// `endValue` for the same valuation.
     pub total_value: f64,
+    /// Sum of the rounded cash `valueBase` figures, rounded once more.
     pub cash_value: f64,
     /// Portfolio-level cost basis of the priced market positions (base
     /// currency); positions without the input are left out (`pnlPartial`).
@@ -536,7 +557,9 @@ pub struct PolicyRef {
 #[serde(rename_all = "camelCase")]
 pub struct ClassAllocation {
     pub asset_class: String,
-    /// Null when a position in the class has no price or FX rate.
+    /// Sum of the rounded per-position values in the class, rounded once more.
+    /// Null when a position in the class has no price or FX rate (never a
+    /// partial sum). Percentages stay computed from the unrounded values.
     pub value: Option<f64>,
     /// Share of the total; null when the class value or the total is unknown
     /// (any included position unpriced).
@@ -569,6 +592,9 @@ pub struct AllocationOutput {
     #[serde(flatten)]
     pub meta: Meta,
     pub policy: Option<PolicyRef>,
+    /// Sum of the rounded values of included positions, rounded once more.
+    /// Same cents as `get_positions.totalValue` when cash and manual positions
+    /// are included.
     pub total_value: f64,
     pub classes: Vec<ClassAllocation>,
     pub untargeted_classes: Vec<String>,
@@ -709,7 +735,8 @@ pub struct PortfolioEntry {
     pub is_default: bool,
     /// Where quotes come from: yahoo | offline | fixture.
     pub quote_source: String,
-    /// complete | partial | stale, as in every other tool's `dataStatus`.
+    /// complete | partial | stale. `get_performance` may also report
+    /// `insufficient_history`; this field does not.
     pub data_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -779,14 +806,19 @@ pub struct GetPerformanceInput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DataCoverage {
-    /// Stored snapshots dated inside [from, to].
+    /// Valuation points in the reported `[from, to]`, the same count for every
+    /// period: stored snapshots in that window inclusive (the base snapshot
+    /// counts when `from` is its date), plus today's live valuation once when
+    /// `to` is today and no snapshot is stored for that date. Without a base
+    /// point the window is the period's requested `[from, to]`.
     pub snapshot_days: usize,
-    /// Days in [from, to] without a stored snapshot (today counts as covered
-    /// when the end is the live valuation).
+    /// Calendar days in the reported `[from, to]` that are not a valuation
+    /// point (`snapshotDays`).
     pub missing_days: i64,
     /// Always false: reconstruction from historic closes is not implemented.
     pub reconstructed: bool,
-    /// Date of the valuation used as the start (the last snapshot before `from`).
+    /// Date of the valuation used as the start. When set, equals `from`.
+    /// Null when no snapshot was recent enough before the requested start.
     pub start_point_date: Option<String>,
     /// Date of the valuation used as the end.
     pub end_point_date: Option<String>,
@@ -823,13 +855,22 @@ pub struct PerformanceBreakdown {
     pub external_unknown: f64,
 }
 
+/// Period performance. `dataStatus` is `complete`, `partial`, `stale`, or
+/// (only on this tool) `insufficient_history` when there is no usable start
+/// snapshot: `method` is `none`, `startValue` is null and `complete` is false.
+/// Other tools never report `insufficient_history`.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceOutput {
     #[serde(flatten)]
     pub meta: Meta,
     pub period: String,
+    /// First day of the reported window. When a start snapshot is used, this
+    /// is that snapshot's date (`dataCoverage.startPointDate`); otherwise the
+    /// period's requested start. Always `from <= to`. The start lookup and the
+    /// transaction window stay on the requested period, not this date.
     pub from: String,
+    /// Last day of the period (today, or `to` for a past custom range).
     pub to: String,
     pub start_value: Option<f64>,
     pub end_value: Option<f64>,
@@ -848,8 +889,33 @@ pub struct PerformanceOutput {
     pub twr_percent: Option<f64>,
     /// Not computed in phase 2; always null.
     pub mwr_percent: Option<f64>,
-    /// daily_twr | modified_dietz | none
+    /// daily_twr | modified_dietz | none. `none` with a null `startValue` on
+    /// the insufficient-history path sets `dataStatus` to `insufficient_history`.
+    /// A partial valuation (missing price or FX, or a base-currency change)
+    /// also leaves `method` as `none` but keeps `dataStatus` `partial`.
     pub method: String,
     pub data_coverage: DataCoverage,
     pub breakdown: Vec<PerformanceBreakdown>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn sum_money_matches_rounded_parts_not_the_rounded_sum() {
+        // Banker's rounding: 1.375 → 1.38, but 1.375 + 1.375 = 2.75 → 2.75.
+        // Rounding the unrounded sum is 0.01 lower than the sum of the cents.
+        let parts = [
+            Decimal::from_str("1.375").unwrap(),
+            Decimal::from_str("1.375").unwrap(),
+        ];
+        let rounded: Vec<f64> = parts.iter().copied().map(money).collect();
+        assert_eq!(rounded, vec![1.38, 1.38]);
+        assert_eq!(money(parts.into_iter().sum::<Decimal>()), 2.75);
+        assert_eq!(sum_money(rounded), 2.76);
+        // The sum of already-rounded cents can carry binary noise; round once more.
+        assert_eq!(sum_money([0.1, 0.2]), 0.3);
+    }
 }

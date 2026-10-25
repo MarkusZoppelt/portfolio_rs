@@ -256,14 +256,14 @@ pub fn from_portfolio(portfolio: &Portfolio, base: &str, date: &str, stale: bool
         })
         .collect();
     let complete = positions.iter().all(|p| p.value_base.is_some());
-    let cash_base = round2(
+    // Same cents as get_positions: sum of money()-rounded valueBase, then round2.
+    let cash_base = super::dto::sum_money(
         positions
             .iter()
             .filter(|p| p.kind == "cash")
-            .filter_map(|p| p.value_base)
-            .sum(),
+            .filter_map(|p| p.value_base),
     );
-    let total_base = round2(positions.iter().filter_map(|p| p.value_base).sum());
+    let total_base = super::dto::sum_money(positions.iter().filter_map(|p| p.value_base));
     Snapshot {
         date: date.to_string(),
         base_currency: base.to_string(),

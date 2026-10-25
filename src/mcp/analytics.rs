@@ -83,6 +83,7 @@ pub fn price_freshness(portfolio: &Portfolio) -> (Option<String>, Vec<String>) {
 }
 
 /// complete | partial | stale (see `Meta::data_status`).
+/// `get_performance` sets `insufficient_history` itself; this helper does not.
 pub fn data_status(complete: bool, has_stale: bool) -> &'static str {
     if !complete {
         "partial"
@@ -165,17 +166,20 @@ pub fn position_rows(
     include_manual: bool,
     asset_class: Option<&str>,
     sort: SortBy,
-) -> (Vec<PositionRow>, Decimal, Decimal) {
+) -> (Vec<PositionRow>, f64, f64) {
     let all: Vec<&PortfolioPosition> = portfolio.positions.iter().collect();
+    // Weights use the unrounded sum. Reported totals are the sum of the
+    // rounded per-position values, so they match `valueBase` to the cent.
     let total = total_known(&all);
     // Weights against a partial total mislead (every share is overstated),
     // so they are null whenever any position lacks a base value.
     let complete = all.iter().all(|p| value_base(p).is_some());
-    let cash: Decimal = all
-        .iter()
-        .filter(|p| p.is_cash())
-        .map(|p| p.balance_dec())
-        .sum();
+    let reported_total = sum_money(all.iter().filter_map(|p| value_base(p).map(money)));
+    let reported_cash = sum_money(
+        all.iter()
+            .filter(|p| p.is_cash())
+            .filter_map(|p| value_base(p).map(money)),
+    );
     let mut rows: Vec<PositionRow> = all
         .iter()
         .filter(|p| include_manual || kind(p) != "manual")
@@ -258,7 +262,7 @@ pub fn position_rows(
                 .total_cmp(&a.day_change_percent.unwrap_or(f64::NEG_INFINITY))
         }),
     }
-    (rows, total, cash)
+    (rows, reported_total, reported_cash)
 }
 
 /// Data-quality findings that also go into every response's `warnings`.
@@ -514,8 +518,10 @@ pub fn share_range(
 }
 
 pub struct Allocation {
-    /// Sum of the priced positions only.
+    /// Sum of the priced positions only (unrounded; percentages use this).
     pub total: Decimal,
+    /// `total` as the sum of per-position rounded values (what `totalValue` reports).
+    pub reported_total: f64,
     /// Every included position has a value.
     pub complete: bool,
     /// Partial, but the excluded positions' estimated share is below the
@@ -637,6 +643,8 @@ pub fn allocation_with(
     let mut order: Vec<String> = Vec::new();
     let mut values: HashMap<String, (String, Option<Decimal>)> = HashMap::new();
     let mut priced: HashMap<String, Decimal> = HashMap::new();
+    // Running sum of money(value) per class; reported class value is round2 of this.
+    let mut rounded_sums: HashMap<String, f64> = HashMap::new();
     for p in &included {
         let key = p.get_asset_class().to_lowercase();
         if !values.contains_key(&key) {
@@ -651,6 +659,9 @@ pub fn allocation_with(
             (Some(sum), None) if immaterial => Some(sum),
             _ => None,
         };
+        if let Some(v) = value_base(p) {
+            *rounded_sums.entry(key.clone()).or_default() += money(v);
+        }
         *priced.entry(key).or_default() += value_base(p).unwrap_or(Decimal::ZERO);
     }
     let range = |key: &str| -> Option<(f64, f64)> {
@@ -689,9 +700,11 @@ pub fn allocation_with(
         if target.is_none() {
             untargeted.push(label.clone());
         }
+        let reported = (*value).map(|_| money_f(rounded_sums.get(key).copied().unwrap_or(0.0)));
         classes.push(class_row(
             label,
             *value,
+            reported,
             total,
             target.map(band),
             range(key),
@@ -706,6 +719,7 @@ pub fn allocation_with(
                 classes.push(class_row(
                     &t.asset_class,
                     Some(Decimal::ZERO),
+                    Some(0.0),
                     total,
                     Some(band(t)),
                     range(&key),
@@ -725,8 +739,10 @@ pub fn allocation_with(
         .map(|c| c.asset_class.clone())
         .filter(|c| untargeted.contains(c))
         .collect();
+    let reported_total = sum_money(included.iter().filter_map(|p| value_base(p).map(money)));
     Allocation {
         total,
+        reported_total,
         complete,
         immaterial,
         materiality_share,
@@ -761,17 +777,19 @@ fn range_status(min: f64, max: f64, low: f64, high: f64) -> &'static str {
 fn class_row(
     label: &str,
     value: Option<Decimal>,
+    reported: Option<f64>,
     total: Decimal,
     target: Option<(f64, f64)>,
     range: Option<(f64, f64)>,
 ) -> ClassAllocation {
-    // Percentages only against a complete total; otherwise a min/max range.
+    // Percentages and amountToTarget stay on the unrounded sum. `reported`
+    // is the sum of the rounded per-position values.
     let actual = value
         .filter(|_| range.is_none())
         .map(|v| percent_of(v, total).unwrap_or(Decimal::ZERO));
     let mut row = ClassAllocation {
         asset_class: label.to_string(),
-        value: value.map(money),
+        value: reported,
         actual_percent: actual.map(pct),
         actual_percent_min: range.map(|r| r.0),
         actual_percent_max: range.map(|r| r.1),
