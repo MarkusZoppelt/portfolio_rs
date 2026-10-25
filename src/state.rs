@@ -777,7 +777,8 @@ pub struct PortfolioSummaryDto {
     /// Every ticker position has a value.
     #[serde(default)]
     pub complete: bool,
-    /// complete | partial | stale (as in the MCP tools).
+    /// complete | partial | stale. `get_performance` may also report
+    /// `insufficient_history`; this summary does not.
     #[serde(default)]
     pub data_status: String,
 }

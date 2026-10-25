@@ -200,13 +200,31 @@ internal for both the security's class and Cash), `externalFlows` (into or out
 of the portfolio) and `externalUnknown` (positions that appeared or vanished
 without a transaction). The split is computed per snapshot step and summed; a same-step deposit and buy without dated cash deposits goes to `externalUnknown`. A non-zero `externalUnknown` is flagged by one `performance_approximate` note (`detail.reason: external_unknown_flows`). With `insufficient_history`, `endValue` still holds a known end value.
 
-The start value is the last stored snapshot dated before `from`
-(`dataCoverage.startPointDate`), at most `maxStartAgeDays` days before the
-day before `from` (default: `day`/`week` 3, `month`/`mtd` 5, `ytd`/`1y` 10;
-`custom` by its length); an older one gives `insufficient_history`, and a
-start before the day before `from` adds a `start_point_gap` note. The end is
-today's live valuation, or for a past `to` the last snapshot inside
-[`from`, `to`] (none: `insufficient_history`). A non-cash position held at
+The start value is the last stored snapshot dated before the period's
+requested start, at most `maxStartAgeDays` days before the day before that
+start (default: `day`/`week` 3, `month`/`mtd` 5, `ytd`/`1y` 10; `custom` by
+its length). The requested start is today for `day`, today minus 6 days for
+`week` (last 7 days), and the `from` argument for `custom`. When that
+snapshot is used, the response `from` and `dataCoverage.startPointDate` are
+its date (the actual base the figures are measured from). Without a usable
+start, `from` stays the requested start and `startPointDate` is null. Always
+`from <= to`. Lookups (start age, the transaction window `(start, end]`)
+stay on the requested period, not the reported `from`. An older snapshot
+than `maxStartAgeDays` allows gives `insufficient_history` (`complete`
+false, `dataStatus: insufficient_history`), and a start before the day
+before the requested start adds a `start_point_gap` note. The end is
+today's live valuation, or for a past `to` the last snapshot inside the
+requested window (none: `insufficient_history`).
+
+`dataCoverage.snapshotDays` counts valuation points in the reported
+`[from, to]`, the same way for every period: every stored snapshot in that
+window inclusive (the base snapshot counts when `from` is its date), plus
+today's live valuation once when `to` is today and no snapshot is stored for
+that date. Without a base point the window is the requested `[from, to]`.
+`missingDays` is the calendar days in `[from, to]` that are not one of those
+points.
+
+A non-cash position held at
 the start that is gone with no sell entry (`vanished_position`) is booked as an
 unknown external flow, never a loss, and the figures are partial. Likewise a
 position missing from the start snapshot with no purchase dated in the window
@@ -241,10 +259,15 @@ implausible lines in the file untouched.
 `fxEffect` and `mwrPercent` are null for now, and nothing is reconstructed from
 historic closes (`reconstructed: false`).
 
-Figures are null, never 0, when they are unknown: no snapshot before the
-period (`insufficient_history`), or a missing price or FX rate in the start or
-end valuation (`performance_partial`, `dataStatus: partial`). A stale start,
-end or live price makes `dataStatus: stale`.
+Figures are null, never 0, when they are unknown: no usable start snapshot
+(`insufficient_history`, `dataStatus: insufficient_history`, `complete`
+false; `endValue` still holds a known end value), or a missing price or FX
+rate in the start or end valuation (`performance_partial`, `dataStatus:
+partial`). A stale start, end or live price makes `dataStatus: stale`.
+`insufficient_history` is a `get_performance`-only `dataStatus`; other tools
+still report only `complete`, `partial` or `stale`. `endValue` is the sum of
+the rounded per-position values, so it matches `get_positions` `totalValue`
+for the same valuation.
 
 The MCP server only reads snapshots. Write them with:
 
@@ -254,7 +277,9 @@ The MCP server only reads snapshots. Write them with:
 Each run values the portfolio and stores one line per day (a second run that
 day replaces it) in `<data-dir>/<portfolio>/snapshots.jsonl`, written
 atomically with mode 0600 (the directory, and any parents the snapshot
-creates, get 0700); cash `quantity` is the balance (`Amount`). The data dir is
+creates, get 0700); cash `quantity` is the balance (`Amount`). `totalBase`
+and `cashBase` are the sum of the rounded position `valueBase` figures (the
+same cents as `get_positions`). The data dir is
 `--data-dir`, else `PORTFOLIO_RS_DATA_DIR`, else `<workspace>/portfolio/history`
 in workspace mode, else `$XDG_DATA_HOME/portfolio_rs` (`~/.local/share/portfolio_rs`);
 never the current directory. Pass the same `--data-dir` to `mcp`. A daily cron
@@ -299,6 +324,11 @@ Drop the `env` entry to use live quotes (Yahoo Finance).
 All tools are read-only. Outputs are camelCase JSON with `schemaVersion`,
 `portfolioId`, `asOf` (RFC 3339), `baseCurrency` and `warnings`; unknown values
 are `null`, never `0`. Every tool accepts an optional `portfolioId`.
+Money totals (`get_positions` `totalValue` and `cashValue`, `get_allocation`
+`totalValue` and class `value`, snapshot `totalBase` and `cashBase`,
+`get_context` summary totals, `get_performance` `endValue`) are the sum of
+the rounded per-position values, rounded once more, so they match to the
+cent. Percentages stay computed from unrounded values.
 
 Missing quotes or FX rates are never hidden: every response carries
 `complete` (false when any position is unpriced) and `dataQuality`
@@ -350,7 +380,9 @@ carries `priceSource` (`live`, `cache`, `fixture` or `none`) and `isStale`.
 Every response also carries `dataStatus`: `complete`, `partial` (some
 position unpriced) or `stale` (all priced, but some older than `--stale-after`; a
 `stale_prices` data-quality warning lists them and the context table marks
-them `(stale)`). `check_policy` keeps policy and data quality apart:
+them `(stale)`). `get_performance` may also report `insufficient_history`
+when it has no usable start snapshot (`complete` is then false); other tools
+never use that value. `check_policy` keeps policy and data quality apart:
 `policyStatus` (`ok` | `warnings` | `breaches`), `findings`, `counts` and
 `breaches` cover policy findings only; data-quality warnings appear only in
 the top-level `warnings` (subject to `minSeverity`).

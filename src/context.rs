@@ -4,6 +4,7 @@ use chrono::Local;
 use eyre::{eyre, Result};
 use serde::Serialize;
 
+use crate::mcp::dto::{money as cents, sum_money};
 use crate::money::{percent_of, to_f64, Decimal};
 use crate::policy::Policy;
 use crate::portfolio::Portfolio;
@@ -263,7 +264,9 @@ impl PortfolioContext {
                 is_stale: position.get_ticker().is_some()
                     && position.has_native_price()
                     && position.is_stale(),
-                value: value_dec.map(to_f64),
+                // Same cents as MCP `valueBase` (`money`), so summary totals can
+                // be the sum of the values this report actually shows.
+                value: value_dec.map(cents),
                 weight_percent: value_dec.map(|v| percent(v, total)),
                 average_cost: position.average_cost(),
                 invested: position.total_invested(),
@@ -276,11 +279,20 @@ impl PortfolioContext {
 
         let mut allocation = allocation
             .into_iter()
-            .map(|(asset_class, (value, position_count))| AllocationContext {
-                asset_class,
-                value: value.map(to_f64),
-                percent: value.map(|v| percent(v, total)),
-                position_count,
+            .map(|(asset_class, (value, position_count))| {
+                // Same rounded figures the position rows report. A class with an
+                // unpriced position keeps a null value (not a partial sum).
+                let parts: Vec<f64> = positions
+                    .iter()
+                    .filter(|p| p.asset_class == asset_class)
+                    .filter_map(|p| p.value)
+                    .collect();
+                AllocationContext {
+                    asset_class,
+                    value: value.map(|_| sum_money(parts)),
+                    percent: value.map(|v| percent(v, total)),
+                    position_count,
+                }
             })
             .collect::<Vec<_>>();
         let key = |v: Option<f64>| v.unwrap_or(f64::NEG_INFINITY);
@@ -326,9 +338,19 @@ impl PortfolioContext {
             } else {
                 "complete"
             },
-            total_value: to_f64(total),
-            cash_value: to_f64(breakdown.cash),
-            securities_value: to_f64(breakdown.securities),
+            total_value: sum_money(positions.iter().filter_map(|p| p.value)),
+            cash_value: sum_money(
+                positions
+                    .iter()
+                    .filter(|p| p.is_cash)
+                    .filter_map(|p| p.value),
+            ),
+            securities_value: sum_money(
+                positions
+                    .iter()
+                    .filter(|p| !p.is_cash)
+                    .filter_map(|p| p.value),
+            ),
             cash_percent: complete.then(|| percent(breakdown.cash, total)),
             position_count: positions.len(),
             largest_position,

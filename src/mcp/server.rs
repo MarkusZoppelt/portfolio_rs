@@ -240,8 +240,8 @@ impl PortfolioServer {
             meta: self
                 .meta(&portfolio, analytics::data_quality(&portfolio))
                 .await,
-            total_value: money(total),
-            cash_value: money(cash),
+            total_value: total,
+            cash_value: cash,
             invested: pnl.invested.map(money),
             unrealized_pnl: pnl.unrealized_pnl.map(money),
             unrealized_pnl_percent: pnl.unrealized_pnl_percent.map(pct),
@@ -289,7 +289,7 @@ impl PortfolioServer {
                 name: p.name.clone(),
                 source: self.uri("policy"),
             }),
-            total_value: money(alloc.total),
+            total_value: alloc.reported_total,
             classes: alloc.classes,
             untargeted_classes: alloc.untargeted,
             missing_classes: alloc.missing,
@@ -652,9 +652,10 @@ impl PortfolioServer {
         } else {
             snaps.iter().rev().find(|s| s.date <= to_s).cloned()
         };
-        // B1: the start is the last snapshot before `from`, at most
-        // `max_age` days before the day before `from`; a historical end must
-        // lie inside the window.
+        // B1: the start is the last snapshot before the requested `from`, at
+        // most `max_age` days before the day before `from`; a historical end
+        // must lie inside the window. The reported `from` is this snapshot's
+        // date when one is used; lookups stay on the requested window.
         let max_age = i64::from(input.max_start_age_days.unwrap_or(match input.period {
             Period::Day | Period::Week => 3,
             Period::Month | Period::Mtd => 5,
@@ -687,16 +688,28 @@ impl PortfolioServer {
             end.as_ref().map(|e| e.date.as_str())
         };
         let start = start.filter(|s| end_point.is_none_or(|d| s.date.as_str() < d));
+        // Reported window: `from` is the base snapshot's date when one is
+        // used, otherwise the period's requested start. Lookups above stay
+        // on the requested window (`from` / `from_s`).
+        let reported_from = start
+            .as_ref()
+            .and_then(|s| snapshots::strict_date(&s.date))
+            .unwrap_or(from)
+            .min(to);
+        let reported_from_s = reported_from.format("%Y-%m-%d").to_string();
+        let requested_span = (to - from).num_days() + 1;
+        // One rule for every period: stored snapshots in the reported
+        // [from, to], inclusive (the base counts), plus today's live
+        // valuation once when it is the end and no snapshot is stored for `to`.
         let snapshot_days = snaps
             .iter()
-            .filter(|s| s.date >= from_s && s.date <= to_s)
-            .count();
-        let period_days = (to - from).num_days() + 1;
-        let covered =
-            snapshot_days + usize::from(end_is_live && !snaps.iter().any(|s| s.date == to_s));
+            .filter(|s| s.date >= reported_from_s && s.date <= to_s)
+            .count()
+            + usize::from(end_is_live && !snaps.iter().any(|s| s.date == to_s));
+        let period_days = (to - reported_from).num_days() + 1;
         let coverage = DataCoverage {
             snapshot_days,
-            missing_days: (period_days - covered as i64).max(0),
+            missing_days: (period_days - snapshot_days as i64).max(0),
             reconstructed: false,
             start_point_date: start.as_ref().map(|s| s.date.clone()),
             end_point_date: end.as_ref().map(|s| s.date.clone()),
@@ -739,7 +752,7 @@ impl PortfolioServer {
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_default(),
-            from: from_s.clone(),
+            from: reported_from_s.clone(),
             to: to_s.clone(),
             start_value: None,
             end_value: None,
@@ -771,6 +784,11 @@ impl PortfolioServer {
                      (maxStartAgeDays) and a past end one inside the window; run `portfolio_rs snapshot` daily to build history."
                 ),
             ));
+            // No usable start (or end): not a complete series. `method` stays
+            // "none" and `startValue` is null. A later path that does have a
+            // start but a partial valuation keeps `dataStatus` partial.
+            meta.complete = false;
+            meta.data_status = "insufficient_history".to_string();
             meta.warnings = warnings;
             out.meta = meta;
             return Ok(Json(out));
@@ -822,9 +840,9 @@ impl PortfolioServer {
                     Severity::Info,
                     Category::DataQuality,
                     format!(
-                        "The start snapshot is from {}, {gap} day(s) before the day before {from_s}: the figures span {} days, not {period_days}.",
+                        "The start snapshot is from {}, {gap} day(s) before the day before {from_s}: the figures span {} days, not {requested_span}.",
                         start.date,
-                        period_days + gap
+                        requested_span + gap
                     ),
                 )
                 .detail(json!({ "startPointDate": start.date, "gapDays": gap })),
@@ -935,6 +953,10 @@ impl PortfolioServer {
             None
         };
         let Some(mut effects) = effects else {
+            // `method` stays "none" and `startValue` stays null, but this is a
+            // partial valuation (a start exists), not missing history: keep
+            // `dataStatus` partial. `insufficient_history` is only the
+            // no-usable-start path above.
             meta.complete = false;
             meta.data_status = analytics::data_status(false, has_stale).to_string();
             if !currency_changed {
