@@ -776,33 +776,59 @@ async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
     }
 }
 
-/// Positive close from a quote response, if one is present.
-fn usable_close(quote: &yahoo::YResponse) -> Option<(f64, i64)> {
-    if let Ok(last) = quote.last_quote() {
-        if last.close > 0.0 {
-            return Some((last.close, last.timestamp));
-        }
-    }
-    // Market may be closed: fall back to the last bar with a positive close.
-    if let Ok(quotes) = quote.quotes() {
-        if let Some(last) = quotes.last() {
-            if last.close > 0.0 {
-                return Some((last.close, last.timestamp));
-            }
-        }
-    }
-    None
+fn positive_finite(price: f64) -> bool {
+    price.is_finite() && price > 0.0
 }
 
-/// Yahoo-backed lookups for [`crate::services::quotes::YahooProvider`].
-pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
-    let quote = get_quote_price(symbol)
-        .await
-        .map_err(|e| QuoteError::Provider(e.to_string()))?;
+/// Latest price and its unix timestamp from a Yahoo chart response.
+///
+/// The bar is the last `quotes()` entry with a positive finite close, walking
+/// back past a non-positive close. An `Err` from `quotes()` or `last_quote()`
+/// is "no bars", never a failed fetch: they share a consistency check, and a
+/// wholly missing open/high/low/volume/close array is `DataInconsistency`. A
+/// null element is not an error — bars without a close are skipped — so an
+/// all-null newest daily bar does not hide meta.
+///
+/// Meta is `regular_market_price` when that price is positive and finite and
+/// `regular_market_time` is set. It wins when there is no bar, or when its
+/// timestamp is strictly newer than the bar. Thin venues publish today's price
+/// in meta while the newest 1d bar is all-null.
+///
+/// Does not classify staleness. A live-fetched d-1 close stays
+/// [`PriceStatus::Live`]; [`mark_stale`] applies [`DEFAULT_STALE_AFTER_DAYS`]
+/// afterwards (see the unit tests).
+fn latest_price(response: &yahoo::YResponse) -> Option<(f64, i64)> {
+    // last_quote() errors in the same cases as quotes() (and stops at a
+    // non-positive close). That Err is "no bars", not a fetch failure.
+    let bar = match response.quotes() {
+        Ok(quotes) => quotes.iter().rev().find_map(|quote| {
+            positive_finite(quote.close).then_some((quote.close, quote.timestamp))
+        }),
+        Err(_) => match response.last_quote() {
+            Ok(quote) if positive_finite(quote.close) => Some((quote.close, quote.timestamp)),
+            _ => None,
+        },
+    };
+    let meta = response.metadata().ok().and_then(|meta| {
+        let price = meta
+            .regular_market_price
+            .filter(|price| positive_finite(*price))?;
+        Some((price, i64::from(meta.regular_market_time?)))
+    });
+    match (bar, meta) {
+        (None, Some(meta)) => Some(meta),
+        (Some((_, bar_ts)), Some((price, ts))) if ts > bar_ts => Some((price, ts)),
+        (Some(bar), _) => Some(bar),
+        (None, None) => None,
+    }
+}
+
+/// Quote [`yahoo_latest`] would return for an already-fetched chart response.
+fn quote_from_response(symbol: &str, response: &yahoo::YResponse) -> Result<Quote, QuoteError> {
     let (price, ts) =
-        usable_close(&quote).ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))?;
-    let currency = quote.metadata().ok().and_then(|m| m.currency);
-    let as_of = DateTime::from_timestamp(ts as _, 0)
+        latest_price(response).ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))?;
+    let currency = response.metadata().ok().and_then(|meta| meta.currency);
+    let as_of = DateTime::from_timestamp(ts, 0)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     Ok(Quote {
         price,
@@ -810,6 +836,14 @@ pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
         as_of,
         source: crate::services::quotes::PriceSource::Live,
     })
+}
+
+/// Yahoo-backed lookups for [`crate::services::quotes::YahooProvider`].
+pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
+    let response = get_quote_price(symbol)
+        .await
+        .map_err(|e| QuoteError::Provider(e.to_string()))?;
+    quote_from_response(symbol, &response)
 }
 
 pub(crate) async fn yahoo_previous_close(symbol: &str) -> Result<f64, QuoteError> {
@@ -1383,5 +1417,238 @@ mod tests {
         // A sell without a price does not make the basis unknown.
         position.purchases[2].price = None;
         assert_eq!(position.total_invested(), Some(45.0));
+    }
+
+    fn utc_unix(year: i32, month: u32, day: u32, hour: u32, min: u32) -> i64 {
+        Utc.with_ymd_and_hms(year, month, day, hour, min, 0)
+            .unwrap()
+            .timestamp()
+    }
+
+    /// 2026-10-22 / 23 / 26 at 07:00 UTC, and regularMarketTime 17:55 UTC.
+    fn thin_dates() -> (i64, i64, i64, u32) {
+        let meta = u32::try_from(utc_unix(2026, 10, 26, 17, 55)).unwrap();
+        (
+            utc_unix(2026, 10, 22, 7, 0),
+            utc_unix(2026, 10, 23, 7, 0),
+            utc_unix(2026, 10, 26, 7, 0),
+            meta,
+        )
+    }
+
+    /// Chart JSON shaped like Yahoo's `chart.result[0]` for FAKE.SG.
+    /// `omit` drops that key from `indicators.quote[0]` (a missing OHLCV array).
+    fn fake_sg_response(
+        timestamps: &[i64],
+        closes: &[Option<f64>],
+        meta_price: Option<f64>,
+        meta_time: Option<u32>,
+        omit: Option<&str>,
+    ) -> yahoo::YResponse {
+        assert_eq!(timestamps.len(), closes.len());
+        let open: Vec<Option<f64>> = closes.iter().map(|close| close.map(|_| 118.0)).collect();
+        let high: Vec<Option<f64>> = closes.iter().map(|close| close.map(|_| 119.0)).collect();
+        let low: Vec<Option<f64>> = closes.iter().map(|close| close.map(|_| 117.0)).collect();
+        let volume: Vec<Option<u64>> = closes.iter().map(|close| close.map(|_| 1_000)).collect();
+        let mut quote = serde_json::json!({
+            "open": open,
+            "high": high,
+            "low": low,
+            "close": closes,
+            "volume": volume,
+        });
+        if let Some(key) = omit {
+            quote.as_object_mut().unwrap().remove(key);
+        }
+        let mut meta = serde_json::json!({
+            "currency": "EUR",
+            "symbol": "FAKE.SG",
+            "exchangeName": "FRA",
+            "fullExchangeName": "Frankfurt",
+            "instrumentType": "EQUITY",
+            "gmtoffset": 3600,
+            "timezone": "CET",
+            "exchangeTimezoneName": "Europe/Berlin",
+            "hasPrePostMarketData": false,
+            "priceHint": 2,
+            "dataGranularity": "1d",
+            "range": "1mo",
+            "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "ytd", "max"],
+        });
+        if let Some(price) = meta_price {
+            meta["regularMarketPrice"] = serde_json::json!(price);
+        }
+        if let Some(ts) = meta_time {
+            meta["regularMarketTime"] = serde_json::json!(ts);
+        }
+        // currentTradingPeriod / tradingPeriods default; YMetaData requires the
+        // fields above (fullExchangeName, hasPrePostMarketData, priceHint).
+        let payload = serde_json::json!({
+            "chart": {
+                "result": [{
+                    "meta": meta,
+                    "timestamp": timestamps,
+                    "indicators": {
+                        "quote": [quote],
+                        "adjclose": [{ "adjclose": closes }],
+                    }
+                }],
+                "error": null
+            }
+        });
+        yahoo::YResponse::from_json(payload).expect("null OHLCV/adjclose elements must deserialize")
+    }
+
+    fn thin_with_meta() -> yahoo::YResponse {
+        let (d2, d1, today, meta_time) = thin_dates();
+        fake_sg_response(
+            &[d2, d1, today],
+            &[Some(118.10), Some(117.68), None],
+            Some(117.71),
+            Some(meta_time),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_null_newest_bar_uses_newer_regular_market_price() {
+        let (_, d1, _, meta_time) = thin_dates();
+        let response = thin_with_meta();
+        // Null open/high/low/close/volume/adjclose on the last bar is not a
+        // deserialization error; quotes() skips that bar.
+        let quotes = response.quotes().expect("null bar elements are tolerated");
+        assert_eq!(
+            quotes.last().map(|quote| (quote.close, quote.timestamp)),
+            Some((117.68, d1))
+        );
+        assert_eq!(
+            latest_price(&response),
+            Some((117.71, i64::from(meta_time)))
+        );
+    }
+
+    #[test]
+    fn test_null_newest_bar_without_meta_uses_previous_close() {
+        let (d2, d1, today, _) = thin_dates();
+        let response = fake_sg_response(
+            &[d2, d1, today],
+            &[Some(118.10), Some(117.68), None],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(latest_price(&response), Some((117.68, d1)));
+
+        // Existing staleness rules, unchanged. A live fetch (PriceSource::Live)
+        // with a positive price is PriceStatus::Live; apply_quote_result does
+        // not look at age. mark_stale sets is_stale only when price_as_of is
+        // more than DEFAULT_STALE_AFTER_DAYS (3) before now
+        // (`now - as_of > 3 days`). Unknown as-of is not stale, and cache
+        // origin alone is not stale. A d-1 close is therefore not stale while
+        // it is at most 3 days old. This Friday 07:00 bar (2026-10-23T07:00:00Z)
+        // is exactly 3 days old at 2026-10-26T07:00:00Z (not stale; `>` is
+        // strict) and stale after that — a weekend gap is not special-cased.
+        let quote = quote_from_response("FAKE.SG", &response).unwrap();
+        assert_eq!(quote.as_of.as_deref(), Some("2026-10-23T07:00:00Z"));
+        assert_eq!(quote.source, crate::services::quotes::PriceSource::Live);
+        let mut position = PortfolioPosition::for_test(
+            Some("FAKE.SG"),
+            "Stocks",
+            1.0,
+            0.0,
+            PriceStatus::Unavailable,
+        );
+        position.price_as_of = quote.as_of;
+        position.price_source = Some(quote.source);
+        apply_quote_result(&mut position, Some(quote.price));
+        assert_eq!(position.price_status(), PriceStatus::Live);
+    }
+
+    #[test]
+    fn test_older_meta_loses_to_last_positive_bar() {
+        let (d2, d1, today, _) = thin_dates();
+        let response = fake_sg_response(
+            &[d2, d1, today],
+            &[Some(118.10), Some(117.68), Some(117.50)],
+            Some(117.71),
+            Some(u32::try_from(d1).unwrap()),
+            None,
+        );
+        assert_eq!(latest_price(&response), Some((117.50, today)));
+    }
+
+    #[test]
+    fn test_missing_ohlcv_array_uses_meta_price() {
+        let (d2, d1, today, meta_time) = thin_dates();
+        // A wholly missing volume (or open) array is DataInconsistency: quotes()
+        // and last_quote() error. That is "no bars", so meta still wins.
+        for key in ["volume", "open"] {
+            let response = fake_sg_response(
+                &[d2, d1, today],
+                &[Some(118.10), Some(117.68), None],
+                Some(117.71),
+                Some(meta_time),
+                Some(key),
+            );
+            assert!(
+                matches!(response.quotes(), Err(yahoo::YahooError::DataInconsistency)),
+                "{key}"
+            );
+            assert!(
+                matches!(
+                    response.last_quote(),
+                    Err(yahoo::YahooError::DataInconsistency)
+                ),
+                "{key}"
+            );
+            assert_eq!(
+                latest_price(&response),
+                Some((117.71, i64::from(meta_time))),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_null_closes_without_meta_is_none() {
+        let (d2, d1, today, _) = thin_dates();
+        let response = fake_sg_response(&[d2, d1, today], &[None, None, None], None, None, None);
+        assert!(response.quotes().unwrap().is_empty());
+        assert_eq!(latest_price(&response), None);
+    }
+
+    #[test]
+    fn test_meta_quote_on_position_is_live_not_stale() {
+        let response = thin_with_meta();
+        let quote = quote_from_response("FAKE.SG", &response).unwrap();
+        assert_eq!(quote.price, 117.71);
+        assert_eq!(quote.currency.as_deref(), Some("EUR"));
+        assert_eq!(quote.as_of.as_deref(), Some("2026-10-26T17:55:00Z"));
+        assert_eq!(quote.source, crate::services::quotes::PriceSource::Live);
+
+        let mut position = PortfolioPosition::for_test(
+            Some("FAKE.SG"),
+            "Stocks",
+            1.0,
+            0.0,
+            PriceStatus::Unavailable,
+        );
+        // Same fields handle_position_with copies off a successful latest() quote.
+        position.price_currency = quote.currency;
+        position.price_as_of = quote.as_of;
+        position.price_source = Some(quote.source);
+        position.fx_from_cache = false;
+        apply_quote_result(&mut position, Some(quote.price));
+
+        let mut portfolio = crate::portfolio::Portfolio::new();
+        portfolio.add_position(position);
+        mark_stale(&mut portfolio, DEFAULT_STALE_AFTER_DAYS);
+        let position = &portfolio.positions[0];
+        assert_eq!(position.price_status(), PriceStatus::Live);
+        assert!(
+            !position.is_stale(),
+            "regularMarketTime is today, inside DEFAULT_STALE_AFTER_DAYS"
+        );
+        assert!(position.has_native_price());
     }
 }

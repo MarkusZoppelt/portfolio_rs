@@ -762,9 +762,10 @@ pub struct ContextOutput {
     pub context: Option<Value>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Period {
+    #[default]
     Day,
     Week,
     Month,
@@ -789,8 +790,9 @@ pub enum GroupBy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GetPerformanceInput {
     pub portfolio_id: Option<String>,
-    /// day | week (last 7 days) | month (last 30 days) | mtd | ytd | 1y |
-    /// since_inception | custom (needs from and to).
+    /// period defaults to day; allowed: day, week, month, mtd, ytd, 1y,
+    /// since_inception, custom (custom needs from and to).
+    #[serde(default)]
     pub period: Period,
     /// YYYY-MM-DD, first day of the period (custom only).
     pub from: Option<String>,

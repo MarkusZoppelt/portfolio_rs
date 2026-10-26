@@ -68,8 +68,9 @@ pattern is in the workspace `.gitignore` template and checked by `doctor`.
 `get_performance` reports a period's change split into `netContributions`,
 `marketEffect` (price and FX on market positions), `incomeEffect` and
 `manualRevaluation`; `change` always equals their sum (within 0.01).
-Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
-`1y`, `since_inception` and `custom` (with `from` and `to`, YYYY-MM-DD).
+`period` defaults to `day` when omitted. Allowed: `day`, `week` (last 7
+days), `month` (last 30 days), `mtd`, `ytd`, `1y`, `since_inception`, and
+`custom` (custom needs `from` and `to`, YYYY-MM-DD).
 `groupBy` is `none`, `assetClass` or `position` (position rows carry `name` and
 `ticker`). Breakdown rows also split `netContributions` into
 `internalTransfers` (between tracked positions: a buy paid from tracked cash is
@@ -276,7 +277,7 @@ governed by the cash-buffer and asset-class rules instead.
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); one deduplicated list (policy findings + warning-severity data quality, filtered by `minSeverity`) feeds `findings` (policy part), `breaches` (critical), top-level `warnings` (warning severity), `counts` and `status`, so `counts.warning` = `warnings` length and `counts.critical` = `breaches` length; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with `synthesized: true`, dated at the earliest purchase date or else the file date, reported in `dateSource`: `earliest_purchase` | `file_mtime`, fees 0); `fees` is 0 when none is recorded; `complete` covers current values only; matching transactions whose `amountBase` is null (no historic FX) are counted in `fxHistoricMissing` with an `fx_historic_unavailable` warning; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |
 | `list_portfolios` | The served portfolio with its `dataStatus` and `quoteSource` (`yahoo`, `offline` or `fixture`; paths only with `includePaths`) |
-| `get_performance` | Change over `period` split into `netContributions`, `marketEffect`, `incomeEffect` and `manualRevaluation`, with `twrPercent`, `method`, `dataCoverage` and an optional `breakdown` (see [Performance and snapshots](#performance-and-snapshots)) |
+| `get_performance` | Change over `period` (defaults to day; allowed: day, week, month, mtd, ytd, 1y, since_inception, custom — custom needs from and to) split into `netContributions`, `marketEffect`, `incomeEffect` and `manualRevaluation`, with `twrPercent`, `method`, `dataCoverage` and an optional `breakdown` (see [Performance and snapshots](#performance-and-snapshots)) |
 | `get_context` | The `portfolio_rs context` report as Markdown or JSON (money and percentages rounded to 2 decimals, as in `/api/context`). When a position is unpriced, `summary.incomplete` carries a banner (also the first line of the markdown) and `cashPercent`, cash weights and `largestPositionPercent` are null |
 
 Errors come back as tool results with `isError: true` and

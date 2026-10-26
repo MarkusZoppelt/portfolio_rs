@@ -581,7 +581,7 @@ impl PortfolioServer {
 
     #[tool(
         name = "get_performance",
-        description = "Performance for a period (day, week, month, mtd, ytd, 1y, since_inception, custom), split into net contributions, market (price + FX) effect and manual revaluation, with a time-weighted return. Read-only: uses local snapshots written by `portfolio_rs snapshot`, ending at today's live valuation.",
+        description = "Performance for a period, split into net contributions, market (price + FX) effect and manual revaluation, with a time-weighted return. period defaults to day; allowed: day, week, month, mtd, ytd, 1y, since_inception, custom (custom needs from and to). Read-only: uses local snapshots written by `portfolio_rs snapshot`, ending at today's live valuation.",
         annotations(
             title = "Get performance",
             read_only_hint = true,

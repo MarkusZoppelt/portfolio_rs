@@ -232,6 +232,18 @@ async fn tools_list_has_the_seven_read_only_tools() {
         );
         assert!(tool.output_schema.is_some(), "{}", tool.name);
     }
+    let perf = tools
+        .iter()
+        .find(|tool| tool.name == "get_performance")
+        .unwrap();
+    let required = perf.input_schema.get("required");
+    assert!(
+        required.is_none_or(|req| {
+            req.as_array()
+                .is_none_or(|items| !items.iter().any(|item| item.as_str() == Some("period")))
+        }),
+        "period defaults and must not be required: {required:?}"
+    );
     client.cancel().await.unwrap();
 }
 
@@ -3993,5 +4005,57 @@ async fn external_unknown_flows_are_flagged_once() {
         approx_reason(&v, "external_unknown_flows").is_empty(),
         "{v}"
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_performance_period_defaults_to_day() {
+    let client = connect(opts()).await;
+    let empty = ok(&client, "get_performance", json!({})).await;
+    let explicit = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert_eq!(empty["period"], "day");
+    assert_eq!(empty["period"], explicit["period"]);
+    assert_eq!(empty["from"], explicit["from"]);
+    assert_eq!(empty["to"], explicit["to"]);
+    assert_eq!(empty["method"], explicit["method"]);
+    assert_eq!(empty["dataStatus"], explicit["dataStatus"]);
+
+    let result = call(&client, "get_performance", json!({"period": "fortnight"})).await;
+    assert_eq!(result.is_error, Some(true));
+    let text = serde_json::to_value(&result.content[0]).unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    assert_eq!(parsed["error"]["code"], "invalid_argument", "{text}");
+    let message = parsed["error"]["message"].as_str().unwrap_or(&text);
+    for allowed in [
+        "day",
+        "week",
+        "month",
+        "mtd",
+        "ytd",
+        "1y",
+        "since_inception",
+        "custom",
+    ] {
+        assert!(message.contains(allowed), "missing {allowed} in {message}");
+    }
+
+    let tools = client.list_all_tools().await.unwrap();
+    let perf = tools
+        .iter()
+        .find(|tool| tool.name == "get_performance")
+        .unwrap();
+    let schema = Value::Object((*perf.input_schema).clone());
+    let required = schema.get("required").and_then(|req| req.as_array());
+    assert!(
+        required.is_none_or(|items| !items.iter().any(|item| item == "period")),
+        "{schema}"
+    );
+    let desc = schema["properties"]["period"]["description"]
+        .as_str()
+        .unwrap_or("");
+    assert!(desc.contains("period defaults to day"), "{desc}");
     client.cancel().await.unwrap();
 }
