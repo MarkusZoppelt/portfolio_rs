@@ -291,8 +291,16 @@ governed by the cash-buffer and asset-class rules instead.
 
 Errors come back as tool results with `isError: true` and
 `{"error": {"code", "message"}}`, codes `unknown_portfolio`,
-`invalid_argument` (also an `assetClass` that no position or policy uses) and
-`not_found` (an unknown `positionId`). Error and finding messages never contain amounts.
+`invalid_argument` (also an `assetClass` that no position or policy uses; a
+`period` that is not one of the allowed strings, with the allowed values in the
+message; `period: null` means day), `invalid_data` (the positions file does not
+parse, e.g. "Error parsing positions in <file>: missing field Amount at line 3
+column 5"; every tool that reads positions returns it instead of an empty
+portfolio) and `not_found` (an unknown `positionId`). Error and finding messages
+never contain amounts. A positions file that is missing or unreadable makes the
+server fail at startup. When `pnlPartial` is true because positions lack a cost
+basis, `get_positions` adds one `cost_basis_missing` warning naming them
+(`detail.positions` has their ids).
 
 ## Resources
 

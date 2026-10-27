@@ -213,7 +213,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "stale_prices",
         "data_quality",
         "warning",
-        "Some prices or FX rates are last-known values from the quote cache; dataStatus is stale.",
+        "Some prices or FX rates are stale (from the quote cache or older than the stale-after threshold); dataStatus is stale.",
     ),
     (
         "possible_breach",
@@ -310,6 +310,12 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "data_quality",
         "warning",
         "A valuation at the period start or end is missing prices or FX rates; performance figures are null.",
+    ),
+    (
+        "cost_basis_missing",
+        "data_quality",
+        "warning",
+        "get_positions: invested and unrealized P&L leave out positions without a complete cost basis (pnlPartial is true); detail.positions lists their ids.",
     ),
     (
         "untracked_position",
@@ -803,6 +809,21 @@ pub enum Period {
     Custom,
 }
 
+/// `period`: null or missing is day; anything that is not an allowed string
+/// is an error that lists the allowed values.
+fn deserialize_period<'de, D>(deserializer: D) -> Result<Period, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    const ALLOWED: &str = "day, week, month, mtd, ytd, 1y, since_inception, custom";
+    match Option::<Value>::deserialize(deserializer)? {
+        None => Ok(Period::Day),
+        Some(value) => serde_json::from_value::<Period>(value.clone()).map_err(|_| {
+            serde::de::Error::custom(format!("invalid period {value}; allowed: {ALLOWED}"))
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum GroupBy {
@@ -818,7 +839,8 @@ pub struct GetPerformanceInput {
     pub portfolio_id: Option<String>,
     /// period defaults to day; allowed: day, week, month, mtd, ytd, 1y,
     /// since_inception, custom (custom needs from and to).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_period")]
+    #[schemars(with = "Option<Period>")]
     pub period: Period,
     /// YYYY-MM-DD, first day of the period (custom only).
     pub from: Option<String>,

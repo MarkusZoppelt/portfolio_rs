@@ -222,7 +222,7 @@ impl PortfolioContext {
             if position.get_ticker().is_some() && position.has_native_price() && position.is_stale()
             {
                 data_quality_flags.push(format!(
-                    "Price for {} is the last known value from the quote cache (as of {}).",
+                    "Price for {} is stale (from the quote cache or older than the stale-after threshold; as of {}).",
                     position.get_name(),
                     position.price_as_of().unwrap_or("unknown")
                 ));
@@ -245,7 +245,7 @@ impl PortfolioContext {
                 name: position.get_name().to_string(),
                 ticker: position.get_ticker().map(ToString::to_string),
                 asset_class,
-                quantity: position.get_amount(),
+                quantity: to_f64(position.quantity_dec()),
                 // Native quote even without FX; only `value` needs the rate.
                 price: (position.get_ticker().is_some() && position.has_native_price())
                     .then(|| position.market_price()),

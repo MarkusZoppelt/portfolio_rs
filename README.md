@@ -29,6 +29,13 @@ Rust library.
 
     portfolio_rs my_positions.json
 
+A position's `Amount` is its quantity when it has a `Ticker` (and for cash, its
+balance). A position without a ticker that is not cash is a *manual* holding:
+its `Amount` is a value, and its price shows as `-` in tables. With `Purchases`
+the quantity is the sum of the purchase quantities. Without purchases a manual
+holding counts as one item valued at `Amount` (quantity 1 in `get_positions` and
+`get_context`); valuation totals always use `Amount` for manual holdings.
+
 **Workspace mode.** For policies, diary, decisions, and reports, create a
 workspace:
 

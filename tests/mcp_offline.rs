@@ -4278,3 +4278,238 @@ async fn manual_cost_basis_matches_cli_balances() {
     assert!(total.contains("498.00"), "{total}");
     assert!(total.contains("45.27"), "{total}");
 }
+
+const FIXTURE_QUOTES: &str = r#"{"latest":{"FAKEETF":{"price":150.0,"currency":"EUR","asOf":"2026-10-27T12:00:00Z"}},"previous_close":{"FAKEETF":149.0}}"#;
+
+fn fake_quotes() -> AnyProvider {
+    AnyProvider::Fixture(Box::new(
+        FixtureProvider::from_json(FIXTURE_QUOTES).unwrap(),
+    ))
+}
+
+/// (code, message) of a failed call.
+async fn err_parts(client: &Client, name: &str, args: Value) -> (String, String) {
+    let result = call(client, name, args).await;
+    assert_eq!(result.is_error, Some(true), "{name} unexpectedly succeeded");
+    let text = serde_json::to_value(&result.content[0]).unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let v: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("not JSON: {text}"));
+    (
+        v["error"]["code"].as_str().unwrap_or_default().to_string(),
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+fn write_positions(tmp: &TempDir, positions: Value) -> String {
+    let data = tmp.path().join("positions.json");
+    std::fs::write(&data, positions.to_string()).unwrap();
+    data.to_string_lossy().into_owned()
+}
+
+fn by_name<'a>(positions: &'a Value, name: &str) -> &'a Value {
+    positions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == name)
+        .unwrap_or_else(|| panic!("no {name}"))
+}
+
+/// An unparseable positions file is a tool error, never an empty portfolio.
+#[tokio::test]
+async fn invalid_positions_file_is_an_error() {
+    let tmp = TempDir::new().unwrap();
+    let file = write_positions(
+        &tmp,
+        json!([{"Name": "Broken", "AssetClass": "Stocks", "Ticker": "FAKEETF"}]),
+    );
+    let client = connect(McpOptions {
+        file: Some(file.clone()),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await;
+    for tool in [
+        "get_positions",
+        "get_allocation",
+        "check_policy",
+        "get_transactions",
+        "list_portfolios",
+        "get_performance",
+        "get_context",
+    ] {
+        let (code, message) = err_parts(&client, tool, json!({})).await;
+        assert_eq!(code, "invalid_data", "{tool}: {message}");
+        assert!(message.contains("Amount"), "{tool}: {message}");
+        assert!(message.contains(&file), "{tool}: {message}");
+    }
+    assert!(read(&client, "portfolio://main/context.md").await.is_err());
+    client.cancel().await.unwrap();
+
+    // An empty but valid file still works.
+    let empty = write_positions(&tmp, json!([]));
+    let client = connect(McpOptions {
+        file: Some(empty),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["positions"], json!([]), "{v}");
+    assert_eq!(v["dataStatus"], "complete", "{v}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_performance_null_period_defaults_to_day() {
+    let client = connect(opts()).await;
+    let v = ok(&client, "get_performance", json!({"period": null})).await;
+    assert_eq!(v["period"], "day", "{v}");
+    let tools = client.list_all_tools().await.unwrap();
+    let tool = tools.iter().find(|t| t.name == "get_performance").unwrap();
+    let schema = Value::Object((*tool.input_schema).clone()).to_string();
+    assert!(schema.contains("since_inception"), "{schema}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_performance_non_string_period_lists_allowed_values() {
+    let client = connect(opts()).await;
+    for bad in [json!(5), json!(true), json!({}), json!("fortnight")] {
+        let (code, message) = err_parts(&client, "get_performance", json!({"period": bad})).await;
+        assert_eq!(code, "invalid_argument", "{bad}: {message}");
+        for allowed in [
+            "day",
+            "week",
+            "month",
+            "mtd",
+            "ytd",
+            "1y",
+            "since_inception",
+            "custom",
+        ] {
+            assert!(message.contains(allowed), "{bad}: {message}");
+        }
+        assert!(!message.contains("invalid type"), "{bad}: {message}");
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn pnl_partial_warns_with_excluded_positions() {
+    let tmp = TempDir::new().unwrap();
+    let file = write_positions(
+        &tmp,
+        json!([
+            {
+                "Name": "Fake ETF", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 10,
+                "Purchases": [{"Date": "2025/01/15", "Quantity": 10, "Price": 100.0}]
+            },
+            {"Name": "No cost", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 2}
+        ]),
+    );
+    let client = connect(McpOptions {
+        file: Some(file),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["pnlPartial"], true, "{v}");
+    let warnings: Vec<&Value> = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "cost_basis_missing")
+        .collect();
+    assert_eq!(warnings.len(), 1, "{v}");
+    let w = warnings[0];
+    assert_eq!(w["severity"], "warning", "{w}");
+    assert_eq!(w["category"], "data_quality", "{w}");
+    assert!(w["message"].as_str().unwrap().contains("No cost"), "{w}");
+    let missing = by_name(&v["positions"], "No cost")["id"].clone();
+    assert_eq!(w["detail"]["positions"], json!([missing]), "{w}");
+    client.cancel().await.unwrap();
+
+    // Complete cost basis: no warning.
+    let tmp = TempDir::new().unwrap();
+    let file = write_positions(
+        &tmp,
+        json!([{
+            "Name": "Fake ETF", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 10,
+            "Purchases": [{"Date": "2025/01/15", "Quantity": 10, "Price": 100.0}]
+        }]),
+    );
+    let client = connect(McpOptions {
+        file: Some(file),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["pnlPartial"], false, "{v}");
+    assert!(has_code(&v, "cost_basis_missing").is_none(), "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// A manual position without purchases is one item valued at `Amount`; a
+/// market position without purchases holds `Amount` units. `balances` shows
+/// "-" instead of a 0.00 price for manual items.
+#[tokio::test]
+async fn manual_without_purchases_has_quantity_one_and_cli_price_dash() {
+    let tmp = TempDir::new().unwrap();
+    let file = write_positions(
+        &tmp,
+        json!([
+            {"Name": "Fake ETF", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 4},
+            {"Name": "Ledger item", "AssetClass": "Other", "Amount": 250}
+        ]),
+    );
+    let client = connect(McpOptions {
+        file: Some(file.clone()),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let manual = by_name(&v["positions"], "Ledger item");
+    assert_eq!(manual["quantity"], 1.0, "{manual}");
+    assert_eq!(manual["valueBase"], 250.0, "{manual}");
+    let etf = by_name(&v["positions"], "Fake ETF");
+    assert_eq!(etf["quantity"], 4.0, "{etf}");
+    assert_eq!(etf["valueBase"], 600.0, "{etf}");
+    assert_eq!(v["totalValue"], 850.0, "{v}");
+    client.cancel().await.unwrap();
+
+    let quotes = tmp.path().join("quotes.json");
+    std::fs::write(&quotes, FIXTURE_QUOTES).unwrap();
+    let home = TempDir::new().unwrap();
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
+        .arg("balances")
+        .arg(&file)
+        .current_dir(tmp.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env(
+            "PORTFOLIO_RS_QUOTES",
+            format!("fixture:{}", quotes.display()),
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.contains("Ledger item"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let cells: Vec<&str> = row.split('┆').map(str::trim).collect();
+    // Name, Class, Amount, Avg Cost, Invested, Price, Value, ...
+    assert_eq!(cells[5], "-", "{row}");
+    assert_eq!(cells[6], "250.00", "{row}");
+}

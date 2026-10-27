@@ -53,6 +53,8 @@ pub struct AppState {
     pub currency: RwLock<String>,
     pub network_status: RwLock<NetworkStatus>,
     portfolio_cache: RwLock<Option<CachedPortfolio>>,
+    /// Parse error of the loaded positions JSON, if it did not parse.
+    positions_error: RwLock<Option<String>>,
     quotes: AnyProvider,
     /// Prices (and FX rates) older than this many days are stale.
     stale_after_days: i64,
@@ -74,6 +76,7 @@ impl AppState {
             currency: RwLock::new(currency),
             network_status: RwLock::new(NetworkStatus::Disconnected),
             portfolio_cache: RwLock::new(None),
+            positions_error: RwLock::new(None),
             quotes: AnyProvider::configured().clone(),
             stale_after_days: crate::position::DEFAULT_STALE_AFTER_DAYS,
         }
@@ -198,6 +201,9 @@ impl AppState {
     /// Replace the raw JSON and refresh live prices.
     pub async fn set_positions_json(&self, json: String) {
         let json = with_position_ids(json);
+        *self.positions_error.write().await = serde_json::from_str::<Vec<PortfolioPosition>>(&json)
+            .err()
+            .map(|e| e.to_string());
         {
             let mut positions_json = self.positions_json.write().await;
             *positions_json = json;
@@ -209,11 +215,28 @@ impl AppState {
     /// the portfolio cache.
     pub async fn refresh_prices(&self) {
         let portfolio = self.fetch_portfolio().await;
+        // Unparseable JSON yields an empty portfolio; keep the raw text.
+        if self.positions_error.read().await.is_some() {
+            return;
+        }
         // Cache the enriched JSON (with names filled in from Yahoo) for saving.
         if let Ok(enriched) = positions_to_string(&portfolio.positions) {
             let mut positions_json = self.positions_json.write().await;
             *positions_json = enriched;
         }
+    }
+
+    /// Why the loaded positions JSON did not parse, as
+    /// `Error parsing positions in <file>: <serde error>`.
+    pub async fn positions_error(&self) -> Option<String> {
+        let err = self.positions_error.read().await.clone()?;
+        let file = self
+            .file_path
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| "the positions data".to_string());
+        Some(format!("Error parsing positions in {file}: {err}"))
     }
 
     /// Build a live portfolio from the current JSON.

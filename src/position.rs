@@ -407,16 +407,32 @@ impl PortfolioPosition {
         }
     }
 
+    /// The data-format amount: sum of purchase quantities, or `Amount` without
+    /// purchases (units for a market position, the value for a manual one).
+    /// See [`Self::quantity_dec`] for the quantity shown to users.
     pub fn get_amount(&self) -> f64 {
-        to_f64(self.quantity_dec())
+        to_f64(self.amount_dec())
     }
 
-    /// Held quantity: sum of purchase quantities, or `Amount` without purchases.
-    pub fn quantity_dec(&self) -> Decimal {
+    fn amount_dec(&self) -> Decimal {
         if self.purchases.is_empty() {
             self.amount
         } else {
             self.purchases.iter().map(|p| p.quantity).sum()
+        }
+    }
+
+    /// Held quantity: the sum of purchase quantities when there are purchases.
+    /// Without purchases, `Amount` is the quantity of a market position (a
+    /// ticker) and of cash (its balance), but a *value* for a manual position
+    /// (no ticker, not cash), which then counts as one item valued at `Amount`
+    /// (quantity 1). Valuation never uses this for manual positions: their
+    /// value is always `Amount`.
+    pub fn quantity_dec(&self) -> Decimal {
+        if self.purchases.is_empty() && self.ticker.is_none() && !self.is_cash() {
+            Decimal::ONE
+        } else {
+            self.amount_dec()
         }
     }
 

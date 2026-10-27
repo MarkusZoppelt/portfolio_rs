@@ -112,7 +112,7 @@ impl Portfolio {
         self.positions
             .iter()
             .filter(|p| !p.is_cash() && p.has_market_price() && p.total_invested_dec().is_none())
-            .filter(|p| p.quantity_dec() > Decimal::ZERO)
+            .filter(|p| p.get_amount() > 0.0)
             .collect()
     }
 
@@ -290,6 +290,9 @@ impl Portfolio {
                 "-".to_string()
             } else if position.price_status() == PriceStatus::FxUnavailable && price > 0.0 {
                 format!("{price:.2} {}", price_ccy.unwrap_or_default())
+            } else if position.get_ticker().is_none() {
+                // Manual holding: valued by hand, no market price.
+                "-".to_string()
             } else if !position.has_market_price() {
                 "n/a".to_string()
             } else if let Some(ccy) = price_ccy {

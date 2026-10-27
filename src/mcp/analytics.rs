@@ -119,6 +119,39 @@ pub struct PortfolioPnl {
     pub unrealized_pnl: Option<Decimal>,
     pub unrealized_pnl_percent: Option<Decimal>,
     pub day_pnl: Option<Decimal>,
+    /// Valued positions left out of invested/PnL for want of a cost basis.
+    pub missing_cost_basis: Vec<(String, String)>,
+}
+
+/// `cost_basis_missing` warning (once per response) when `pnl` is partial
+/// and names the positions excluded for want of a cost basis.
+pub fn cost_basis_finding(pnl: &PortfolioPnl) -> Option<Finding> {
+    if !pnl.partial || pnl.missing_cost_basis.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = pnl
+        .missing_cost_basis
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect();
+    let ids: Vec<&str> = pnl
+        .missing_cost_basis
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    Some(
+        Finding::new(
+            "cost_basis_missing",
+            Severity::Warning,
+            Category::DataQuality,
+            format!(
+                "{} position(s) without complete cost basis excluded from invested/PnL: {}",
+                names.len(),
+                names.join(", ")
+            ),
+        )
+        .detail(json!({ "positions": ids })),
+    )
 }
 
 fn sum_parts(
@@ -175,7 +208,13 @@ pub fn portfolio_pnl(portfolio: &Portfolio) -> PortfolioPnl {
         (Some(pnl), Some(inv)) => percent_of(pnl, inv),
         _ => None,
     };
+    let missing_cost_basis = valued
+        .iter()
+        .filter(|p| p.total_invested_dec().is_none())
+        .map(|p| (pid(p), p.get_name().to_string()))
+        .collect();
     PortfolioPnl {
+        missing_cost_basis,
         partial: partial.get(),
         invested,
         unrealized_pnl,
@@ -307,7 +346,7 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
                 Severity::Warning,
                 Category::DataQuality,
                 format!(
-                    "{} position(s) use last-known prices or FX rates from the quote cache (oldest as of {}); values are not current.",
+                    "{} position(s) have stale prices or FX rates (from the quote cache or older than the stale-after threshold; oldest as of {}); values are not current.",
                     stale.len(),
                     oldest.as_deref().unwrap_or("unknown")
                 ),
