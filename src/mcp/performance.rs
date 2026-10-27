@@ -538,6 +538,7 @@ mod tests {
             price_currency: None,
             fx_rate: None,
             value_base: Some(v),
+            stale: None,
         }
     }
 
@@ -770,6 +771,7 @@ mod tests {
                 fx_rate: None,
                 value_base: Some(value),
                 ledger_base: None,
+                stale: None,
             }],
             cash_base: 0.0,
             total_base: value,

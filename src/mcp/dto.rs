@@ -65,6 +65,10 @@ pub struct Meta {
     /// reports one.
     pub price_as_of: Option<String>,
     /// `pos_` ids whose price or FX rate came from the cache.
+    /// In `get_performance` this also includes positions stale at the start or
+    /// end snapshot (see the `start_point_stale` / `end_point_stale` warning).
+    /// Those stale-but-valued positions are not added to
+    /// `dataQuality.affectedPositions` (that list means the value is unknown).
     pub stale_positions: Vec<String>,
     /// complete (every value known and fresh) | partial (`complete` is
     /// false) | stale (all known, but some from the quote cache).
@@ -276,6 +280,18 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "data_quality",
         "warning",
         "No usable snapshot for the period (none recent enough before the start, or none inside the window); dataStatus is insufficient_history and complete is false. Run `portfolio_rs snapshot` daily (cron or a systemd timer).",
+    ),
+    (
+        "start_point_stale",
+        "data_quality",
+        "warning",
+        "The start snapshot used stale prices; detail.positions lists them (empty when that snapshot did not record which). Included in stalePositions, not in dataQuality.affectedPositions.",
+    ),
+    (
+        "end_point_stale",
+        "data_quality",
+        "warning",
+        "The end snapshot used stale prices; detail.positions lists them (empty when that snapshot did not record which). Included in stalePositions, not in dataQuality.affectedPositions.",
     ),
     (
         "start_point_gap",
@@ -511,8 +527,13 @@ pub struct PositionRow {
     pub value_base: Option<f64>,
     pub weight_percent: Option<f64>,
     pub average_cost: Option<f64>,
+    /// Cost basis in the base currency. Set for market and manual positions
+    /// with a cost basis (manual at their ledger amount); null for cash and
+    /// when unknown.
     pub invested: Option<f64>,
+    /// Value minus cost, for the same positions as `invested`.
     pub unrealized_pnl: Option<f64>,
+    /// Unrealized PnL over invested, in percent.
     pub unrealized_pnl_percent: Option<f64>,
     pub day_change_percent: Option<f64>,
     pub purchases_count: usize,
@@ -531,16 +552,21 @@ pub struct PositionsOutput {
     pub total_value: f64,
     /// Sum of the rounded cash `valueBase` figures, rounded once more.
     pub cash_value: f64,
-    /// Portfolio-level cost basis of the priced market positions (base
-    /// currency); positions without the input are left out (`pnlPartial`).
+    /// Portfolio-level cost basis. Invested and unrealized P&L cover market
+    /// and manual positions with a cost basis (manual at their ledger amount);
+    /// cash excluded. Positions without the input are left out (`pnlPartial`).
     pub invested: Option<f64>,
-    /// Unrealized PnL of the priced market positions.
+    /// Unrealized PnL (value minus cost) of those same positions.
     pub unrealized_pnl: Option<f64>,
+    /// Unrealized PnL over invested, in percent.
     pub unrealized_pnl_percent: Option<f64>,
     /// Today's PnL of the priced market positions vs. the previous close.
+    /// Manual holdings have no quote and are not included.
     pub day_pnl: Option<f64>,
-    /// True when invested/PnL/dayPnl leave out a market position (no price,
-    /// FX, cost basis or previous close).
+    /// True when invested/PnL leave out a market or manual position (no price,
+    /// FX or cost basis), or dayPnl leaves out a market position (no previous
+    /// close). Cash is excluded from invested and unrealized P&L and does not
+    /// set this.
     pub pnl_partial: bool,
     pub positions: Vec<PositionRow>,
 }

@@ -103,6 +103,61 @@ fn push_approximate(warnings: &mut Vec<Finding>, finding: Finding) {
     warnings.push(finding);
 }
 
+/// When a snapshot point is stale, name it and fold its position ids into
+/// `stale_positions`. A snapshot that predates the per-position marker still
+/// gets a note, with an empty position list. Stale-but-valued ids are not
+/// added to `dataQuality.affectedPositions`.
+fn note_stale_point(
+    warnings: &mut Vec<Finding>,
+    stale_positions: &mut Vec<String>,
+    point: &str,
+    snap: &super::snapshots::Snapshot,
+) {
+    if snap.data_status != "stale" {
+        return;
+    }
+    let recorded = snap.positions.iter().any(|p| p.stale.is_some());
+    let positions: Vec<String> = if recorded {
+        snap.positions
+            .iter()
+            .filter(|p| p.stale == Some(true))
+            .map(|p| p.position_id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for id in &positions {
+        if !stale_positions.iter().any(|existing| existing == id) {
+            stale_positions.push(id.clone());
+        }
+    }
+    let message = if !recorded {
+        format!(
+            "The {point} snapshot ({}) is stale, but the snapshot did not record which positions were stale.",
+            snap.date
+        )
+    } else if positions.is_empty() {
+        format!(
+            "The {point} snapshot ({}) is stale, but no position was marked stale.",
+            snap.date
+        )
+    } else {
+        format!(
+            "The {point} snapshot ({}) used stale prices for {}.",
+            snap.date,
+            positions.join(", ")
+        )
+    };
+    let code = format!("{point}_point_stale");
+    warnings.push(
+        Finding::new(&code, Severity::Warning, Category::DataQuality, message).detail(json!({
+            "point": point,
+            "date": snap.date,
+            "positions": positions,
+        })),
+    );
+}
+
 impl PortfolioServer {
     pub fn new(served: ServedPortfolio) -> Self {
         Self {
@@ -216,7 +271,7 @@ impl PortfolioServer {
 impl PortfolioServer {
     #[tool(
         name = "get_positions",
-        description = "Holdings with quantity, price, base-currency value, weight, cost basis and PnL. Money is rounded to 2 decimals; null means unknown (e.g. no live quote).",
+        description = "Holdings with quantity, price, base-currency value, weight, cost basis and PnL. Invested and unrealized P&L cover market and manual positions with a cost basis (manual at their ledger amount); cash excluded. Money is rounded to 2 decimals; null means unknown (e.g. no live quote).",
         annotations(title = "Get positions", read_only_hint = true, open_world_hint = true)
     )]
     async fn get_positions(
@@ -788,6 +843,8 @@ impl PortfolioServer {
         meta.complete = meta.complete && complete;
         meta.has_stale = has_stale;
         meta.data_status = analytics::data_status(meta.complete, has_stale).to_string();
+        note_stale_point(&mut warnings, &mut meta.stale_positions, "start", &start);
+        note_stale_point(&mut warnings, &mut meta.stale_positions, "end", &end);
         let mut txs = analytics::transactions(&portfolio, &base, None);
         // Local copy only: a manual add-on with no price is valued at
         // Amount/Quantity so position_effects can estimate it. get_transactions

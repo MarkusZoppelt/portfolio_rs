@@ -4059,3 +4059,222 @@ async fn get_performance_period_defaults_to_day() {
     assert!(desc.contains("period defaults to day"), "{desc}");
     client.cancel().await.unwrap();
 }
+
+/// Rewrite today's seeded snapshot as day D-1 with `dataStatus: stale`.
+/// When `mark` is true, one market position is `stale: true`; otherwise the
+/// per-position marker is stripped (a line written before it existed).
+async fn redate_stale_start(dir: &Path, mark: bool) -> String {
+    let (path, mut old) = seed_today(dir).await;
+    old["date"] = json!(day(-1));
+    old["dataStatus"] = json!("stale");
+    let stale_id = old["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "market")
+        .expect("market position")["positionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for p in old["positions"].as_array_mut().unwrap() {
+        let obj = p.as_object_mut().unwrap();
+        if mark && obj.get("positionId").and_then(|id| id.as_str()) == Some(stale_id.as_str()) {
+            obj.insert("stale".into(), json!(true));
+        } else if !mark {
+            obj.remove("stale");
+        }
+    }
+    std::fs::write(&path, format!("{old}\n")).unwrap();
+    stale_id
+}
+
+/// A stale start snapshot must name the positions, not only flip dataStatus.
+#[tokio::test]
+async fn get_performance_names_stale_start_point() {
+    let tmp = TempDir::new().unwrap();
+    let stale_id = redate_stale_start(tmp.path(), true).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert_eq!(v["dataStatus"], "stale", "{v}");
+    assert_eq!(v["hasStale"], true, "{v}");
+    assert_eq!(v["complete"], true, "{v}");
+    assert!(
+        v["stalePositions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == &stale_id),
+        "{v}"
+    );
+    assert_eq!(v["dataQuality"]["affectedPositions"], json!([]), "{v}");
+    let w = has_code(&v, "start_point_stale").expect("note");
+    assert_eq!(w["severity"], "warning", "{w}");
+    assert_eq!(w["category"], "data_quality", "{w}");
+    assert_eq!(w["detail"]["point"], "start", "{w}");
+    assert_eq!(w["detail"]["date"], day(-1), "{w}");
+    assert!(
+        w["detail"]["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == &stale_id),
+        "{w}"
+    );
+    let msg = w["message"].as_str().unwrap();
+    assert!(
+        msg.contains("start") && msg.contains(&day(-1)) && msg.contains(&stale_id),
+        "{msg}"
+    );
+    assert!(has_code(&v, "end_point_stale").is_none(), "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// A pre-marker stale snapshot still names the point and date, with no ids.
+#[tokio::test]
+async fn get_performance_legacy_stale_snapshot_notes_unknown_positions() {
+    let tmp = TempDir::new().unwrap();
+    redate_stale_start(tmp.path(), false).await;
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    assert_eq!(v["dataStatus"], "stale", "{v}");
+    assert_eq!(v["hasStale"], true, "{v}");
+    assert_eq!(v["stalePositions"], json!([]), "{v}");
+    assert_eq!(v["dataQuality"]["affectedPositions"], json!([]), "{v}");
+    let w = has_code(&v, "start_point_stale").expect("note");
+    assert_eq!(w["detail"]["point"], "start", "{w}");
+    assert_eq!(w["detail"]["date"], day(-1), "{w}");
+    assert_eq!(w["detail"]["positions"], json!([]), "{w}");
+    let msg = w["message"].as_str().unwrap();
+    assert!(msg.contains(&day(-1)), "{msg}");
+    assert!(
+        msg.contains("did not record which positions were stale"),
+        "{msg}"
+    );
+    client.cancel().await.unwrap();
+}
+
+/// Manual holdings without a ticker count in invested and unrealized P&L,
+/// matching CLI `balances` (cash excluded; manual at the ledger amount).
+#[tokio::test]
+async fn manual_cost_basis_matches_cli_balances() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("positions.json");
+    std::fs::write(
+        &data,
+        json!([
+            {
+                "Name": "Fake ETF",
+                "AssetClass": "Stocks",
+                "Ticker": "FAKEETF",
+                "Amount": 10,
+                "Purchases": [{"Date": "2025/01/15", "Quantity": 10, "Price": 100.0}]
+            },
+            {
+                "Name": "Ledger item",
+                "AssetClass": "Other",
+                "Amount": 98,
+                "Purchases": [{"Date": "2025/01/15", "Quantity": 1, "Price": 100.0}]
+            }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let quotes = tmp.path().join("quotes.json");
+    std::fs::write(
+        &quotes,
+        r#"{"latest":{"FAKEETF":{"price":150.0,"currency":"EUR","asOf":"2026-10-27T12:00:00Z"}},"previous_close":{"FAKEETF":149.0}}"#,
+    )
+    .unwrap();
+    let fixture = FixtureProvider::from_json(&std::fs::read_to_string(&quotes).unwrap()).unwrap();
+    let client = connect(McpOptions {
+        file: Some(data.to_string_lossy().into_owned()),
+        quotes: Some(AnyProvider::Fixture(Box::new(fixture))),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["invested"], 1100.0, "{v}");
+    assert_eq!(v["unrealizedPnl"], 498.0, "{v}");
+    assert_eq!(v["unrealizedPnlPercent"], 45.27, "{v}");
+    assert_eq!(v["pnlPartial"], false, "{v}");
+    assert_eq!(v["totalValue"], 1598.0, "{v}");
+    let etf = by_ticker(&v["positions"], "FAKEETF");
+    assert_eq!(etf["valueBase"], 1500.0, "{etf}");
+    assert_eq!(etf["invested"], 1000.0, "{etf}");
+    assert_eq!(etf["unrealizedPnl"], 500.0, "{etf}");
+    let manual = v["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "manual")
+        .expect("manual row");
+    assert_eq!(manual["invested"], 100.0, "{manual}");
+    assert_eq!(manual["valueBase"], 98.0, "{manual}");
+    assert_eq!(manual["unrealizedPnl"], -2.0, "{manual}");
+    let sum = |key: &str| -> f64 {
+        v["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p[key].as_f64())
+            .sum()
+    };
+    assert!((sum("invested") - 1100.0).abs() < 0.001, "{v}");
+    assert!((sum("unrealizedPnl") - 498.0).abs() < 0.001, "{v}");
+
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    let row = ctx["context"]["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "Ledger item")
+        .expect("context row");
+    assert_eq!(row["invested"], 100.0, "{row}");
+    assert_eq!(row["pnl"], -2.0, "{row}");
+    let tools = client.list_all_tools().await.unwrap();
+    let desc = tools
+        .iter()
+        .find(|t| t.name == "get_positions")
+        .unwrap()
+        .description
+        .clone()
+        .unwrap_or_default();
+    assert!(desc.contains("manual at their ledger amount"), "{desc}");
+    client.cancel().await.unwrap();
+
+    let home = TempDir::new().unwrap();
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
+        .arg("balances")
+        .arg(&data)
+        .current_dir(tmp.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env(
+            "PORTFOLIO_RS_QUOTES",
+            format!("fixture:{}", quotes.display()),
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "balances failed: {stderr}\n{stdout}"
+    );
+    let total = stdout
+        .lines()
+        .find(|line| line.contains("TOTAL"))
+        .unwrap_or_else(|| panic!("{stdout}\n{stderr}"));
+    assert!(total.contains("1100.00"), "{total}");
+    assert!(total.contains("498.00"), "{total}");
+    assert!(total.contains("45.27"), "{total}");
+}

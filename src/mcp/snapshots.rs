@@ -32,6 +32,13 @@ pub struct SnapshotPosition {
     /// B8). Lets `get_performance` notice a ledger edited afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_base: Option<f64>,
+    /// Whether this position's price or FX rate was stale when the snapshot
+    /// was recorded (same rule as `Meta::stale_positions`: a priced market
+    /// position whose price or FX is older than `--stale-after`). `None` on
+    /// snapshots written before the marker existed; new snapshots always set
+    /// it, including `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -232,6 +239,8 @@ pub fn from_portfolio(portfolio: &Portfolio, base: &str, date: &str, stale: bool
             )
         })
         .collect();
+    // Same ids `Meta::stale_positions` would list for this valuation.
+    let (_, stale_ids) = analytics::price_freshness(portfolio);
     let positions: Vec<SnapshotPosition> = rows
         .into_iter()
         .map(|r| {
@@ -244,7 +253,7 @@ pub fn from_portfolio(portfolio: &Portfolio, base: &str, date: &str, stale: bool
                 ledger_base: (r.kind != "cash")
                     .then(|| super::performance::ledger_to_date(&txs, &r.id, date, r.fx_rate))
                     .flatten(),
-                position_id: r.id,
+                position_id: r.id.clone(),
                 kind: r.kind,
                 asset_class: r.asset_class,
                 quantity,
@@ -252,6 +261,7 @@ pub fn from_portfolio(portfolio: &Portfolio, base: &str, date: &str, stale: bool
                 price_currency: r.price_currency,
                 fx_rate: r.fx_rate,
                 value_base: r.value_base,
+                stale: Some(stale_ids.iter().any(|id| id == &r.id)),
             }
         })
         .collect();
@@ -365,6 +375,7 @@ mod tests {
                 fx_rate: None,
                 value_base: Some(total),
                 ledger_base: None,
+                stale: None,
             }],
             cash_base: total,
             total_base: total,
@@ -492,6 +503,43 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
+    }
+
+    /// New snapshots record which positions were stale; a line written before
+    /// that field still loads, with the marker absent.
+    #[test]
+    fn from_portfolio_records_per_position_stale_and_old_lines_load() {
+        use crate::portfolio::Portfolio;
+        use crate::position::{PortfolioPosition, PriceStatus};
+
+        let mut stale =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 1.0, 10.0, PriceStatus::Live);
+        stale.id = Some("pos_stale".into());
+        stale.runtime.stale = true;
+        let mut fresh =
+            PortfolioPosition::for_test(Some("FRESH"), "Stocks", 1.0, 10.0, PriceStatus::Live);
+        fresh.id = Some("pos_fresh".into());
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(stale);
+        portfolio.add_position(fresh);
+        let snap = from_portfolio(&portfolio, "EUR", "2026-01-01", true);
+        assert_eq!(snap.data_status, "stale");
+        let by_id = |id: &str| {
+            snap.positions
+                .iter()
+                .find(|p| p.position_id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        assert_eq!(by_id("pos_stale").stale, Some(true));
+        assert_eq!(by_id("pos_fresh").stale, Some(false));
+
+        let mut old = serde_json::to_value(&snap).unwrap();
+        for p in old["positions"].as_array_mut().unwrap() {
+            p.as_object_mut().unwrap().remove("stale");
+        }
+        let loaded: Snapshot = serde_json::from_value(old).unwrap();
+        assert!(loaded.positions.iter().all(|p| p.stale.is_none()));
+        assert_eq!(loaded.date, "2026-01-01");
     }
 
     #[test]

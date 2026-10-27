@@ -142,6 +142,13 @@ Figures are null, never 0, when they are unknown: no usable start snapshot
 false; `endValue` still holds a known end value), or a missing price or FX
 rate in the start or end valuation (`performance_partial`, `dataStatus:
 partial`). A stale start, end or live price makes `dataStatus: stale`.
+A stale start or end snapshot also adds a `start_point_stale` or
+`end_point_stale` warning naming the point, its date and the stale position
+ids (`detail`: `{point, date, positions}`). Those ids are included in
+`stalePositions`. An older snapshot that did not record which positions were
+stale still gets the note, with `positions: []` and a message saying so.
+Stale but valued positions are not listed in `dataQuality.affectedPositions`
+(that list means the value is unknown).
 `insufficient_history` is a `get_performance`-only `dataStatus`; other tools
 still report only `complete`, `partial` or `stale`. `endValue` is the sum of
 the rounded per-position values, so it matches `get_positions` `totalValue`
@@ -170,8 +177,10 @@ snapshots then turn incomplete. An incomplete snapshot never replaces a
 complete one for the same day; `snapshot` warns and keeps the complete
 line. Each line is
 `{date, baseCurrency, positions: [{positionId, kind, assetClass, quantity,
-price, priceCurrency, fxRate, valueBase, ledgerBase}], cashBase, totalBase, netFlowsBase,
-complete, dataStatus}`. The workspace `.gitignore` template covers
+price, priceCurrency, fxRate, valueBase, ledgerBase, stale}], cashBase, totalBase, netFlowsBase,
+complete, dataStatus}`. `stale` is true when that position's price or FX was
+stale when the snapshot was recorded (same rule as `stalePositions`); it is
+omitted on older lines. The workspace `.gitignore` template covers
 `/portfolio/history/`, `snapshots.jsonl` and `.snapshots.jsonl.tmp-*`, and
 `doctor` warns when they are missing or tracked by git.
 
@@ -272,7 +281,7 @@ governed by the cash-buffer and asset-class rules instead.
 
 | Tool | Returns |
 | --- | --- |
-| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl`, `unrealizedPnlPercent`, `dayPnl` summed over the priced market positions, `pnlPartial: true` when a position is left out. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange (value ties and unpriced rows by name, the same order as `get_context`) |
+| `get_positions` | Positions with price status, value in base currency, weight, cost basis and P&L, `currency` per row (base currency for cash), `priceAsOf` (provider timestamp, null when not reported); portfolio-level `invested`, `unrealizedPnl` and `unrealizedPnlPercent` cover market and manual positions with a cost basis (manual at their ledger amount); cash excluded; `dayPnl` is priced market positions vs. the previous close; `pnlPartial: true` when a position is left out. Filters: `assetClass`, `includeManual`; `sortBy` value/name/pnl/dayChange (value ties and unpriced rows by name, the same order as `get_context`) |
 | `get_allocation` | Allocation by asset class against policy targets and bands, drift and amount to target |
 | `check_policy` | Policy findings with stable codes and severities, constraint checks, overall status (`ok`/`warnings`/`breach`); one deduplicated list (policy findings + warning-severity data quality, filtered by `minSeverity`) feeds `findings` (policy part), `breaches` (critical), top-level `warnings` (warning severity), `counts` and `status`, so `counts.warning` = `warnings` length and `counts.critical` = `breaches` length; `cashBuffer` {minimum, actual, surplus} against `minimum_cash_amount` (also in `get_context`); `minSeverity` filter |
 | `get_transactions` | Buys and sells synthesized from purchase history; cash entries are `deposit`/`withdrawal` at par (a cash position without entries is one opening deposit with `synthesized: true`, dated at the earliest purchase date or else the file date, reported in `dateSource`: `earliest_purchase` | `file_mtime`, fees 0); `fees` is 0 when none is recorded; `complete` covers current values only; matching transactions whose `amountBase` is null (no historic FX) are counted in `fxHistoricMissing` with an `fx_historic_unavailable` warning; date, ticker, class and type filters; `limit` (max 500) and `cursor` paging |

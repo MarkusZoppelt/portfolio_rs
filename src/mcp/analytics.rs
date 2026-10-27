@@ -107,10 +107,12 @@ fn total_known(positions: &[&PortfolioPosition]) -> Decimal {
     positions.iter().filter_map(|p| value_base(p)).sum()
 }
 
-/// Portfolio-level cost basis and PnL over the priced market positions (cash
-/// and manual holdings have none). Positions without a base value or without
-/// the input are left out and `partial` is set, so a partial sum is always
-/// flagged. A total is null only when no position contributes.
+/// Portfolio-level cost basis and PnL. Invested and unrealized P&L cover
+/// market and manual positions with a cost basis (manual at their ledger
+/// amount); cash excluded. Positions without a base value or without a cost
+/// basis are left out and `partial` is set, so a partial sum is always
+/// flagged. Day PnL stays over priced market positions (manual holdings have
+/// no quote). A total is null only when no position contributes.
 pub struct PortfolioPnl {
     pub partial: bool,
     pub invested: Option<Decimal>,
@@ -119,29 +121,51 @@ pub struct PortfolioPnl {
     pub day_pnl: Option<Decimal>,
 }
 
+fn sum_parts(
+    rows: &[&PortfolioPosition],
+    empty_is_zero: bool,
+    partial: &std::cell::Cell<bool>,
+    f: &dyn Fn(&PortfolioPosition) -> Option<Decimal>,
+) -> Option<Decimal> {
+    let parts: Vec<Option<Decimal>> = rows.iter().map(|p| f(p)).collect();
+    if parts.iter().any(Option::is_none) {
+        partial.set(true);
+    }
+    let known: Vec<Decimal> = parts.into_iter().flatten().collect();
+    (!known.is_empty() || empty_is_zero).then(|| known.into_iter().sum())
+}
+
 pub fn portfolio_pnl(portfolio: &Portfolio) -> PortfolioPnl {
-    let all_market: Vec<&PortfolioPosition> = portfolio
+    // Same scope as `Portfolio::cost_basis_totals`: every non-cash position
+    // with a value and a cost basis. Manual holdings are valued at their
+    // ledger amount (`Amount`), not left out.
+    let costed_scope: Vec<&PortfolioPosition> = portfolio
         .positions
         .iter()
-        .filter(|p| kind(p) == "market")
+        .filter(|p| kind(p) != "cash")
         .collect();
-    let market: Vec<&PortfolioPosition> = all_market
+    let valued: Vec<&PortfolioPosition> = costed_scope
         .iter()
         .copied()
         .filter(|p| value_base(p).is_some())
         .collect();
-    let partial = std::cell::Cell::new(market.len() < all_market.len());
-    let sum = |f: &dyn Fn(&PortfolioPosition) -> Option<Decimal>| -> Option<Decimal> {
-        let parts: Vec<Option<Decimal>> = market.iter().map(|p| f(p)).collect();
-        if parts.iter().any(Option::is_none) {
-            partial.set(true);
-        }
-        let known: Vec<Decimal> = parts.into_iter().flatten().collect();
-        (!known.is_empty() || all_market.is_empty()).then(|| known.into_iter().sum())
-    };
-    let invested = sum(&|p| p.total_invested_dec());
-    let unrealized_pnl = sum(&|p| p.pnl_dec());
-    let day_pnl = sum(&|p| {
+    let partial = std::cell::Cell::new(valued.len() < costed_scope.len());
+    let invested = sum_parts(&valued, costed_scope.is_empty(), &partial, &|p| {
+        p.total_invested_dec()
+    });
+    let unrealized_pnl = sum_parts(&valued, costed_scope.is_empty(), &partial, &|p| p.pnl_dec());
+
+    let all_market: Vec<&PortfolioPosition> = costed_scope
+        .iter()
+        .copied()
+        .filter(|p| kind(p) == "market")
+        .collect();
+    let market: Vec<&PortfolioPosition> = valued
+        .iter()
+        .copied()
+        .filter(|p| kind(p) == "market")
+        .collect();
+    let day_pnl = sum_parts(&market, all_market.is_empty(), &partial, &|p| {
         let d = dec(p.daily_variation_percent()?);
         let value = value_base(p)?;
         let denom = Decimal::ONE_HUNDRED + d;
@@ -187,8 +211,15 @@ pub fn position_rows(
         .map(|p| {
             let value = value_base(p);
             let market = kind(p) == "market";
-            let invested = p.total_invested_dec();
-            let pnl = if market { p.pnl_dec() } else { None };
+            // Manual rows carry invested/PnL when a cost basis exists, so row
+            // sums match `portfolio_pnl` (cash stays out).
+            let with_basis = kind(p) != "cash";
+            let invested = if with_basis {
+                p.total_invested_dec()
+            } else {
+                None
+            };
+            let pnl = if with_basis { p.pnl_dec() } else { None };
             PositionRow {
                 id: pid(p),
                 name: p.get_name().to_string(),
@@ -223,14 +254,14 @@ pub fn position_rows(
                     .filter(|_| complete)
                     .and_then(|v| percent_of(v, total))
                     .map(pct),
-                average_cost: if market {
+                average_cost: if with_basis {
                     p.average_cost_dec().map(|d| to_f64(d.round_dp(6)))
                 } else {
                     None
                 },
-                invested: if market { invested.map(money) } else { None },
+                invested: invested.map(money),
                 unrealized_pnl: pnl.map(money),
-                unrealized_pnl_percent: if market && pnl.is_some() {
+                unrealized_pnl_percent: if with_basis && pnl.is_some() {
                     p.historic_variation_percent().map(|v| pct(dec(v)))
                 } else {
                     None
