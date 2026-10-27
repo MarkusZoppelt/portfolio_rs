@@ -10,3 +10,6 @@ positions.json.bak
 snapshots.jsonl
 .snapshots.jsonl.tmp-*
 portfolio/history/
+
+# Claude Code local settings
+.claude/
