@@ -54,9 +54,10 @@ pub struct Meta {
     /// allocation then cover only the priced positions (see `dataQuality`).
     pub complete: bool,
     pub data_quality: DataQuality,
-    /// True when any used price or FX rate came from the last-known-price
-    /// cache (see `stalePositions`). Cached prices within the max age count
-    /// towards `complete`.
+    /// True when any used price or FX rate is stale: its `asOf` is older than
+    /// the stale-after threshold, whether live or from the last-known-price
+    /// cache (see `stalePositions`). A fresh cached price is not stale. Stale
+    /// prices still count towards `complete`.
     pub has_stale: bool,
     /// connected | partial | offline | fixture, derived from the quotes actually
     /// present; identical across all tools and `get_context`.
@@ -64,14 +65,16 @@ pub struct Meta {
     /// Oldest `priceAsOf` among the priced market positions; null when none
     /// reports one.
     pub price_as_of: Option<String>,
-    /// `pos_` ids whose price or FX rate came from the cache.
+    /// `pos_` ids whose price or FX rate is stale (older than the stale-after
+    /// threshold, from any source including the quote cache).
     /// In `get_performance` this also includes positions stale at the start or
     /// end snapshot (see the `start_point_stale` / `end_point_stale` warning).
     /// Those stale-but-valued positions are not added to
     /// `dataQuality.affectedPositions` (that list means the value is unknown).
     pub stale_positions: Vec<String>,
     /// complete (every value known and fresh) | partial (`complete` is
-    /// false) | stale (all known, but some from the quote cache).
+    /// false) | stale (all known, but some older than the stale-after threshold,
+    /// from the quote cache or live).
     /// `get_performance` may also report `insufficient_history` when there is
     /// no usable start snapshot (`complete` is false, `method` is `none`).
     /// Other tools never use that value; `complete` | `partial` | `stale` are
@@ -213,7 +216,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "stale_prices",
         "data_quality",
         "warning",
-        "Some prices or FX rates are stale (from the quote cache or older than the stale-after threshold); dataStatus is stale.",
+        "Some prices or FX rates are stale (older than the stale-after threshold, live or from the quote cache); dataStatus is stale.",
     ),
     (
         "possible_breach",

@@ -251,6 +251,18 @@ pub async fn serve_stdio(opts: McpOptions) -> Result<()> {
     Ok(())
 }
 
+/// The positions file did not parse (`Error parsing positions in <file>: ...`).
+#[derive(Debug)]
+pub struct PositionsParseError(pub String);
+
+impl std::fmt::Display for PositionsParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PositionsParseError {}
+
 /// Value the portfolio selected by `opts` and upsert today's snapshot.
 /// Returns the snapshot file path, what happened to the line, and whether
 /// the new snapshot was complete. Used by `portfolio_rs snapshot`; the MCP
@@ -260,6 +272,10 @@ pub async fn record_snapshot(opts: &McpOptions) -> Result<(PathBuf, snapshots::U
     let path = served.snapshots_path.clone().ok_or_else(|| {
         eyre::eyre!("no snapshot dir: pass --data-dir or set PORTFOLIO_RS_DATA_DIR")
     })?;
+    // A broken positions file must never overwrite a good snapshot.
+    if let Some(message) = served.state.positions_error().await {
+        return Err(PositionsParseError(message).into());
+    }
     served.state.refresh_prices().await;
     let portfolio = served.state.portfolio().await;
     let base = served.state.currency().await;

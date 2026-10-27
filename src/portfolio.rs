@@ -267,7 +267,7 @@ impl Portfolio {
         let mut table = styled_table(
             TABLE_WIDTH,
             &[
-                "Name", "Class", "Amount", "Avg Cost", "Invested", "Price", "Value", "PnL",
+                "Name", "Class", "Quantity", "Avg Cost", "Invested", "Price", "Value", "PnL",
                 "%Hist", "%Day",
             ],
         );
@@ -310,7 +310,8 @@ impl Portfolio {
             table.add_row(vec![
                 Cell::new(position.get_name()),
                 Cell::new(asset_class).fg(asset_class_color(asset_class)),
-                right(format!("{:.4}", position.get_amount())),
+                // Quantity, not the data-format `Amount`: a manual item is one item.
+                right(format!("{:.4}", to_f64(position.quantity_dec()))),
                 right(money_or_dash(unless_cash(position.average_cost()))),
                 right(money_or_dash(unless_cash(position.total_invested()))),
                 right(price_str),

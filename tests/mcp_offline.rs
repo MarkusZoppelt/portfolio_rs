@@ -4509,7 +4509,175 @@ async fn manual_without_purchases_has_quantity_one_and_cli_price_dash() {
         .find(|l| l.contains("Ledger item"))
         .unwrap_or_else(|| panic!("{stdout}"));
     let cells: Vec<&str> = row.split('┆').map(str::trim).collect();
-    // Name, Class, Amount, Avg Cost, Invested, Price, Value, ...
+    // Name, Class, Quantity, Avg Cost, Invested, Price, Value, ...
+    assert!(stdout.contains("Quantity"), "{stdout}");
+    assert_eq!(cells[2], "1.0000", "{row}");
     assert_eq!(cells[5], "-", "{row}");
     assert_eq!(cells[6], "250.00", "{row}");
+}
+
+/// A multi-line positions file where the second position lacks `Amount`.
+fn multiline_missing_amount() -> &'static str {
+    r#"[
+ {
+  "Name": "Fake ETF",
+  "Ticker": "FAKEETF",
+  "AssetClass": "Stocks",
+  "Amount": 10
+ },
+ {
+  "Name": "Fake Watch",
+  "AssetClass": "Collectibles"
+ }
+]"#
+}
+
+/// Run the CLI with an isolated home, fixture quotes and snapshot dir.
+fn run_cli(tmp: &TempDir, args: &[&str]) -> std::process::Output {
+    let quotes = tmp.path().join("quotes.json");
+    std::fs::write(&quotes, FIXTURE_QUOTES).unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::process::Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
+        .args(args)
+        .current_dir(tmp.path())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("PORTFOLIO_RS_DATA_DIR", tmp.path().join("data"))
+        .env(
+            "PORTFOLIO_RS_QUOTES",
+            format!("fixture:{}", quotes.display()),
+        )
+        .output()
+        .unwrap()
+}
+
+/// Every file under `dir` with its bytes, for before/after comparisons.
+fn dir_contents(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn snapshot_bad_file_keeps_existing_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let good = tmp.path().join("good.json");
+    std::fs::write(
+        &good,
+        r#"[{"Name": "Fake ETF", "Ticker": "FAKEETF", "AssetClass": "Stocks", "Amount": 10}]"#,
+    )
+    .unwrap();
+    let out = run_cli(&tmp, &["snapshot", good.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let data = tmp.path().join("data");
+    let before = dir_contents(&data);
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    for bad in [
+        multiline_missing_amount(),
+        "",
+        "not json",
+        r#"{"Name": "x"}"#,
+        r#"[{"Name": "x", "AssetClass": "Stocks", "Amount": "ten"}]"#,
+    ] {
+        let file = tmp.path().join("bad.json");
+        std::fs::write(&file, bad).unwrap();
+        let out = run_cli(&tmp, &["snapshot", file.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{bad}: {stderr}");
+        assert!(stderr.contains("Error parsing positions"), "{stderr}");
+        assert!(!stderr.contains("Snapshot written"), "{stderr}");
+        assert_eq!(dir_contents(&data), before, "{bad}");
+    }
+    let file = tmp.path().join("bad.json");
+    std::fs::write(&file, multiline_missing_amount()).unwrap();
+    let out = run_cli(&tmp, &["snapshot", file.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Amount"));
+}
+
+#[test]
+fn cli_bad_positions_exit_2() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("bad.json");
+    std::fs::write(&file, multiline_missing_amount()).unwrap();
+    let file = file.to_str().unwrap();
+    for cmd in ["balances", "allocation", "performance", "context", "sort"] {
+        let out = run_cli(&tmp, &[cmd, file]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{cmd}: {stderr}");
+        assert!(
+            stderr.contains("Error parsing positions"),
+            "{cmd}: {stderr}"
+        );
+        assert!(stderr.contains("Amount"), "{cmd}: {stderr}");
+        assert!(
+            !stdout.contains('┆') && !stdout.contains("Quantity"),
+            "{cmd}: {stdout}"
+        );
+    }
+}
+
+fn line_column(text: &str) -> String {
+    format!(
+        "line {} column {}",
+        words_number(text, "line "),
+        words_number(text, "column ")
+    )
+}
+
+fn words_number(text: &str, key: &str) -> String {
+    let at = text.find(key).unwrap_or_else(|| panic!("no {key}: {text}")) + key.len();
+    text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect()
+}
+
+#[tokio::test]
+async fn mcp_and_cli_report_same_parse_position() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    std::fs::write(&file, multiline_missing_amount()).unwrap();
+    let file = file.to_string_lossy().into_owned();
+
+    let client = connect(McpOptions {
+        file: Some(file.clone()),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await;
+    let (code, message) = err_parts(&client, "get_positions", json!({})).await;
+    assert_eq!(code, "invalid_data", "{message}");
+    client.cancel().await.unwrap();
+
+    let out = run_cli(&tmp, &["balances", &file]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        line_column(&message),
+        line_column(&stderr),
+        "{message} / {stderr}"
+    );
+    assert_eq!(line_column(&stderr), "line 11 column 2");
 }

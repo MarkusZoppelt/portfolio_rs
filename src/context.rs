@@ -98,7 +98,8 @@ fn round2_opt<S: serde::Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::E
 struct ContextSummary {
     /// Banner first in the summary; null when every position is priced.
     incomplete: Option<String>,
-    /// complete | partial | stale (cached prices or FX rates in use).
+    /// complete | partial | stale (some price or FX rate older than the
+    /// stale-after threshold).
     data_status: &'static str,
     #[serde(serialize_with = "round2")]
     total_value: f64,
@@ -222,7 +223,7 @@ impl PortfolioContext {
             if position.get_ticker().is_some() && position.has_native_price() && position.is_stale()
             {
                 data_quality_flags.push(format!(
-                    "Price for {} is stale (from the quote cache or older than the stale-after threshold; as of {}).",
+                    "Price for {} is stale (older than the stale-after threshold; as of {}).",
                     position.get_name(),
                     position.price_as_of().unwrap_or("unknown")
                 ));

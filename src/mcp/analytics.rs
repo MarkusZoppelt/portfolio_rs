@@ -346,7 +346,7 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
                 Severity::Warning,
                 Category::DataQuality,
                 format!(
-                    "{} position(s) have stale prices or FX rates (from the quote cache or older than the stale-after threshold; oldest as of {}); values are not current.",
+                    "{} position(s) have stale prices or FX rates (older than the stale-after threshold, live or from the quote cache; oldest as of {}); values are not current.",
                     stale.len(),
                     oldest.as_deref().unwrap_or("unknown")
                 ),

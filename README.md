@@ -33,8 +33,17 @@ A position's `Amount` is its quantity when it has a `Ticker` (and for cash, its
 balance). A position without a ticker that is not cash is a *manual* holding:
 its `Amount` is a value, and its price shows as `-` in tables. With `Purchases`
 the quantity is the sum of the purchase quantities. Without purchases a manual
-holding counts as one item valued at `Amount` (quantity 1 in `get_positions` and
-`get_context`); valuation totals always use `Amount` for manual holdings.
+holding counts as one item valued at `Amount` (quantity 1 in `get_positions`,
+`get_context` and the `Quantity` column of the `balances` table, whose `Value`
+column holds `Amount`); valuation totals always use `Amount` for manual holdings.
+
+A positions file that does not parse (invalid JSON, a missing or mistyped field,
+an object instead of an array, an empty file) makes every command that reads
+positions print `Error parsing positions in <file>: ...` to stderr and exit with
+code 2, like `validate`, instead of showing an empty portfolio. `snapshot`
+then writes nothing and leaves existing snapshots untouched. Line and column in
+the message refer to the file as written, in the CLI and in the MCP
+`invalid_data` error alike.
 
 **Workspace mode.** For policies, diary, decisions, and reports, create a
 workspace:
@@ -67,7 +76,7 @@ Switch tabs with `h`/`l`, `Tab` or `1`/`2`, quit with `q`. Start on a tab with
 | Command | Description |
 |---|---|
 | `portfolio_rs [FILE]` | Interactive TUI (default) |
-| `balances [FILE]` | Balances table with PnL |
+| `balances [FILE]` | Balances table (Quantity, cost, Value, PnL) |
 | `allocation [FILE]` | Allocation pie chart and breakdown |
 | `performance [FILE]` | Performance metrics (YTD, total return) |
 | `sort [FILE]` | Positions sorted by value (display only) |

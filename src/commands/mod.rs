@@ -24,6 +24,35 @@ use crate::policy::Policy;
 use crate::services::portfolio_loader::{create_live_portfolio_with_logging, load_portfolio_file};
 use crate::{AppConfig, NetworkStatus, Portfolio};
 
+/// Load the positions text and refuse to go on when it does not parse.
+///
+/// Prints `Error parsing positions in <file>: <serde error>` (line and column
+/// refer to the file as written) and exits with code 2, like `validate`, so
+/// no command shows an empty portfolio for a broken file.
+pub(crate) fn load_positions_checked(filename: &str) -> eyre::Result<String> {
+    let text = load_portfolio_file(filename)?;
+    exit_if_unparsable(filename, &text);
+    Ok(text)
+}
+
+/// [`load_positions_checked`] for commands that tolerate a missing file
+/// (report/decision drafts): only a file that reads but does not parse exits.
+pub(crate) fn exit_if_file_unparsable(filename: &str) {
+    if filename.is_empty() {
+        return;
+    }
+    if let Ok(text) = load_portfolio_file(filename) {
+        exit_if_unparsable(filename, &text);
+    }
+}
+
+fn exit_if_unparsable(filename: &str, text: &str) {
+    if let Err(e) = serde_json::from_str::<Vec<crate::position::PortfolioPosition>>(text) {
+        eprintln!("Error parsing positions in {filename}: {e}");
+        std::process::exit(2);
+    }
+}
+
 /// Resolve the portfolio file: an explicit `FILE` argument wins, otherwise
 /// fall back to the configured portfolio file (workspace-aware).
 pub(crate) fn resolve_portfolio_file(matches: &ArgMatches, cfg: &AppConfig) -> String {
@@ -51,7 +80,7 @@ pub(crate) async fn load_live_portfolio(
     cfg: &AppConfig,
 ) -> Result<(Portfolio, NetworkStatus)> {
     let filename = resolve_portfolio_file(matches, cfg);
-    let positions_str = load_portfolio_file(&filename)?;
+    let positions_str = load_positions_checked(&filename)?;
     Ok(create_live_portfolio_with_logging(positions_str, true).await)
 }
 

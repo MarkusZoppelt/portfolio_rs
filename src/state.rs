@@ -200,10 +200,11 @@ impl AppState {
 
     /// Replace the raw JSON and refresh live prices.
     pub async fn set_positions_json(&self, json: String) {
-        let json = with_position_ids(json);
+        // Parse the text as given so line/column match the user's file (and the CLI).
         *self.positions_error.write().await = serde_json::from_str::<Vec<PortfolioPosition>>(&json)
             .err()
             .map(|e| e.to_string());
+        let json = with_position_ids(json);
         {
             let mut positions_json = self.positions_json.write().await;
             *positions_json = json;

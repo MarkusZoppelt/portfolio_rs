@@ -59,7 +59,17 @@ pub async fn handle_mcp(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
 
 /// `portfolio_rs snapshot`: value the portfolio and upsert today's line.
 pub async fn handle_snapshot(matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
-    let (path, outcome, complete) = record_snapshot(&options(matches, cfg)).await?;
+    let (path, outcome, complete) = match record_snapshot(&options(matches, cfg)).await {
+        Ok(recorded) => recorded,
+        Err(e) => match e.downcast_ref::<crate::mcp::PositionsParseError>() {
+            // Same exit code as `validate`; nothing was written.
+            Some(parse) => {
+                eprintln!("{parse}");
+                std::process::exit(2);
+            }
+            None => return Err(e),
+        },
+    };
     match outcome {
         Upsert::Written if complete => eprintln!("Snapshot written to {}", path.display()),
         Upsert::Written => eprintln!(

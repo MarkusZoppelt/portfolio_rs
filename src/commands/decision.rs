@@ -33,6 +33,7 @@ async fn decision_draft(
     dry_run: bool,
     cfg: &AppConfig,
 ) -> Result<()> {
+    crate::commands::exit_if_file_unparsable(&filename);
     let file_path = decision_path(Path::new(dir), title);
 
     let content = generate_decision_draft(&filename, policy_file, title, &cfg.currency).await;
