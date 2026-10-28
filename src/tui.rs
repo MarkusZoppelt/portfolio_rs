@@ -323,6 +323,48 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
 /// At most ~78 weeks (~18 months) for speed and readability.
 const MAX_CHART_WEEKS: usize = 78;
 
+/// A ticker position as seen by the weekly chart: units held and the current
+/// spot price in the quote currency.
+#[derive(Debug, Clone, Copy)]
+struct Holding {
+    amount: f64,
+    spot: f64,
+}
+
+/// Sample `weeks` prices evenly across `closes` (linear index mapping as an
+/// efficient proxy for weekly closes). `None` when there are no closes.
+fn sample_weekly(closes: &[f64], weeks: usize) -> Option<Vec<f64>> {
+    let last = closes.len().checked_sub(1)?;
+    let steps = weeks.saturating_sub(1).max(1) as f64;
+    Some(
+        (0..weeks)
+            .map(|w| closes[(((w as f64 / steps) * last as f64).round() as usize).min(last)])
+            .collect(),
+    )
+}
+
+/// Weekly portfolio value: cash plus each holding's sampled price times its
+/// amount. `histories` lines up with `holdings`; a holding without usable
+/// history is valued at its current spot price for every week.
+fn weekly_values(
+    cash: f64,
+    holdings: &[Holding],
+    histories: &[Option<Vec<f64>>],
+    weeks: usize,
+) -> Vec<f64> {
+    let mut totals = vec![cash; weeks];
+    for (holding, history) in holdings.iter().zip(histories) {
+        let prices = history
+            .as_deref()
+            .and_then(|closes| sample_weekly(closes, weeks))
+            .unwrap_or_else(|| vec![holding.spot; weeks]);
+        for (total, price) in totals.iter_mut().zip(prices) {
+            *total += price * holding.amount;
+        }
+    }
+    totals
+}
+
 // Efficient weekly series: one history fetch per ticker across full range, then sample weekly
 async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
     let earliest = portfolio
@@ -339,10 +381,15 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
 
     // Prepare tasks: fetch full history once per ticker
     let mut cash_sum = 0.0_f64;
-    let mut ticker_amounts: Vec<(String, f64)> = Vec::new();
+    let mut tickers: Vec<&str> = Vec::new();
+    let mut holdings: Vec<Holding> = Vec::new();
     for position in &portfolio.positions {
         if let Some(ticker) = position.get_ticker() {
-            ticker_amounts.push((ticker.to_string(), position.get_amount()));
+            tickers.push(ticker);
+            holdings.push(Holding {
+                amount: position.get_amount(),
+                spot: position.market_price(),
+            });
         } else {
             cash_sum += position.get_amount();
         }
@@ -354,7 +401,7 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
     let end = OffsetDateTime::from_unix_timestamp(now.timestamp())
         .expect("valid chrono timestamp should convert");
 
-    let fetches = ticker_amounts.iter().map(|(ticker, _)| async move {
+    let fetches = tickers.iter().map(|ticker| async move {
         // Offline and fixture quote modes never reach Yahoo, not even for charts.
         if !fetches_yahoo_history(AnyProvider::configured()) {
             return None;
@@ -366,49 +413,21 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
                 .await?;
             Ok::<yahoo::YResponse, yahoo::YahooError>(resp)
         };
-        match tokio::time::timeout(Duration::from_secs(3), fut).await {
-            Ok(Ok(resp)) => Some(resp),
-            _ => None,
-        }
+        let resp = tokio::time::timeout(Duration::from_secs(3), fut)
+            .await
+            .ok()?
+            .ok()?;
+        let quotes = resp.quotes().ok()?;
+        Some(quotes.iter().map(|quote| quote.close).collect::<Vec<_>>())
     });
 
-    let responses: Vec<Option<yahoo::YResponse>> = join_all(fetches).await;
+    let histories: Vec<Option<Vec<f64>>> = join_all(fetches).await;
 
-    // Build per-ticker sampled prices per week using linear index mapping as an efficient proxy
-    let mut per_ticker_weekly: Vec<Vec<f64>> = Vec::new();
-    for (i, resp_opt) in responses.into_iter().enumerate() {
-        if let Some(resp) = resp_opt {
-            if let Ok(quotes) = resp.quotes() {
-                let qlen = quotes.len().max(1);
-                let mut weekly = Vec::with_capacity(total_weeks);
-                for w in 0..total_weeks {
-                    let idx = ((w as f64 / (total_weeks - 1).max(1) as f64) * (qlen - 1) as f64)
-                        .round() as usize;
-                    let idx = idx.min(qlen - 1);
-                    let price = quotes[idx].close;
-                    weekly.push(price);
-                }
-                per_ticker_weekly.push(weekly);
-            }
-        } else {
-            // No data for this ticker: approximate flat series using current spot via portfolio positions
-            let spot = ticker_amounts.get(i).map_or(0.0, |(_, amount)| *amount);
-            per_ticker_weekly.push(vec![spot; total_weeks]);
-        }
-    }
-
-    // Sum across tickers per week (price * amount) + cash
-    let mut series: Vec<(f64, f64)> = Vec::with_capacity(total_weeks);
-    for w in 0..total_weeks {
-        let mut total = cash_sum;
-        for (ti, (_t, amount)) in ticker_amounts.iter().enumerate() {
-            if let Some(weekly) = per_ticker_weekly.get(ti) {
-                total += weekly[w] * *amount;
-            }
-        }
-        let x = w as f64; // weeks since start
-        series.push((x, total));
-    }
+    let mut series: Vec<(f64, f64)> = weekly_values(cash_sum, &holdings, &histories, total_weeks)
+        .into_iter()
+        .enumerate()
+        .map(|(w, total)| (w as f64, total)) // weeks since start
+        .collect();
 
     // Ensure final point at now equals current live total
     let current_value = portfolio.get_total_value();
@@ -2804,6 +2823,39 @@ mod tests {
                 {"Date": "2025-01-01", "Quantity": 2, "Price": 10.5},
                 {"Date": "2026-01-01", "Quantity": 4.0}]})
         );
+    }
+
+    #[test]
+    fn test_sample_weekly_spreads_over_history() {
+        assert_eq!(sample_weekly(&[], 3), None);
+        assert_eq!(sample_weekly(&[5.0], 3), Some(vec![5.0, 5.0, 5.0]));
+        assert_eq!(
+            sample_weekly(&[1.0, 2.0, 3.0, 4.0, 5.0], 3),
+            Some(vec![1.0, 3.0, 5.0])
+        );
+    }
+
+    #[test]
+    fn test_weekly_values_keeps_holdings_aligned_with_histories() {
+        let holdings = [
+            Holding {
+                amount: 2.0,
+                spot: 10.0,
+            },
+            Holding {
+                amount: 3.0,
+                spot: 99.0,
+            },
+        ];
+        // The first ticker has no history (or no quotes): it must fall back to
+        // its own spot price without shifting the second ticker's prices.
+        for missing in [None, Some(vec![])] {
+            let histories = [missing, Some(vec![1.0, 2.0])];
+            assert_eq!(
+                weekly_values(100.0, &holdings, &histories, 2),
+                vec![100.0 + 2.0 * 10.0 + 3.0, 100.0 + 2.0 * 10.0 + 6.0]
+            );
+        }
     }
 
     #[test]
