@@ -2,9 +2,10 @@ use crate::create_live_portfolio;
 use crate::error::ValidationError;
 use crate::money::{percent_of, to_f64, Decimal};
 use crate::portfolio::Portfolio;
-use crate::position::Purchase;
+use crate::position::{ensure_json_position_ids, parse_purchase_date, PortfolioPosition, Purchase};
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::services::portfolio_loader::create_live_portfolio_with_logging;
+use crate::services::quotes::AnyProvider;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
@@ -13,6 +14,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -31,6 +33,7 @@ use ratatui::{
     },
     Frame, Terminal,
 };
+use serde_json::{json, Map, Number, Value};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tui_big_text::{BigText, PixelSize};
@@ -268,64 +271,42 @@ fn format_amount(amount: f64) -> String {
 }
 
 fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
-    use crate::position::parse_purchase_date;
-    use chrono::prelude::*;
-
-    let mut purchase_events = Vec::new();
     let now = Utc::now();
 
-    // Collect all purchase events with their dates
-    for position in &portfolio.positions {
-        for purchase in position.get_purchases() {
-            if let Some(date_str) = &purchase.date {
-                if let Some(date) = parse_purchase_date(date_str) {
-                    if let Some(price) = purchase.effective_price() {
-                        if price > Decimal::ZERO && purchase.quantity > Decimal::ZERO {
-                            let days_ago = (now - date).num_days() as f64;
-                            purchase_events.push((
-                                date,
-                                days_ago,
-                                to_f64(purchase.quantity * price),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if purchase_events.is_empty() {
+    // `(date, invested)` of every dated, priced purchase, oldest first.
+    let mut purchase_events: Vec<(DateTime<Utc>, f64)> = portfolio
+        .positions
+        .iter()
+        .flat_map(|position| position.get_purchases())
+        .filter_map(|purchase| {
+            let date = parse_purchase_date(purchase.date.as_deref()?)?;
+            let price = purchase.effective_price()?;
+            (price > Decimal::ZERO && purchase.quantity > Decimal::ZERO)
+                .then(|| (date, to_f64(purchase.quantity * price)))
+        })
+        .collect();
+    purchase_events.sort_by_key(|event| event.0);
+    let Some(&(earliest_date, _)) = purchase_events.first() else {
         return vec![];
-    }
+    };
 
-    // Sort by date
-    purchase_events.sort_by_key(|a| a.0);
-
-    // Create weekly data points by building cumulative portfolio value over time
+    // Weekly points of the cumulative invested amount, from the earliest purchase to now
     let mut weekly_data = Vec::new();
     let mut cumulative_invested = 0.0;
-
-    // Get the earliest date
-    let earliest_date = purchase_events.first().unwrap().0;
-
-    // Create weekly intervals from earliest purchase to now
+    let mut events = purchase_events.iter().peekable();
     let mut current_date = earliest_date;
-    let mut event_index = 0;
     let mut week_index: usize = 0;
 
     while current_date <= now {
         // Add all purchases that happened before or on this date
-        while event_index < purchase_events.len() && purchase_events[event_index].0 <= current_date
-        {
-            cumulative_invested += purchase_events[event_index].2;
-            event_index += 1;
+        while let Some((_, invested)) = events.next_if(|(date, _)| *date <= current_date) {
+            cumulative_invested += invested;
         }
 
         if cumulative_invested > 0.0 {
             weekly_data.push((week_index as f64, cumulative_invested));
         }
 
-        // Move to next week
         current_date += chrono::Duration::days(7);
         week_index += 1;
     }
@@ -339,37 +320,22 @@ fn get_historic_portfolio_data(portfolio: &Portfolio) -> Vec<(f64, f64)> {
     weekly_data
 }
 
+/// At most ~78 weeks (~18 months) for speed and readability.
+const MAX_CHART_WEEKS: usize = 78;
+
 // Efficient weekly series: one history fetch per ticker across full range, then sample weekly
 async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
-    use crate::position::parse_purchase_date;
-    use chrono::prelude::*;
-
-    // Determine earliest purchase date
-    let mut earliest_opt: Option<DateTime<Utc>> = None;
-    for position in &portfolio.positions {
-        for p in position.get_purchases() {
-            if let Some(ds) = &p.date {
-                if let Some(d) = parse_purchase_date(ds) {
-                    earliest_opt = match earliest_opt {
-                        Some(prev) => Some(prev.min(d)),
-                        None => Some(d),
-                    };
-                }
-            }
-        }
-    }
-    let earliest = match earliest_opt {
-        Some(d) => d,
-        None => return vec![],
+    let earliest = portfolio
+        .positions
+        .iter()
+        .flat_map(|position| position.get_purchases())
+        .filter_map(|purchase| parse_purchase_date(purchase.date.as_deref()?))
+        .min();
+    let Some(earliest) = earliest else {
+        return vec![];
     };
     let now = Utc::now();
-
-    // Limit to at most ~78 weeks (~18 months) for speed and readability
-    let mut total_weeks = ((now - earliest).num_days() / 7) as usize + 1;
-    let max_weeks = 78usize;
-    if total_weeks > max_weeks {
-        total_weeks = max_weeks;
-    }
+    let total_weeks = (((now - earliest).num_days() / 7) as usize + 1).min(MAX_CHART_WEEKS);
 
     // Prepare tasks: fetch full history once per ticker
     let mut cash_sum = 0.0_f64;
@@ -388,24 +354,21 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
     let end = OffsetDateTime::from_unix_timestamp(now.timestamp())
         .expect("valid chrono timestamp should convert");
 
-    let fetches = ticker_amounts.iter().map(|(t, _)| {
-        let t2 = t.clone();
-        async move {
-            // Offline and fixture quote modes never reach Yahoo, not even for charts.
-            if !fetches_yahoo_history(crate::services::quotes::AnyProvider::configured()) {
-                return None;
-            }
-            // Per-ticker timeout to avoid stalls
-            let fut = async {
-                let resp = yahoo::YahooConnector::new()?
-                    .get_quote_history(&t2, start, end)
-                    .await?;
-                Ok::<yahoo::YResponse, yahoo::YahooError>(resp)
-            };
-            match tokio::time::timeout(Duration::from_secs(3), fut).await {
-                Ok(Ok(resp)) => Some(resp),
-                _ => None,
-            }
+    let fetches = ticker_amounts.iter().map(|(ticker, _)| async move {
+        // Offline and fixture quote modes never reach Yahoo, not even for charts.
+        if !fetches_yahoo_history(AnyProvider::configured()) {
+            return None;
+        }
+        // Per-ticker timeout to avoid stalls
+        let fut = async {
+            let resp = yahoo::YahooConnector::new()?
+                .get_quote_history(ticker, start, end)
+                .await?;
+            Ok::<yahoo::YResponse, yahoo::YahooError>(resp)
+        };
+        match tokio::time::timeout(Duration::from_secs(3), fut).await {
+            Ok(Ok(resp)) => Some(resp),
+            _ => None,
         }
     });
 
@@ -429,11 +392,7 @@ async fn compute_weekly_series_batch(portfolio: &Portfolio) -> Vec<(f64, f64)> {
             }
         } else {
             // No data for this ticker: approximate flat series using current spot via portfolio positions
-            let spot = if let Some((_, amt)) = ticker_amounts.get(i) {
-                *amt
-            } else {
-                0.0
-            };
+            let spot = ticker_amounts.get(i).map_or(0.0, |(_, amount)| *amount);
             per_ticker_weekly.push(vec![spot; total_weeks]);
         }
     }
@@ -756,74 +715,52 @@ impl App {
     }
 
     pub fn enter_edit_purchase_mode(&mut self) {
-        if let Some(portfolio) = &self.portfolio {
-            if self.selected_position < portfolio.positions.len() {
-                let position = &portfolio.positions[self.selected_position];
-                let purchases = position.get_purchases();
+        let Some((original_index, purchase)) = self.selected_purchase_entry() else {
+            return;
+        };
+        let date = purchase.date.clone().unwrap_or_default();
+        let quantity = to_f64(purchase.quantity).to_string();
+        // Only prefill the price when the original JSON has one, so an
+        // automatic price is not saved by accident.
+        let price = self.price_in_file(original_index);
 
-                // selected_purchase: 0 = Add New, 1+ = existing purchases
-                // We need to map from display order (sorted by date) to original order
-                if self.selected_purchase > 0 && self.selected_purchase <= purchases.len() {
-                    // Create sorted list to find the actual purchase
-                    let mut purchase_list: Vec<(usize, &Purchase)> =
-                        purchases.iter().enumerate().collect();
-                    purchase_list.sort_by(|a, b| {
-                        let date_a = a.1.date.as_deref().unwrap_or("");
-                        let date_b = b.1.date.as_deref().unwrap_or("");
-                        date_b.cmp(date_a) // Reverse order for newest first
-                    });
+        self.mode = AppMode::EditPurchase;
+        self.edit_field = EditField::Date;
+        self.purchase_date_input = date;
+        self.purchase_quantity_input = quantity;
+        self.purchase_price_input = price.map(|p| p.to_string()).unwrap_or_default();
+    }
 
-                    let display_index = self.selected_purchase - 1; // Convert to 0-based for sorted list
-                    if display_index < purchase_list.len() {
-                        let (original_index, purchase) = purchase_list[display_index];
+    /// The position under the cursor.
+    fn selected_portfolio_position(&self) -> Option<&PortfolioPosition> {
+        self.portfolio
+            .as_ref()?
+            .positions
+            .get(self.selected_position)
+    }
 
-                        self.mode = AppMode::EditPurchase;
-                        self.edit_field = EditField::Date;
-                        self.purchase_date_input = purchase.date.clone().unwrap_or_default();
-                        self.purchase_quantity_input = to_f64(purchase.quantity).to_string();
-                        // Only prefill price input if Price existed in the original JSON
-                        // Otherwise keep empty so auto prices don't get saved accidentally
-                        let mut price_from_json: Option<String> = None;
-                        if let Ok(original_data) =
-                            serde_json::from_str::<Vec<serde_json::Value>>(&self.positions_str)
-                        {
-                            // Find position by identifier instead of index
-                            if let Some(portfolio) = &self.portfolio {
-                                if self.selected_position < portfolio.positions.len() {
-                                    let selected_pos = &portfolio.positions[self.selected_position];
+    /// `(index in the file, purchase)` under the cursor. The list shows
+    /// "Add New" at 0, then the purchases newest first.
+    fn selected_purchase_entry(&self) -> Option<(usize, &Purchase)> {
+        let purchases = self.selected_portfolio_position()?.get_purchases();
+        purchases_newest_first(purchases)
+            .get(self.selected_purchase.checked_sub(1)?)
+            .copied()
+    }
 
-                                    // Find the position in original data by matching identifiers
-                                    for pos_val in original_data.iter() {
-                                        if let Some(obj) = pos_val.as_object() {
-                                            if json_matches_position(obj, selected_pos) {
-                                                // Found the matching position, now get the purchase price
-                                                if let Some(purchases_val) = obj.get("Purchases") {
-                                                    if let Some(arr) = purchases_val.as_array() {
-                                                        if original_index < arr.len() {
-                                                            if let Some(price_val) =
-                                                                arr[original_index].get("Price")
-                                                            {
-                                                                if let Some(p) = price_val.as_f64()
-                                                                {
-                                                                    price_from_json =
-                                                                        Some(p.to_string());
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        self.purchase_price_input = price_from_json.unwrap_or_default();
-                    }
-                }
-            }
-        }
+    /// The recorded `Price` of the selected position's purchase at `index`
+    /// in the portfolio file.
+    fn price_in_file(&self, index: usize) -> Option<f64> {
+        let data: Vec<Value> = serde_json::from_str(&self.positions_str).ok()?;
+        let position = self.selected_portfolio_position()?;
+        data.iter()
+            .filter_map(Value::as_object)
+            .find(|obj| json_matches_position(obj, position))?
+            .get("Purchases")?
+            .as_array()?
+            .get(index)?
+            .get("Price")?
+            .as_f64()
     }
 
     pub fn next_edit_field(&mut self) {
@@ -892,7 +829,7 @@ impl App {
         if let Err(e) = self.save_purchase_edit_to_file(&self.purchase_date_input, quantity, price)
         {
             // Convert eyre error to string for display - file I/O errors aren't validation errors
-            self.error_message = Some(format!("Failed to save: {:#}", e));
+            self.error_message = Some(format!("Failed to save: {e:#}"));
         }
 
         self.exit_edit_mode();
@@ -932,14 +869,12 @@ impl App {
         // Save to file
         if let Err(e) = self.save_purchase_to_file(&self.purchase_date_input, quantity, price) {
             // Convert eyre error to string for display - file I/O errors aren't validation errors
-            self.error_message = Some(format!("Failed to save: {:#}", e));
+            self.error_message = Some(format!("Failed to save: {e:#}"));
         }
 
         self.exit_edit_mode();
         Ok(())
     }
-
-    // Removed unused legacy amount edit functions (save_edit, save_to_file)
 
     fn find_and_update_position_by_identifier<F>(
         &self,
@@ -947,7 +882,7 @@ impl App {
         updater: F,
     ) -> Result<()>
     where
-        F: FnOnce(&mut serde_json::Value) -> Result<()>,
+        F: FnOnce(&mut Value) -> Result<()>,
     {
         // Decrypted .gpg portfolios must never be written back to disk.
         if self.data_file_path.ends_with(".gpg") {
@@ -958,203 +893,129 @@ impl App {
             );
         }
 
-        if let Some(portfolio) = &self.portfolio {
-            if sorted_position_index >= portfolio.positions.len() {
-                bail!("Invalid sorted position index: {}", sorted_position_index);
-            }
+        let Some(portfolio) = &self.portfolio else {
+            bail!("No portfolio available");
+        };
+        let Some(selected_position) = portfolio.positions.get(sorted_position_index) else {
+            bail!("Invalid sorted position index: {sorted_position_index}");
+        };
 
-            let selected_position = &portfolio.positions[sorted_position_index];
+        // Parse the original file to preserve all data
+        let mut original_data: Vec<Value> = serde_json::from_str(&self.positions_str)
+            .wrap_err("failed to parse original portfolio data")?;
 
-            // Parse the original file to preserve all data
-            let mut original_data: Vec<serde_json::Value> =
-                serde_json::from_str(&self.positions_str)
-                    .wrap_err("failed to parse original portfolio data")?;
-
-            // Find and update the position in original data by matching identifiers
-            let mut found = false;
-            for pos_val in original_data.iter_mut() {
-                if let Some(obj) = pos_val.as_object() {
-                    if json_matches_position(obj, selected_position) {
-                        // Apply the update function to this position
-                        updater(pos_val)?;
-                        found = true;
-                        break;
-                    }
-                }
-            }
-
-            if !found {
-                bail!(
+        // Find and update the position in original data by matching identifiers
+        let position_json = original_data
+            .iter_mut()
+            .find(|value| {
+                value
+                    .as_object()
+                    .is_some_and(|obj| json_matches_position(obj, selected_position))
+            })
+            .ok_or_else(|| {
+                eyre!(
                     "Could not find position '{}' in original data",
                     selected_position.get_name()
-                );
-            }
+                )
+            })?;
+        updater(position_json)?;
 
-            // Give legacy positions stable ids on first write.
-            crate::position::ensure_json_position_ids(&mut original_data);
+        // Give legacy positions stable ids on first write.
+        ensure_json_position_ids(&mut original_data);
 
-            // Save the updated data
-            let json_string = serde_json::to_string_pretty(&original_data)
-                .wrap_err("failed to serialize portfolio data to JSON")?;
-
-            write_atomic_with_backup(Path::new(&self.data_file_path), json_string.as_bytes())
-                .wrap_err_with(|| format!("failed to write to file: {}", self.data_file_path))?;
-
-            Ok(())
-        } else {
-            bail!("No portfolio available")
-        }
+        let json_string = serde_json::to_string_pretty(&original_data)
+            .wrap_err("failed to serialize portfolio data to JSON")?;
+        write_atomic_with_backup(Path::new(&self.data_file_path), json_string.as_bytes())
+            .wrap_err_with(|| format!("failed to write to file: {}", self.data_file_path))
     }
 
     fn save_purchase_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<()> {
         self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
-            // Get the position object
             let position_obj = position_obj
                 .as_object_mut()
                 .ok_or_else(|| eyre!("Invalid position data - not an object"))?;
-
-            // Get or create the Purchases array
-            let purchases_array = position_obj
+            let purchases = position_obj
                 .entry("Purchases".to_string())
-                .or_insert_with(|| serde_json::Value::Array(vec![]));
-
-            let purchases = purchases_array
+                .or_insert_with(|| Value::Array(vec![]))
                 .as_array_mut()
                 .ok_or_else(|| eyre!("Purchases field is not an array"))?;
 
-            // Create new purchase object
-            let mut new_purchase = serde_json::Map::new();
-            new_purchase.insert(
-                "Date".to_string(),
-                serde_json::Value::String(date.to_string()),
-            );
-            new_purchase.insert(
-                "Quantity".to_string(),
-                serde_json::Value::Number(
-                    // SAFETY: Valid f64 should always convert to JSON Number; fallback to 0.0
-                    serde_json::Number::from_f64(quantity)
-                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
-                ),
-            );
+            let mut purchase = Map::new();
+            purchase.insert("Date".to_string(), json!(date));
+            purchase.insert("Quantity".to_string(), json_number(quantity));
+            set_purchase_price(&mut purchase, price);
+            purchases.push(Value::Object(purchase));
 
-            // Only persist Price if the user explicitly provided it (>0). Otherwise, omit the field
-            if price > 0.0 {
-                if let Some(num) = serde_json::Number::from_f64(price) {
-                    new_purchase.insert("Price".to_string(), serde_json::Value::Number(num));
-                }
-            }
-
-            // Add the new purchase
-            purchases.push(serde_json::Value::Object(new_purchase));
-
-            // Update the Amount field to reflect total quantity
-            let total_quantity: f64 = purchases
-                .iter()
-                .filter_map(|p| p.get("Quantity")?.as_f64())
-                .sum();
-
-            position_obj.insert(
-                "Amount".to_string(),
-                serde_json::Value::Number(
-                    serde_json::Number::from_f64(total_quantity)
-                        .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
-                ),
-            );
-
+            update_amount_from_purchases(position_obj);
             Ok(())
         })
     }
 
     fn save_purchase_edit_to_file(&self, date: &str, quantity: f64, price: f64) -> Result<()> {
+        let original_index = self.selected_purchase_entry().map(|(index, _)| index);
         self.find_and_update_position_by_identifier(self.selected_position, |position_obj| {
-            // Get the position object
             let position_obj = position_obj
                 .as_object_mut()
                 .ok_or_else(|| eyre!("Invalid position data - not an object"))?;
-
-            // Get the Purchases array
-            let purchases_array = position_obj
+            let purchases = position_obj
                 .get_mut("Purchases")
-                .ok_or_else(|| eyre!("No purchases found for this position"))?;
-
-            let purchases = purchases_array
+                .ok_or_else(|| eyre!("No purchases found for this position"))?
                 .as_array_mut()
                 .ok_or_else(|| eyre!("Purchases field is not an array"))?;
 
-            // Find the purchase to edit by mapping from display order to original order
-            if let Some(portfolio) = &self.portfolio {
-                if self.selected_position < portfolio.positions.len() {
-                    let position = &portfolio.positions[self.selected_position];
-                    let portfolio_purchases = position.get_purchases();
+            let Some(purchase) = original_index.and_then(|index| purchases.get_mut(index)) else {
+                bail!("Could not find purchase to edit");
+            };
+            let purchase = purchase
+                .as_object_mut()
+                .ok_or_else(|| eyre!("Invalid purchase data - not an object"))?;
+            purchase.insert("Date".to_string(), json!(date));
+            purchase.insert("Quantity".to_string(), json_number(quantity));
+            set_purchase_price(purchase, price);
 
-                    // Create sorted list to find the actual purchase index
-                    let mut purchase_list: Vec<(usize, &Purchase)> =
-                        portfolio_purchases.iter().enumerate().collect();
-                    purchase_list.sort_by(|a, b| {
-                        let date_a = a.1.date.as_deref().unwrap_or("");
-                        let date_b = b.1.date.as_deref().unwrap_or("");
-                        date_b.cmp(date_a) // Reverse order for newest first
-                    });
-
-                    let display_index = self.selected_purchase - 1; // Convert to 0-based for sorted list
-                    if display_index < purchase_list.len() {
-                        let original_index = purchase_list[display_index].0;
-
-                        if original_index < purchases.len() {
-                            // Update the purchase at the original index
-                            let purchase_obj = purchases[original_index]
-                                .as_object_mut()
-                                .ok_or_else(|| eyre!("Invalid purchase data - not an object"))?;
-
-                            purchase_obj.insert(
-                                "Date".to_string(),
-                                serde_json::Value::String(date.to_string()),
-                            );
-                            purchase_obj.insert(
-                                "Quantity".to_string(),
-                                serde_json::Value::Number(
-                                    serde_json::Number::from_f64(quantity).unwrap_or_else(|| {
-                                        serde_json::Number::from_f64(0.0).unwrap()
-                                    }),
-                                ),
-                            );
-
-                            // Only persist Price if the user explicitly provided it (>0). Otherwise, remove the field
-                            if price > 0.0 {
-                                if let Some(num) = serde_json::Number::from_f64(price) {
-                                    purchase_obj.insert(
-                                        "Price".to_string(),
-                                        serde_json::Value::Number(num),
-                                    );
-                                }
-                            } else {
-                                purchase_obj.remove("Price");
-                            }
-
-                            // Update the Amount field to reflect total quantity
-                            let total_quantity: f64 = purchases
-                                .iter()
-                                .filter_map(|p| p.get("Quantity")?.as_f64())
-                                .sum();
-
-                            position_obj.insert(
-                                "Amount".to_string(),
-                                serde_json::Value::Number(
-                                    serde_json::Number::from_f64(total_quantity).unwrap_or_else(
-                                        || serde_json::Number::from_f64(0.0).unwrap(),
-                                    ),
-                                ),
-                            );
-
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            bail!("Could not find purchase to edit")
+            update_amount_from_purchases(position_obj);
+            Ok(())
         })
     }
+}
+
+/// Purchases with their index in `purchases`, newest first as listed in the TUI.
+fn purchases_newest_first(purchases: &[Purchase]) -> Vec<(usize, &Purchase)> {
+    let mut list: Vec<(usize, &Purchase)> = purchases.iter().enumerate().collect();
+    list.sort_by(|a, b| {
+        let date_a = a.1.date.as_deref().unwrap_or("");
+        let date_b = b.1.date.as_deref().unwrap_or("");
+        date_b.cmp(date_a)
+    });
+    list
+}
+
+/// `value` as a JSON number, 0.0 when it is not finite.
+fn json_number(value: f64) -> Value {
+    json!(if value.is_finite() { value } else { 0.0 })
+}
+
+/// Persist `Price` only when the user entered one (> 0), otherwise drop it.
+fn set_purchase_price(purchase: &mut Map<String, Value>, price: f64) {
+    if price > 0.0 {
+        if let Some(num) = Number::from_f64(price) {
+            purchase.insert("Price".to_string(), Value::Number(num));
+        }
+    } else {
+        purchase.remove("Price");
+    }
+}
+
+/// Set `Amount` to the total quantity of the position's purchases.
+fn update_amount_from_purchases(position: &mut Map<String, Value>) {
+    let total_quantity: f64 = position
+        .get("Purchases")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("Quantity")?.as_f64())
+        .sum();
+    position.insert("Amount".to_string(), json_number(total_quantity));
 }
 
 pub async fn run_tui(
@@ -1227,9 +1088,8 @@ pub async fn run_tui(
         loop {
             interval.tick().await;
             // Read latest file and build portfolio for valuation lookup if needed
-            let positions_str_current = match std::fs::read_to_string(&data_file_path_hist) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(positions_str_current) = std::fs::read_to_string(&data_file_path_hist) else {
+                continue;
             };
             let (mut portfolio, _status) =
                 create_live_portfolio_with_logging(positions_str_current, false).await;
@@ -1403,7 +1263,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Resul
                                                 // Count digits only (ignoring dashes)
                                                 let digit_count = current
                                                     .chars()
-                                                    .filter(|c| c.is_ascii_digit())
+                                                    .filter(char::is_ascii_digit)
                                                     .count();
 
                                                 if digit_count < 8 {
@@ -1483,7 +1343,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Resul
                                                 // Count digits only (ignoring dashes)
                                                 let digit_count = current
                                                     .chars()
-                                                    .filter(|c| c.is_ascii_digit())
+                                                    .filter(char::is_ascii_digit)
                                                     .count();
 
                                                 if digit_count < 8 {
@@ -1718,8 +1578,7 @@ fn render_detailed_allocation_positions(f: &mut Frame, area: Rect, portfolio: &P
     for (i, position) in positions.iter().enumerate() {
         let name = position.get_name();
         let percentage = percent_of(position.balance_dec(), portfolio.total_value_dec())
-            .map(to_f64)
-            .unwrap_or(f64::NAN);
+            .map_or(f64::NAN, to_f64);
         let color = colors[i % colors.len()];
 
         // Create horizontal bar (max 30 characters wide)
@@ -1788,21 +1647,15 @@ fn render_purchase_list(f: &mut Frame, area: Rect, app: &App) {
         };
         items.push(ListItem::new("+ Add New Purchase").style(add_style));
 
-        // Sort purchases by date (newest first)
-        let mut purchase_list: Vec<(usize, &Purchase)> = purchases.iter().enumerate().collect();
-        purchase_list.sort_by(|a, b| {
-            let date_a = a.1.date.as_deref().unwrap_or("");
-            let date_b = b.1.date.as_deref().unwrap_or("");
-            date_b.cmp(date_a) // Reverse order for newest first
-        });
-
         // Add existing purchases (sorted by date, newest first)
-        for (display_index, (_original_index, purchase)) in purchase_list.iter().enumerate() {
+        for (display_index, (_original_index, purchase)) in
+            purchases_newest_first(purchases).iter().enumerate()
+        {
             let date = purchase.date.as_deref().unwrap_or("No date");
             let total =
                 to_f64(purchase.quantity * purchase.effective_price().unwrap_or(Decimal::ZERO));
             let quantity = to_f64(purchase.quantity);
-            let price = purchase.effective_price().map(to_f64).unwrap_or(0.0);
+            let price = purchase.effective_price().map_or(0.0, to_f64);
 
             // selected_purchase: 0 = Add New, 1+ = existing purchases
             let style = if (display_index + 1) == app.selected_purchase {
@@ -2412,8 +2265,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     let s = position
                         .average_cost()
-                        .map(|v| format!("{v:.2}"))
-                        .unwrap_or_else(|| "-".to_string());
+                        .map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
                     cells.push(Cell::from(s).style(Style::default().fg(balance_color)));
                 }
             }
@@ -2423,8 +2275,7 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     let s = position
                         .total_invested()
-                        .map(|v| format!("{v:.2}"))
-                        .unwrap_or_else(|| "-".to_string());
+                        .map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
                     cells.push(Cell::from(s).style(Style::default().fg(balance_color)));
                 }
             }
@@ -2667,7 +2518,7 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
 
             // Input field with cursor
             let input_display = if app.edit_input.is_empty() {
-                "".to_string()
+                String::new()
             } else {
                 app.edit_input.clone()
             };
@@ -2826,8 +2677,9 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
                 .positions
                 .iter()
                 .find(|p| p.get_asset_class() == *asset_class)
-                .map(|p| app.get_trend_color(p.get_name(), Color::Cyan))
-                .unwrap_or(Color::Cyan);
+                .map_or(Color::Cyan, |p| {
+                    app.get_trend_color(p.get_name(), Color::Cyan)
+                });
 
             ListItem::new(Line::from(vec![
                 Span::styled(
@@ -2854,8 +2706,8 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
 }
 
 /// Chart history comes straight from Yahoo; only the default quote mode may fetch it.
-fn fetches_yahoo_history(quotes: &crate::services::quotes::AnyProvider) -> bool {
-    matches!(quotes, crate::services::quotes::AnyProvider::Yahoo)
+fn fetches_yahoo_history(quotes: &AnyProvider) -> bool {
+    matches!(quotes, AnyProvider::Yahoo)
 }
 
 /// Whether a raw JSON position object is the same position as `pos`.
@@ -2863,10 +2715,7 @@ fn fetches_yahoo_history(quotes: &crate::services::quotes::AnyProvider) -> bool 
 /// Matches by `Id` when both sides have one, so two positions with the same
 /// name, ticker and class are never confused. Falls back to name + ticker +
 /// asset class for files written before ids existed.
-fn json_matches_position(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    pos: &crate::position::PortfolioPosition,
-) -> bool {
+fn json_matches_position(obj: &Map<String, Value>, pos: &PortfolioPosition) -> bool {
     if let (Some(id), Some(json_id)) = (pos.id(), obj.get("Id").and_then(|v| v.as_str())) {
         return id == json_id;
     }
@@ -2890,7 +2739,7 @@ mod tests {
     use super::*;
     use crate::position::{PortfolioPosition, PriceStatus};
 
-    fn raw(id: Option<&str>, class: &str) -> serde_json::Map<String, serde_json::Value> {
+    fn raw(id: Option<&str>, class: &str) -> Map<String, Value> {
         let mut v = serde_json::json!({"Ticker": "FAKE", "AssetClass": class, "Amount": 1});
         if let Some(id) = id {
             v["Id"] = serde_json::json!(id);
@@ -2916,9 +2765,78 @@ mod tests {
         assert!(json_matches_position(&raw(None, "Stocks"), &pos));
     }
 
+    /// An app on a temporary portfolio file with one position and two
+    /// purchases (the older one without a recorded price).
+    fn purchase_app(dir: &tempfile::TempDir) -> (App, std::path::PathBuf) {
+        let positions = r#"[{"Name": "Fake", "Ticker": "FAKE", "AssetClass": "Stocks", "Amount": 3,
+            "Purchases": [{"Date": "2024-01-01", "Quantity": 1},
+                          {"Date": "2025-01-01", "Quantity": 2, "Price": 10.5}]}]"#;
+        let path = dir.path().join("positions.json");
+        std::fs::write(&path, positions).unwrap();
+        let mut app = App::new(
+            "EUR".to_string(),
+            positions.to_string(),
+            path.to_string_lossy().into_owned(),
+            DisabledComponents::default(),
+        );
+        let mut portfolio = Portfolio::new();
+        for position in crate::position::from_string(positions).unwrap() {
+            portfolio.add_position(position);
+        }
+        app.portfolio = Some(portfolio);
+        (app, path)
+    }
+
+    fn saved_purchases(path: &Path) -> Value {
+        let data: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        json!({"Amount": data[0]["Amount"], "Purchases": data[0]["Purchases"]})
+    }
+
+    #[test]
+    fn test_add_purchase_updates_amount() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, path) = purchase_app(&dir);
+        app.save_purchase_to_file("2026-01-01", 4.0, 0.0).unwrap();
+        assert_eq!(
+            saved_purchases(&path),
+            json!({"Amount": 7.0, "Purchases": [
+                {"Date": "2024-01-01", "Quantity": 1},
+                {"Date": "2025-01-01", "Quantity": 2, "Price": 10.5},
+                {"Date": "2026-01-01", "Quantity": 4.0}]})
+        );
+    }
+
+    #[test]
+    fn test_edit_purchase_maps_newest_first_to_file_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, path) = purchase_app(&dir);
+
+        // Row 1 is the newest purchase, the second one in the file.
+        app.selected_purchase = 1;
+        app.enter_edit_purchase_mode();
+        assert_eq!(app.mode, AppMode::EditPurchase);
+        assert_eq!(app.purchase_date_input, "2025-01-01");
+        assert_eq!(app.purchase_quantity_input, "2");
+        assert_eq!(app.purchase_price_input, "10.5");
+
+        // Row 2 has no recorded price, so the input stays empty.
+        app.selected_purchase = 2;
+        app.enter_edit_purchase_mode();
+        assert_eq!(app.purchase_date_input, "2024-01-01");
+        assert_eq!(app.purchase_price_input, "");
+
+        app.save_purchase_edit_to_file("2023-06-01", 5.0, 9.0)
+            .unwrap();
+        assert_eq!(
+            saved_purchases(&path),
+            json!({"Amount": 7.0, "Purchases": [
+                {"Date": "2023-06-01", "Quantity": 5.0, "Price": 9.0},
+                {"Date": "2025-01-01", "Quantity": 2, "Price": 10.5}]})
+        );
+    }
+
     #[test]
     fn test_chart_history_respects_quote_mode() {
-        use crate::services::quotes::AnyProvider;
         assert!(fetches_yahoo_history(&AnyProvider::Yahoo));
         assert!(!fetches_yahoo_history(&AnyProvider::Offline));
         assert!(!fetches_yahoo_history(
