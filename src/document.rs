@@ -6,8 +6,31 @@
 //! GUIs) go through [`write_dated_document`] so the overwrite guard and
 //! dry-run semantics can never drift between the two call sites.
 
+use chrono::Local;
 use eyre::{bail, Result, WrapErr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Title of a decision record drafted without one.
+pub const DEFAULT_DECISION_TITLE: &str = "Portfolio Rebalance Review";
+
+/// Today's local date as `YYYY-MM-DD`, the prefix of every dated document.
+pub fn today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// `<dir>/portfolio/reports/<date>-weekly.md`.
+pub fn weekly_report_path(dir: &Path, date: &str) -> PathBuf {
+    dir.join(format!("portfolio/reports/{date}-weekly.md"))
+}
+
+/// `<dir>/portfolio/decisions/<today>-<slug>.md` for a decision titled `title`.
+pub fn decision_path(dir: &Path, title: &str) -> PathBuf {
+    let slug = title
+        .to_lowercase()
+        .replace(' ', "-")
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+    dir.join(format!("portfolio/decisions/{}-{slug}.md", today()))
+}
 
 /// Write `content` to `file_path`, refusing to clobber an existing file.
 ///

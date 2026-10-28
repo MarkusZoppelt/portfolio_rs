@@ -1,3 +1,4 @@
+use crate::document::today;
 use crate::policy::Policy;
 use crate::review::Review;
 use crate::services::portfolio_loader::{create_live_portfolio_with_logging, load_portfolio_file};
@@ -9,11 +10,8 @@ pub async fn generate_decision_draft(
     title: &str,
     currency: &str,
 ) -> String {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let mut content = format!(
-        "# Decision: {}\n\nDate: {}\nStatus: Proposed\n\n",
-        title, date
-    );
+    let date = today();
+    let mut content = format!("# Decision: {title}\n\nDate: {date}\nStatus: Proposed\n\n");
 
     if !filename.is_empty() {
         if let Ok(positions_str) = load_portfolio_file(filename) {

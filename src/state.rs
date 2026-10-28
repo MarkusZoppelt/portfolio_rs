@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eyre::{bail, eyre, Result, WrapErr};
@@ -22,7 +23,9 @@ use crate::{
     create_live_portfolio_with,
     decision::generate_decision_draft,
     doctor::{check_workspace, WorkspaceHealth},
-    document::write_dated_document,
+    document::{
+        decision_path, today, weekly_report_path, write_dated_document, DEFAULT_DECISION_TITLE,
+    },
     load_portfolio_file,
     policy::{AllocationTarget, Constraints, Policy, RiskProfile},
     positions_to_string,
@@ -32,8 +35,6 @@ use crate::{
     validate::{validate_portfolio_file, ValidationReport},
     AppConfig, NetworkStatus, Portfolio, PortfolioPosition, Purchase,
 };
-use std::sync::Arc;
-
 /// How long a fetched portfolio (with live quotes) stays fresh before the
 /// next [`AppState::portfolio`] call re-fetches quotes.
 const PORTFOLIO_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -99,7 +100,7 @@ impl AppState {
     /// Load a portfolio file (plaintext or `.gpg`) into state.
     pub async fn load_file(&self, path: &str) -> Result<()> {
         let data = load_portfolio_file(path)
-            .wrap_err_with(|| format!("failed to load portfolio file: {}", path))?;
+            .wrap_err_with(|| format!("failed to load portfolio file: {path}"))?;
         {
             let mut file_path = self.file_path.write().await;
             *file_path = Some(path.to_string());
@@ -160,8 +161,8 @@ impl AppState {
             bail!("no workspace loaded and no policy path provided");
         };
 
-        let policy = Policy::from_file(&path)
-            .wrap_err_with(|| format!("failed to load policy: {}", path))?;
+        let policy =
+            Policy::from_file(&path).wrap_err_with(|| format!("failed to load policy: {path}"))?;
         let mut p = self.policy.write().await;
         *p = Some(policy);
         Ok(())
@@ -302,7 +303,7 @@ impl AppState {
         // Atomic replace + one backup: a crash must not leave the portfolio
         // file truncated or empty.
         write_atomic_with_backup(Path::new(&path), json.as_bytes())
-            .wrap_err_with(|| format!("failed to write portfolio file: {}", path))?;
+            .wrap_err_with(|| format!("failed to write portfolio file: {path}"))?;
         Ok(())
     }
 
@@ -353,7 +354,7 @@ impl AppState {
             .collect();
 
         let pnl_percent = portfolio.hist_percent();
-        let has_stale = portfolio.positions.iter().any(|p| p.is_stale());
+        let has_stale = portfolio.positions.iter().any(PortfolioPosition::is_stale);
         let complete = portfolio
             .positions
             .iter()
@@ -573,52 +574,52 @@ impl AppState {
     /// Review the current portfolio against the loaded policy.
     pub async fn get_review(&self) -> Result<Review> {
         let portfolio = self.portfolio().await;
-        let currency = self.currency.read().await.clone();
-        let policy = self
-            .policy
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| eyre!("no investment policy is loaded"))?;
+        let policy = self.required_policy().await?;
         Ok(Review::from_portfolio_and_policy(
-            &portfolio, &policy, &currency,
+            &portfolio,
+            &policy,
+            &self.currency().await,
         ))
     }
 
     /// Simulate rebalancing scenarios against the loaded policy.
     pub async fn get_simulation(&self) -> Result<RebalanceSimulation> {
         let portfolio = self.portfolio().await;
-        let currency = self.currency.read().await.clone();
-        let policy = self
-            .policy
-            .read()
+        let policy = self.required_policy().await?;
+        Ok(simulate_rebalance(
+            &portfolio,
+            &policy,
+            &self.currency().await,
+        ))
+    }
+
+    async fn required_policy(&self) -> Result<Policy> {
+        self.policy()
             .await
-            .clone()
-            .ok_or_else(|| eyre!("no investment policy is loaded"))?;
-        Ok(simulate_rebalance(&portfolio, &policy, &currency))
+            .ok_or_else(|| eyre!("no investment policy is loaded"))
+    }
+
+    /// `dir`, else the loaded workspace directory.
+    async fn dir_or_workspace(&self, dir: Option<String>) -> Result<String> {
+        match dir {
+            Some(dir) => Ok(dir),
+            None => self
+                .workspace_dir()
+                .await
+                .ok_or_else(|| eyre!("no workspace directory provided or loaded")),
+        }
     }
 
     /// Run a workspace health check.
     pub async fn run_doctor(&self, dir: Option<String>) -> Result<WorkspaceHealth> {
-        let dir = match dir {
-            Some(d) => d,
-            None => self
-                .workspace_dir
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| eyre!("no workspace directory provided or loaded"))?,
-        };
-        check_workspace(&dir)
+        check_workspace(&self.dir_or_workspace(dir).await?)
     }
 
     /// Validate the currently loaded portfolio file.
     pub async fn validate_portfolio(&self) -> Result<ValidationReport> {
         let file_path = self
-            .file_path
-            .read()
+            .file_path()
             .await
-            .clone()
             .ok_or_else(|| eyre!("no portfolio file is loaded"))?;
         validate_portfolio_file(&file_path)
     }
@@ -629,35 +630,13 @@ impl AppState {
         dir: Option<String>,
         dry_run: bool,
     ) -> Result<GeneratedDocument> {
-        let dir = match dir {
-            Some(d) => d,
-            None => self
-                .workspace_dir
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| eyre!("no workspace directory provided or loaded"))?,
-        };
-        let file_path = PathBuf::from(&dir).join(format!(
-            "portfolio/reports/{}-weekly.md",
-            chrono::Local::now().format("%Y-%m-%d")
-        ));
+        let dir = self.dir_or_workspace(dir).await?;
+        let date = today();
+        let file_path = weekly_report_path(Path::new(&dir), &date);
         let file_path_str = path_to_string(&file_path)?;
-
-        let filename = self.file_path.read().await.clone().unwrap_or_default();
-        let policy_file = self
-            .policy_path()
-            .await
-            .unwrap_or_else(|| "portfolio/policy.toml".to_string());
-        let currency = self.currency.read().await.clone();
-
-        let content = generate_markdown_report(
-            &filename,
-            &policy_file,
-            &chrono::Local::now().format("%Y-%m-%d").to_string(),
-            &currency,
-        )
-        .await;
+        let (filename, policy_file) = self.report_inputs().await;
+        let content =
+            generate_markdown_report(&filename, &policy_file, &date, &self.currency().await).await;
 
         write_dated_document(
             &file_path,
@@ -681,35 +660,13 @@ impl AppState {
         dir: Option<String>,
         dry_run: bool,
     ) -> Result<GeneratedDocument> {
-        let dir = match dir {
-            Some(d) => d,
-            None => self
-                .workspace_dir
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| eyre!("no workspace directory provided or loaded"))?,
-        };
-        let title = title.unwrap_or_else(|| "Portfolio Rebalance Review".to_string());
-        let slug = title
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-        let file_path = PathBuf::from(&dir).join(format!(
-            "portfolio/decisions/{}-{}.md",
-            chrono::Local::now().format("%Y-%m-%d"),
-            slug
-        ));
+        let dir = self.dir_or_workspace(dir).await?;
+        let title = title.as_deref().unwrap_or(DEFAULT_DECISION_TITLE);
+        let file_path = decision_path(Path::new(&dir), title);
         let file_path_str = path_to_string(&file_path)?;
-
-        let filename = self.file_path.read().await.clone().unwrap_or_default();
-        let policy_file = self
-            .policy_path()
-            .await
-            .unwrap_or_else(|| "portfolio/policy.toml".to_string());
-        let currency = self.currency.read().await.clone();
-
-        let content = generate_decision_draft(&filename, &policy_file, &title, &currency).await;
+        let (filename, policy_file) = self.report_inputs().await;
+        let content =
+            generate_decision_draft(&filename, &policy_file, title, &self.currency().await).await;
 
         write_dated_document(
             &file_path,
@@ -724,6 +681,17 @@ impl AppState {
             content,
             dry_run,
         })
+    }
+
+    /// The portfolio file (empty when none is loaded) and policy file that
+    /// reports and decision drafts are built from.
+    async fn report_inputs(&self) -> (String, String) {
+        let filename = self.file_path().await.unwrap_or_default();
+        let policy_file = self
+            .policy_path()
+            .await
+            .unwrap_or_else(|| "portfolio/policy.toml".to_string());
+        (filename, policy_file)
     }
 }
 
@@ -1090,7 +1058,7 @@ mod tests {
               {"Date": "2025-01-03", "Quantity": 1, "Price": 0},
               {"Date": "2025-01-04", "Quantity": 1, "Price": 10}]}]"#;
         let mut positions: Vec<PortfolioPosition> = serde_json::from_str(json).unwrap();
-        for p in positions[0].purchases.iter_mut() {
+        for p in &mut positions[0].purchases {
             p.estimated_price = Some(dec(99.0));
         }
         let dto = position_to_dto(0, &positions[0]);

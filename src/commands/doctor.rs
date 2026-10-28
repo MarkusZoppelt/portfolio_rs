@@ -1,12 +1,10 @@
+use crate::commands::defaulted_arg;
 use crate::doctor::{check_workspace, HealthStatus};
 use clap::ArgMatches;
 use eyre::Result;
 
 pub fn handle_doctor(sub_matches: &ArgMatches) -> Result<()> {
-    let dir = sub_matches
-        .get_one::<String>("DIR")
-        .map(|s| s.as_str())
-        .unwrap_or("portfolio");
+    let dir = defaulted_arg(sub_matches, "DIR");
 
     let health = check_workspace(dir)?;
 
