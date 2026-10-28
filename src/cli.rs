@@ -1,10 +1,10 @@
 use crate::{
-    api::{run_server, ServerConfig},
     commands::{
         agent::handle_agent,
+        api::handle_api,
         decision::handle_decision,
         doctor::handle_doctor,
-        mcp::handle_mcp,
+        mcp::{handle_mcp, handle_snapshot},
         policy::handle_policy,
         portfolio::{
             handle_allocation, handle_balances, handle_context, handle_performance, handle_sort,
@@ -584,7 +584,7 @@ pub fn build_cli() -> Command {
 }
 
 pub fn get_arg_value(matches: Option<&ArgMatches>, arg_name: &str) -> Option<String> {
-    matches.and_then(|m| m.get_one::<String>(arg_name).map(|s| s.to_string()))
+    matches.and_then(|m| m.get_one::<String>(arg_name).cloned())
 }
 
 pub fn parse_tab(tab_str: Option<String>) -> Option<Tab> {
@@ -596,9 +596,7 @@ pub fn parse_tab(tab_str: Option<String>) -> Option<Tab> {
 
 /// Entry point for the CLI — parses arguments and dispatches to subcommands.
 pub async fn run() -> Result<()> {
-    use crate::{config::AppConfig, load_portfolio_file};
-
-    let cfg: AppConfig = load_config()?;
+    let cfg = load_config()?;
 
     let matches = build_cli().get_matches();
 
@@ -610,7 +608,7 @@ pub async fn run() -> Result<()> {
 
     if matches.subcommand_matches("config").is_some() {
         let config_path = config_path()?;
-        println!("Your config file is located here: \n{}", config_path);
+        println!("Your config file is located here: \n{config_path}");
         return Ok(());
     }
 
@@ -655,35 +653,13 @@ pub async fn run() -> Result<()> {
         Some(("doctor", sub_matches)) => handle_doctor(sub_matches)?,
         Some(("validate", sub_matches)) => handle_validate(sub_matches, &cfg).await?,
         Some(("mcp", sub_matches)) => handle_mcp(sub_matches, &cfg).await?,
-        Some(("snapshot", sub_matches)) => {
-            crate::commands::mcp::handle_snapshot(sub_matches, &cfg).await?
-        }
-        Some(("api", sub_matches)) => {
-            let host =
-                get_arg_value(Some(sub_matches), "host").unwrap_or_else(|| "127.0.0.1".to_string());
-            let port = sub_matches.get_one::<u16>("port").copied().unwrap_or(3000);
-            let filename = get_arg_value(Some(sub_matches), "FILE")
-                .or_else(|| cfg.effective_portfolio_file())
-                .unwrap_or_default();
-            let policy_file = get_arg_value(Some(sub_matches), "policy");
-
-            let positions_str = load_portfolio_file(&filename)?;
-            run_server(ServerConfig {
-                host,
-                port,
-                positions_json: positions_str,
-                file_path: Some(filename).filter(|s| !s.is_empty()),
-                policy_file,
-                currency: cfg.currency.clone(),
-                token_file: get_arg_value(Some(sub_matches), "token-file").map(Into::into),
-            })
-            .await?;
-        }
+        Some(("snapshot", sub_matches)) => handle_snapshot(sub_matches, &cfg).await?,
+        Some(("api", sub_matches)) => handle_api(sub_matches, &cfg).await?,
         _ => {
             // Default: launch the interactive TUI. On failure, show the error
             // followed by usage help, and exit non-zero.
             if let Err(e) = handle_tui(&matches, &cfg, disabled_components).await {
-                eprintln!("{:#}\n", e);
+                eprintln!("{e:#}\n");
                 build_cli()
                     .print_help()
                     .wrap_err("failed to print help message")?;
@@ -720,8 +696,10 @@ fn parse_gain_factor(s: &str) -> Result<(String, Option<f64>), String> {
 #[cfg(test)]
 mod tests {
     use std::fs::read_to_string;
+    use std::str::FromStr;
 
     use super::*;
+    use crate::tui::DisabledComponents;
 
     #[test]
     fn test_cli() {
@@ -818,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_parse_tab_empty_string_defaults_to_overview() {
-        let result = parse_tab(Some("".to_string()));
+        let result = parse_tab(Some(String::new()));
         assert_eq!(result, Some(crate::tui::Tab::Overview));
     }
 
@@ -861,7 +839,6 @@ mod tests {
 
     #[test]
     fn test_disabled_components_parsing() {
-        use crate::tui::Component;
         let disabled = crate::tui::DisabledComponents::new(vec![
             "tab_bar".to_string(),
             "total_value".to_string(),
@@ -877,9 +854,6 @@ mod tests {
 
     #[test]
     fn test_component_enum_from_string() {
-        use crate::tui::Component;
-        use std::str::FromStr;
-
         assert_eq!(Component::from_str("tab_bar").unwrap(), Component::TabBar);
         assert_eq!(
             Component::from_str("total_value").unwrap(),
@@ -893,8 +867,6 @@ mod tests {
 
     #[test]
     fn test_component_enum_as_str() {
-        use crate::tui::Component;
-
         assert_eq!(Component::TabBar.as_str(), "tab_bar");
         assert_eq!(Component::TotalValue.as_str(), "total_value");
         assert_eq!(Component::Help.as_str(), "help");
@@ -903,8 +875,6 @@ mod tests {
 
     #[test]
     fn test_disabled_components_with_enum() {
-        use crate::tui::{Component, DisabledComponents};
-
         let mut disabled = DisabledComponents::default();
         disabled.disable_component(Component::TabBar);
         disabled.disable_component(Component::Help);
@@ -930,8 +900,6 @@ mod tests {
 
     #[test]
     fn test_disabled_components_backward_compatibility() {
-        use crate::tui::{Component, DisabledComponents};
-
         let disabled = DisabledComponents::new(vec!["asset_allocation".to_string()]).unwrap();
 
         assert!(disabled.is_disabled(Component::AssetBreakdown));
@@ -939,8 +907,6 @@ mod tests {
 
     #[test]
     fn test_disabled_components_error_handling() {
-        use crate::tui::DisabledComponents;
-
         let result = DisabledComponents::new(vec![
             "portfolio_growth".to_string(),
             "invalid_component".to_string(),

@@ -1,14 +1,12 @@
 use crate::agent_skill::{skill_export, skill_path, skill_show};
+use crate::commands::defaulted_arg;
 use crate::workspace::init_agent_files;
 use clap::ArgMatches;
 use eyre::{bail, Result};
 
 pub fn handle_agent(sub_matches: &ArgMatches) -> Result<()> {
     if let Some(init_matches) = sub_matches.subcommand_matches("init") {
-        let dir = init_matches
-            .get_one::<String>("DIR")
-            .map(|s| s.as_str())
-            .unwrap_or(".");
+        let dir = defaulted_arg(init_matches, "DIR");
         let dry_run = init_matches.get_flag("dry-run");
         return init_agent_files(dir, dry_run);
     }
@@ -19,10 +17,7 @@ pub fn handle_agent(sub_matches: &ArgMatches) -> Result<()> {
             return Ok(());
         }
         if let Some(export_matches) = skill_matches.subcommand_matches("export") {
-            let dir = export_matches
-                .get_one::<String>("DIR")
-                .map(|s| s.as_str())
-                .unwrap_or(".");
+            let dir = defaulted_arg(export_matches, "DIR");
             let dry_run = export_matches.get_flag("dry-run");
             return skill_export(dir, dry_run);
         }

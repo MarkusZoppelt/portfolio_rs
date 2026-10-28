@@ -7,7 +7,7 @@ use crate::AppConfig;
 
 /// Exit codes: 0 = valid, 1 = usage error, 2 = validation failed.
 pub async fn handle_validate(sub_matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
-    let filename = resolve_portfolio_file(Some(sub_matches), cfg);
+    let filename = resolve_portfolio_file(sub_matches, cfg);
     if filename.is_empty() {
         bail!("no portfolio file specified");
     }
@@ -15,7 +15,7 @@ pub async fn handle_validate(sub_matches: &ArgMatches, cfg: &AppConfig) -> Resul
     let report = match validate_portfolio_file(&filename) {
         Ok(report) => report,
         Err(e) => {
-            eprintln!("Error: failed to validate portfolio file: {:#}", e);
+            eprintln!("Error: failed to validate portfolio file: {e:#}");
             std::process::exit(2);
         }
     };
@@ -52,7 +52,7 @@ pub async fn handle_validate(sub_matches: &ArgMatches, cfg: &AppConfig) -> Resul
             }
         }
     } else {
-        println!("✅ Portfolio file is valid: {}", filename);
+        println!("✅ Portfolio file is valid: {filename}");
         println!("   Positions: {}", report.position_count);
     }
     Ok(())
