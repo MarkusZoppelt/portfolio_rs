@@ -202,7 +202,7 @@ impl CachedProvider {
             .map(|e| e.as_of.clone().unwrap_or_else(|| e.fetched_at.clone()))
     }
 
-    async fn cached_close(
+    fn cached_close(
         &self,
         symbol: &str,
         kind: &str,
@@ -340,7 +340,7 @@ impl QuoteProvider for CachedProvider {
 
     async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
         let fetched = self.inner.base_close_on(symbol, date).await;
-        self.cached_close(symbol, "on", date, fetched).await
+        self.cached_close(symbol, "on", date, fetched)
     }
 
     async fn close_on_or_after(
@@ -349,12 +349,12 @@ impl QuoteProvider for CachedProvider {
         date: DateTime<Utc>,
     ) -> Result<f64, QuoteError> {
         let fetched = self.inner.base_close_on(symbol, date).await;
-        self.cached_close(symbol, "on", date, fetched).await
+        self.cached_close(symbol, "on", date, fetched)
     }
 
     async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
         let fetched = self.inner.base_close_before(symbol, date).await;
-        self.cached_close(symbol, "before", date, fetched).await
+        self.cached_close(symbol, "before", date, fetched)
     }
 
     fn last_known(&self, symbol: &str) -> Option<(f64, Option<String>)> {

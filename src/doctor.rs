@@ -121,7 +121,7 @@ pub fn check_workspace(dir: &str) -> Result<WorkspaceHealth> {
                 checks.push(HealthCheck {
                     name: "Policy file".to_string(),
                     status: HealthStatus::Error,
-                    message: format!("Policy file is invalid: {}", e),
+                    message: format!("Policy file is invalid: {e}"),
                 });
                 issue_count += 1;
             }
@@ -164,13 +164,13 @@ pub fn check_workspace(dir: &str) -> Result<WorkspaceHealth> {
         let path = Path::new(dir).join(d);
         if path.is_dir() {
             checks.push(HealthCheck {
-                name: format!("Directory: {}", d),
+                name: format!("Directory: {d}"),
                 status: HealthStatus::Ok,
                 message: format!("Directory exists: {}", path.display()),
             });
         } else {
             checks.push(HealthCheck {
-                name: format!("Directory: {}", d),
+                name: format!("Directory: {d}"),
                 status: HealthStatus::Warning,
                 message: format!("Directory missing: {}", path.display()),
             });
@@ -267,8 +267,7 @@ mod tests {
             .arg(dir)
             .args(args)
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     #[test]

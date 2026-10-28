@@ -31,8 +31,7 @@ pub fn init_workspace(dir: &str, dry_run: bool) -> Result<()> {
     let base = Path::new(dir);
 
     if !dry_run && !base.exists() {
-        fs::create_dir_all(base)
-            .wrap_err_with(|| format!("failed to create directory: {}", dir))?;
+        fs::create_dir_all(base).wrap_err_with(|| format!("failed to create directory: {dir}"))?;
     }
 
     let dirs = [
@@ -54,9 +53,9 @@ pub fn init_workspace(dir: &str, dry_run: bool) -> Result<()> {
     ];
 
     if dry_run {
-        println!("Dry-run: would create the following in {}", dir);
+        println!("Dry-run: would create the following in {dir}");
     } else {
-        println!("Initializing finance workspace in {}", dir);
+        println!("Initializing finance workspace in {dir}");
     }
 
     for d in &dirs {
@@ -121,9 +120,9 @@ pub fn init_agent_files(dir: &str, dry_run: bool) -> Result<()> {
     ];
 
     if dry_run {
-        println!("Dry-run: would create the following in {}", dir);
+        println!("Dry-run: would create the following in {dir}");
     } else {
-        println!("Initializing agent instruction files in {}", dir);
+        println!("Initializing agent instruction files in {dir}");
     }
 
     for (path, content) in &files {

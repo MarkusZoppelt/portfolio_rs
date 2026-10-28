@@ -153,10 +153,10 @@ fn parse(text: &str) -> (Vec<(usize, Snapshot)>, Vec<SkippedLine>) {
             Ok(s) if strict_date(&s.date).is_some() => ok.push((line, s)),
             Ok(_) => bad.push(skip("bad_date", date)),
             Err(_) if v.get("totalBase").is_some_and(|t| t.is_null()) => {
-                bad.push(skip("total_base_null", date))
+                bad.push(skip("total_base_null", date));
             }
             Err(_) if date.as_deref().and_then(strict_date).is_none() => {
-                bad.push(skip("bad_date", date))
+                bad.push(skip("bad_date", date));
             }
             Err(_) => bad.push(skip("incomplete_line", date)),
         }

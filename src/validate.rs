@@ -34,10 +34,10 @@ pub struct ValidationReport {
 /// Validate a portfolio JSON file and return a structured report.
 pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
     let content = load_portfolio_file(file_path)
-        .wrap_err_with(|| format!("failed to load portfolio file: {}", file_path))?;
+        .wrap_err_with(|| format!("failed to load portfolio file: {file_path}"))?;
 
     let positions =
-        from_string(&content).wrap_err_with(|| format!("invalid JSON in {}", file_path))?;
+        from_string(&content).wrap_err_with(|| format!("invalid JSON in {file_path}"))?;
 
     let mut issues = Vec::new();
     let mut seen_tickers = std::collections::HashSet::new();
@@ -67,7 +67,7 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
             issues.push(ValidationIssue {
                 severity: ValidationSeverity::Error,
                 position: Some(name.to_string()),
-                message: format!("Position has negative amount: {}", amount),
+                message: format!("Position has negative amount: {amount}"),
             });
         }
 
@@ -105,8 +105,7 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
                     severity: ValidationSeverity::Warning,
                     position: Some(name.to_string()),
                     message: format!(
-                        "Purchase quantities ({}) do not match amount ({})",
-                        purchase_sum, amount
+                        "Purchase quantities ({purchase_sum}) do not match amount ({amount})"
                     ),
                 });
             }
@@ -117,7 +116,7 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
                         issues.push(ValidationIssue {
                             severity: ValidationSeverity::Error,
                             position: Some(name.to_string()),
-                            message: format!("Negative purchase price: {}", price),
+                            message: format!("Negative purchase price: {price}"),
                         });
                     }
                 }
@@ -129,7 +128,7 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
                 issues.push(ValidationIssue {
                     severity: ValidationSeverity::Warning,
                     position: Some(name.to_string()),
-                    message: format!("Duplicate ticker '{}' in portfolio", ticker),
+                    message: format!("Duplicate ticker '{ticker}' in portfolio"),
                 });
             }
         }

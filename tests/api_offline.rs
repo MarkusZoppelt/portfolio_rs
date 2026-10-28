@@ -370,7 +370,7 @@ async fn test_dry_run_preview_does_not_block_writes() {
 fn get_with_host(uri: &str, host: &str, token: Option<&str>) -> Request<Body> {
     let mut b = Request::builder().uri(uri).header("host", host);
     if let Some(t) = token {
-        b = b.header("authorization", format!("Bearer {}", t));
+        b = b.header("authorization", format!("Bearer {t}"));
     }
     b.body(Body::empty()).unwrap()
 }
@@ -477,7 +477,7 @@ async fn test_positions_by_stable_id() {
     // Delete the first one; pos_fixed still resolves although its index moved.
     let del = Request::builder()
         .method("DELETE")
-        .uri(format!("/api/positions/{}", first_id))
+        .uri(format!("/api/positions/{first_id}"))
         .body(Body::empty())
         .unwrap();
     assert_eq!(

@@ -400,7 +400,7 @@ async fn get_allocation_against_policy_bands() {
         .iter()
         .map(|c| c.as_str().unwrap())
         .collect();
-    untargeted.sort();
+    untargeted.sort_unstable();
     assert_eq!(untargeted, ["Bonds", "Commodities", "Gold"]);
     client.cancel().await.unwrap();
 }
@@ -1919,15 +1919,12 @@ async fn context_order_is_deterministic() {
             .filter(|l| !l.to_ascii_lowercase().contains("generated"))
             .collect::<Vec<_>>()
             .join("\n");
-        match (&seen_md, &seen_json) {
-            (Some(m), Some(j)) => {
-                assert_eq!(&md, m);
-                assert_eq!(&(classes.clone(), names.clone()), j);
-            }
-            _ => {
-                seen_md = Some(md);
-                seen_json = Some((classes, names));
-            }
+        if let (Some(m), Some(j)) = (&seen_md, &seen_json) {
+            assert_eq!(&md, m);
+            assert_eq!(&(classes.clone(), names.clone()), j);
+        } else {
+            seen_md = Some(md);
+            seen_json = Some((classes, names));
         }
     }
 }

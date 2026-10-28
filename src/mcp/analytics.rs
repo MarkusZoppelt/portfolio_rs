@@ -248,7 +248,7 @@ pub fn position_rows(
     match sort {
         // Ties (and all unpriced rows) by name: the same order as get_context.
         SortBy::Value => {
-            rows.sort_by(|a, b| key(b).total_cmp(&key(a)).then_with(|| a.name.cmp(&b.name)))
+            rows.sort_by(|a, b| key(b).total_cmp(&key(a)).then_with(|| a.name.cmp(&b.name)));
         }
         SortBy::Name => rows.sort_by_key(|r| r.name.to_lowercase()),
         SortBy::Pnl => rows.sort_by(|a, b| {
@@ -356,7 +356,7 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
     if portfolio
         .positions
         .iter()
-        .any(|p| p.cost_basis_at_current_fx())
+        .any(PortfolioPosition::cost_basis_at_current_fx)
     {
         let estimates: Vec<&str> = portfolio
             .positions
@@ -505,15 +505,13 @@ pub fn share_range(
         (true, Some(m)) => percent_of(priced, total + m),
         (true, None) => Some(Decimal::ZERO),
     }
-    .map(pct)
-    .unwrap_or(0.0);
+    .map_or(0.0, pct);
     let max = match own {
         (false, _) => percent_of(priced, total),
         (true, Some(m)) => percent_of(priced + m, total + m),
         (true, None) => Some(dec(100.0)),
     }
-    .map(pct)
-    .unwrap_or(100.0);
+    .map_or(100.0, pct);
     (min, max)
 }
 
@@ -620,13 +618,12 @@ pub fn allocation_with(
         .iter()
         .map(|p| {
             let (v, basis) = p.excluded_estimate()?;
-            let f = match basis {
-                ExcludedBasis::LastPrice => 1.0,
-                _ => {
-                    let f = opts.gain_factor(p.get_asset_class())?;
-                    gain_factors.insert(p.get_asset_class().to_string(), f);
-                    f
-                }
+            let f = if basis == ExcludedBasis::LastPrice {
+                1.0
+            } else {
+                let f = opts.gain_factor(p.get_asset_class())?;
+                gain_factors.insert(p.get_asset_class().to_string(), f);
+                f
             };
             Some(v * dec(f))
         })
@@ -930,7 +927,7 @@ pub fn check_policy_with(
     }
     let alloc = allocation_with(portfolio, Some(policy), true, true, &opts);
     // Share of the priced positions only (what the priced part alone says).
-    let priced_only = |v: Decimal| percent_of(v, alloc.total).map(pct).unwrap_or(0.0);
+    let priced_only = |v: Decimal| percent_of(v, alloc.total).map_or(0.0, pct);
     let class_priced = |class: &str| -> Decimal {
         portfolio
             .positions
@@ -1028,8 +1025,7 @@ pub fn check_policy_with(
     for class in &alloc.missing {
         let target = policy
             .get_allocation(class)
-            .map(|t| t.target_percent)
-            .unwrap_or(0.0);
+            .map_or(0.0, |t| t.target_percent);
         if target > 0.0 {
             findings.push(
                 Finding::new(
@@ -1055,7 +1051,7 @@ pub fn check_policy_with(
             .positions
             .iter()
             .filter(|p| p.is_cash())
-            .map(|p| p.balance_dec())
+            .map(PortfolioPosition::balance_dec)
             .sum();
         let passed = cash >= dec(min);
         checks.push(ConstraintCheckRow {
@@ -1136,7 +1132,7 @@ pub fn check_policy_with(
         }
     }
     if let Some(limit) = c.asset_class_limit_percent {
-        for cl in alloc.classes.iter() {
+        for cl in &alloc.classes {
             let (min, max) = match (
                 cl.actual_percent,
                 cl.actual_percent_min,
@@ -1315,7 +1311,7 @@ pub fn transactions(
     let opening_date = portfolio
         .positions
         .iter()
-        .flat_map(|p| p.get_purchases())
+        .flat_map(PortfolioPosition::get_purchases)
         .filter_map(|pur| pur.date.as_deref().and_then(parse_purchase_date))
         .min()
         .map(|d| (d.format("%Y-%m-%d").to_string(), "earliest_purchase"))

@@ -262,7 +262,7 @@ mod tests {
 
     fn assert_no_temp_files(names: &[String]) {
         for name in names {
-            assert!(!name.contains(".tmp-"), "temp file left behind: {}", name);
+            assert!(!name.contains(".tmp-"), "temp file left behind: {name}");
         }
     }
 
@@ -332,8 +332,7 @@ mod tests {
         let err = write_atomic_with_backup(&path, b"plaintext").unwrap_err();
         assert!(
             err.to_string().contains("encrypted"),
-            "unexpected error: {}",
-            err
+            "unexpected error: {err}"
         );
         assert!(!path.exists());
         assert!(list_dir(tmp.path()).is_empty());

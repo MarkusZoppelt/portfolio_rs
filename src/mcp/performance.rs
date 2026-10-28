@@ -117,7 +117,7 @@ pub fn position_effects(
         .map(|p| p.position_id.as_str())
         .collect();
     ids.extend(end.positions.iter().map(|p| p.position_id.as_str()));
-    ids.sort();
+    ids.sort_unstable();
     ids.dedup();
     for id in ids {
         let s = start.positions.iter().find(|p| p.position_id == id);
@@ -283,65 +283,62 @@ fn split_internal(
         .filter(|(id, _)| is_cash(id))
         .map(|(_, (_, e))| e.external_flows)
         .sum();
-    match deposits {
-        Some(d) => {
-            // Cash that left the cash balances toward securities.
-            let moved = -(cash - d);
-            if securities == 0.0 || moved == 0.0 || securities.signum() != moved.signum() {
-                return;
+    if let Some(d) = deposits {
+        // Cash that left the cash balances toward securities.
+        let moved = -(cash - d);
+        if securities == 0.0 || moved == 0.0 || securities.signum() != moved.signum() {
+            return;
+        }
+        let n_cash = out.keys().filter(|id| is_cash(id)).count();
+        if n_cash == 0 {
+            return;
+        }
+        let matched = moved.abs().min(securities.abs());
+        let sec_share = matched / securities.abs();
+        let cash_internal = -securities.signum() * matched;
+        for (id, (_, e)) in out.iter_mut() {
+            if is_cash(id) {
+                continue;
             }
-            let n_cash = out.keys().filter(|id| is_cash(id)).count();
-            if n_cash == 0 {
-                return;
+            let internal = e.external_flows * sec_share;
+            e.internal_transfers = internal;
+            e.external_flows -= internal;
+        }
+        for (id, (_, e)) in out.iter_mut() {
+            if !is_cash(id) {
+                continue;
             }
-            let matched = moved.abs().min(securities.abs());
-            let sec_share = matched / securities.abs();
-            let cash_internal = -securities.signum() * matched;
-            for (id, (_, e)) in out.iter_mut() {
-                if is_cash(id) {
-                    continue;
-                }
-                let internal = e.external_flows * sec_share;
-                e.internal_transfers = internal;
-                e.external_flows -= internal;
-            }
+            let share = if cash == 0.0 {
+                1.0 / n_cash as f64
+            } else {
+                e.external_flows / cash
+            };
+            let internal = cash_internal * share;
+            e.internal_transfers = internal;
+            e.external_flows -= internal;
+        }
+    } else {
+        if securities == 0.0 || cash == 0.0 {
+            return;
+        }
+        if securities.signum() == cash.signum() {
+            // Same-step deposit and buy, with no dated cash entry: the
+            // security flow is external of unknown origin. Cash stays.
             for (id, (_, e)) in out.iter_mut() {
                 if !is_cash(id) {
-                    continue;
+                    e.external_unknown += e.external_flows;
+                    e.external_flows = 0.0;
                 }
-                let share = if cash == 0.0 {
-                    1.0 / n_cash as f64
-                } else {
-                    e.external_flows / cash
-                };
-                let internal = cash_internal * share;
-                e.internal_transfers = internal;
-                e.external_flows -= internal;
             }
+            return;
         }
-        None => {
-            if securities == 0.0 || cash == 0.0 {
-                return;
-            }
-            if securities.signum() == cash.signum() {
-                // Same-step deposit and buy, with no dated cash entry: the
-                // security flow is external of unknown origin. Cash stays.
-                for (id, (_, e)) in out.iter_mut() {
-                    if !is_cash(id) {
-                        e.external_unknown += e.external_flows;
-                        e.external_flows = 0.0;
-                    }
-                }
-                return;
-            }
-            let matched = securities.abs().min(cash.abs());
-            let sec_share = matched / securities.abs();
-            let cash_share = matched / cash.abs();
-            for (id, (_, e)) in out.iter_mut() {
-                let share = if is_cash(id) { cash_share } else { sec_share };
-                e.internal_transfers = e.external_flows * share;
-                e.external_flows -= e.internal_transfers;
-            }
+        let matched = securities.abs().min(cash.abs());
+        let sec_share = matched / securities.abs();
+        let cash_share = matched / cash.abs();
+        for (id, (_, e)) in out.iter_mut() {
+            let share = if is_cash(id) { cash_share } else { sec_share };
+            e.internal_transfers = e.external_flows * share;
+            e.external_flows -= e.internal_transfers;
         }
     }
 }

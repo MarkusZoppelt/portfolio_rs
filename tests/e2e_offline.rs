@@ -470,7 +470,7 @@ fn test_decision_draft_dry_run() {
     let decisions_dir = dir.join("portfolio/decisions");
     let files: Vec<_> = std::fs::read_dir(&decisions_dir)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .collect();
     assert_eq!(files.len(), 0);
 }

@@ -1,9 +1,10 @@
 //! rmcp server handler: tool router and resources.
 
-use super::analytics;
 use super::dto::*;
-use super::ServedPortfolio;
+use super::performance as perf;
+use super::{analytics, snapshots, ServedPortfolio};
 use crate::portfolio::Portfolio;
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, SecondsFormat};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -23,13 +24,13 @@ pub struct PortfolioServer {
 }
 
 fn now_rfc3339() -> String {
-    chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+    Local::now().to_rfc3339_opts(SecondsFormat::Secs, false)
 }
 
 fn parse_day(field: &str, value: &Option<String>) -> Result<Option<String>, ToolError> {
     match value {
         None => Ok(None),
-        Some(s) => super::snapshots::strict_date(s)
+        Some(s) => snapshots::strict_date(s)
             .map(|d| Some(d.format("%Y-%m-%d").to_string()))
             .ok_or_else(|| {
                 ToolError::invalid(format!("{field} must be a date in YYYY-MM-DD format"))
@@ -45,12 +46,11 @@ fn parse_day(field: &str, value: &Option<String>) -> Result<Option<String>, Tool
 /// errors when a bound is missing, `from > to`, or `to` is in the future.
 fn period_window(
     period: Period,
-    today: chrono::NaiveDate,
-    first_snapshot: Option<chrono::NaiveDate>,
-    cfrom: Option<chrono::NaiveDate>,
-    cto: Option<chrono::NaiveDate>,
-) -> Result<(chrono::NaiveDate, chrono::NaiveDate), ToolError> {
-    use chrono::{Datelike, Duration, NaiveDate};
+    today: NaiveDate,
+    first_snapshot: Option<NaiveDate>,
+    cfrom: Option<NaiveDate>,
+    cto: Option<NaiveDate>,
+) -> Result<(NaiveDate, NaiveDate), ToolError> {
     match period {
         Period::Day => Ok((today, today)),
         Period::Week => Ok((today - Duration::days(6), today)),
@@ -63,8 +63,7 @@ fn period_window(
         Period::OneYear => Ok((today - Duration::days(364), today)),
         Period::SinceInception => {
             let from = first_snapshot
-                .map(|d| d + Duration::days(1))
-                .unwrap_or(today)
+                .map_or(today, |d| d + Duration::days(1))
                 .min(today);
             Ok((from, today))
         }
@@ -313,7 +312,7 @@ impl PortfolioServer {
         let portfolio = self.portfolio(false).await;
         let policy = self.served.state.policy().await;
         let opts = self.policy_options();
-        let (mut findings, checks) = match &policy {
+        let (findings, checks) = match &policy {
             Some(p) => {
                 let c = analytics::check_policy_with(&portfolio, p, opts.clone());
                 (c.findings, c.checks)
@@ -337,13 +336,10 @@ impl PortfolioServer {
         };
         let mut policy_findings: Vec<Finding> = Vec::new();
         // Answer 1: checks_incomplete is data quality, not a policy finding.
-        let check_quality: Vec<Finding> = findings
-            .iter()
-            .filter(|f| f.category == Category::DataQuality)
-            .cloned()
-            .collect();
-        findings.retain(|f| f.category != Category::DataQuality);
-        for f in findings.drain(..) {
+        let (check_quality, findings): (Vec<Finding>, Vec<Finding>) = findings
+            .into_iter()
+            .partition(|f| f.category == Category::DataQuality);
+        for f in findings {
             if f.severity >= min && !policy_findings.iter().any(|u| same(u, &f)) {
                 policy_findings.push(f);
             }
@@ -442,11 +438,7 @@ impl PortfolioServer {
         let file_date = std::fs::metadata(&self.served.path)
             .and_then(|m| m.modified())
             .ok()
-            .map(|t| {
-                chrono::DateTime::<chrono::Local>::from(t)
-                    .format("%Y-%m-%d")
-                    .to_string()
-            });
+            .map(|t| DateTime::<Local>::from(t).format("%Y-%m-%d").to_string());
         let all = analytics::transactions(&portfolio, &base, file_date);
         if let Some(id) = &input.position_id {
             if !portfolio
@@ -600,11 +592,8 @@ impl PortfolioServer {
         &self,
         Parameters(input): Parameters<GetPerformanceInput>,
     ) -> Result<Json<PerformanceOutput>, ToolError> {
-        use super::performance as perf;
-        use super::snapshots;
-        use chrono::NaiveDate;
         self.check_id(&input.portfolio_id)?;
-        let today = chrono::Local::now().date_naive();
+        let today = Local::now().date_naive();
         let parse = |v: &Option<String>, name: &str| -> Result<Option<NaiveDate>, ToolError> {
             v.as_deref()
                 .map(|d| {
@@ -669,8 +658,7 @@ impl PortfolioServer {
         }));
         let start_gap = |s: &snapshots::Snapshot| {
             NaiveDate::parse_from_str(&s.date, "%Y-%m-%d")
-                .map(|d| (from - d).num_days() - 1)
-                .unwrap_or(i64::MAX)
+                .map_or(i64::MAX, |d| (from - d).num_days() - 1)
         };
         let start = snaps
             .iter()
@@ -900,10 +888,10 @@ impl PortfolioServer {
             meta.complete = false;
             meta.data_status = analytics::data_status(false, has_stale).to_string();
             let mut ids: Vec<&str> = mismatches.iter().map(|(_, id)| id.as_str()).collect();
-            ids.sort();
+            ids.sort_unstable();
             ids.dedup();
             let mut dates: Vec<&str> = mismatches.iter().map(|(d, _)| d.as_str()).collect();
-            dates.sort();
+            dates.sort_unstable();
             dates.dedup();
             warnings.push(
                 Finding::new(
@@ -1403,7 +1391,7 @@ impl ServerHandler for PortfolioServer {
                 let body = json!({
                     "schemaVersion": SCHEMA_VERSION,
                     "portfolioId": self.served.id,
-                    "source": self.served.state.policy_path().await.map(|_| "workspace").unwrap_or("file"),
+                    "source": self.served.state.policy_path().await.map_or("file", |_| "workspace"),
                     "policy": policy,
                 });
                 let body = serde_json::to_string_pretty(&body)

@@ -7,7 +7,7 @@ pub fn store_balance_in_db(portfolio: &Portfolio) -> Result<()> {
     let curr_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     db.insert(&curr_time, curr_value.to_string().as_bytes())
-        .wrap_err_with(|| format!("failed to insert balance into database at {}", curr_time))?;
+        .wrap_err_with(|| format!("failed to insert balance into database at {curr_time}"))?;
 
     // block until all operations are stable on disk
     db.flush().wrap_err("failed to flush database to disk")?;

@@ -207,7 +207,7 @@ pub struct AllocationTarget {
 impl Policy {
     pub fn from_file(path: &str) -> Result<Self> {
         let content = fs::read_to_string(path)
-            .wrap_err_with(|| format!("failed to read policy file: {}", path))?;
+            .wrap_err_with(|| format!("failed to read policy file: {path}"))?;
         content.parse::<Policy>()
     }
 

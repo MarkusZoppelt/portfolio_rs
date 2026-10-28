@@ -317,10 +317,10 @@ impl PortfolioContext {
             // Every weight against a partial total is overstated; null them
             // all (positions, allocation, summary) and show the range-free
             // values only.
-            for p in positions.iter_mut() {
+            for p in &mut positions {
                 p.weight_percent = None;
             }
-            for a in allocation.iter_mut() {
+            for a in &mut allocation {
                 a.percent = None;
             }
         }
@@ -431,8 +431,7 @@ impl PortfolioContext {
             money(self.summary.cash_value, &self.currency),
             self.summary
                 .cash_percent
-                .map(pct)
-                .unwrap_or_else(|| "n/a".to_string())
+                .map_or_else(|| "n/a".to_string(), pct)
         ));
         if let (Some(min), Some(surplus)) = (self.cash_buffer.minimum, self.cash_buffer.surplus) {
             out.push_str(&format!(
@@ -457,8 +456,7 @@ impl PortfolioContext {
                 escape_markdown(largest_position),
                 self.summary
                     .largest_position_percent
-                    .map(pct)
-                    .unwrap_or_else(|| "n/a".to_string())
+                    .map_or_else(|| "n/a".to_string(), pct)
             ));
         }
 
@@ -485,8 +483,7 @@ impl PortfolioContext {
                 position
                     .ticker
                     .as_deref()
-                    .map(escape_markdown)
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), escape_markdown),
                 escape_markdown(&position.asset_class),
                 quantity(position.quantity),
                 opt(position.price.map(|value| {
@@ -504,16 +501,13 @@ impl PortfolioContext {
                 opt(position.weight_percent.map(pct)),
                 position
                     .pnl
-                    .map(|value| money(value, &self.currency))
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |value| money(value, &self.currency)),
                 position
                     .historic_return_percent
-                    .map(pct)
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), pct),
                 position
                     .daily_return_percent
-                    .map(pct)
-                    .unwrap_or_else(|| "-".to_string())
+                    .map_or_else(|| "-".to_string(), pct)
             ));
         }
 
@@ -597,7 +591,7 @@ fn risk_flags(
 }
 
 fn percent(value: Decimal, total: Decimal) -> f64 {
-    percent_of(value, total).map(to_f64).unwrap_or(0.0)
+    percent_of(value, total).map_or(0.0, to_f64)
 }
 
 fn money(value: f64, currency: &str) -> String {
