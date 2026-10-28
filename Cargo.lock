@@ -2250,7 +2250,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "portfolio_rs"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "assert_cmd",
  "axum",
