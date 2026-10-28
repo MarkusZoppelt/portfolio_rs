@@ -1,6 +1,6 @@
 [package]
 name = "portfolio_rs"
-description = "Local-first portfolio management for humans and AI agents — CLI, TUI, library, and local HTTP API."
+description = "Local-first portfolio management for humans and AI agents: CLI, TUI, library, and local HTTP API."
 readme = "README.md"
 version = "0.9.0"
 edition = "2021"
@@ -9,6 +9,8 @@ authors = ["Markus Zoppelt"]
 repository = "https://github.com/MarkusZoppelt/portfolio_rs"
 keywords = ["finance", "portfolio", "tui", "investment", "cli"]
 categories = ["command-line-utilities", "finance"]
+# The README loads images from GitHub, so the crate does not need them.
+exclude = ["img/"]
 
 # Explicit single-member workspace so crates vendored under this repo
 # (e.g. a GUI app with its own workspace) do not join this one.

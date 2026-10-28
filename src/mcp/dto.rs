@@ -566,7 +566,7 @@ pub struct ClassAllocation {
     pub actual_percent: Option<f64>,
     /// With unpriced positions: the lowest and highest possible share,
     /// whatever the excluded positions are worth (0 up to their maximum
-    /// plausible value, see README). Absent when the total is complete.
+    /// plausible value, see docs/mcp.md). Absent when the total is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_percent_min: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
