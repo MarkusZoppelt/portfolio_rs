@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 
 pub fn skill_show() {
-    println!("{}", SKILL_CONTENT);
+    println!("{SKILL_CONTENT}");
 }
 
 pub fn skill_export(dir: &str, dry_run: bool) -> Result<()> {
@@ -29,8 +29,7 @@ pub fn skill_export(dir: &str, dry_run: bool) -> Result<()> {
     }
 
     if !base.exists() {
-        fs::create_dir_all(base)
-            .wrap_err_with(|| format!("failed to create directory: {}", dir))?;
+        fs::create_dir_all(base).wrap_err_with(|| format!("failed to create directory: {dir}"))?;
     }
 
     fs::create_dir_all(&skill_dir)

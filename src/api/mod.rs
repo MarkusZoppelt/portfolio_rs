@@ -110,7 +110,7 @@ impl ApiState {
             inner
                 .load_policy(Some(policy.clone()))
                 .await
-                .wrap_err_with(|| format!("failed to load policy file: {}", policy))?;
+                .wrap_err_with(|| format!("failed to load policy file: {policy}"))?;
         }
         inner.set_positions_json(positions_json).await;
         Ok(Self { inner })
@@ -160,7 +160,7 @@ fn map_position_error(e: eyre::Report) -> ApiError {
     if e.to_string().contains("position not found") {
         ApiError::NotFound("position not found".to_string())
     } else {
-        ApiError::Internal(format!("{:#}", e))
+        ApiError::Internal(format!("{e:#}"))
     }
 }
 
@@ -172,11 +172,11 @@ fn position_key(raw: &str) -> Result<PositionKey, ApiError> {
 }
 
 fn bad_request(e: eyre::Report) -> ApiError {
-    ApiError::BadRequest(format!("{:#}", e))
+    ApiError::BadRequest(format!("{e:#}"))
 }
 
 fn internal(e: eyre::Report) -> ApiError {
-    ApiError::Internal(format!("{:#}", e))
+    ApiError::Internal(format!("{e:#}"))
 }
 
 /// Build the API router around an initialized [`ApiState`].
@@ -215,7 +215,7 @@ impl ApiGuard {
     pub fn new(port: u16, token: Option<String>) -> Self {
         let allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
             .iter()
-            .map(|h| format!("{}:{}", h, port))
+            .map(|h| format!("{h}:{port}"))
             .collect();
         Self {
             allowed_hosts,
@@ -298,7 +298,7 @@ pub fn write_token_file(path: &std::path::Path) -> Result<String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).wrap_err("failed to replace token file"),
     }
-    crate::services::atomic_write::write_new_private(path, format!("{}\n", token).as_bytes())
+    crate::services::atomic_write::write_new_private(path, format!("{token}\n").as_bytes())
         .wrap_err_with(|| format!("failed to write token file {}", path.display()))?;
     Ok(token)
 }
@@ -341,9 +341,9 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 
     let listener = TcpListener::bind(&addr)
         .await
-        .wrap_err_with(|| format!("failed to bind to {}", addr))?;
-    println!("API server running on http://{}", addr);
-    println!("Endpoints: http://{}/api", addr);
+        .wrap_err_with(|| format!("failed to bind to {addr}"))?;
+    println!("API server running on http://{addr}");
+    println!("Endpoints: http://{addr}/api");
 
     axum::serve(listener, router)
         .await

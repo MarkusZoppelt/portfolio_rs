@@ -9,7 +9,7 @@ pub async fn generate_markdown_report(
     date: &str,
     currency: &str,
 ) -> String {
-    let mut content = format!("# Weekly Portfolio Report\n\nDate: {}\n\n", date);
+    let mut content = format!("# Weekly Portfolio Report\n\nDate: {date}\n\n");
 
     if !filename.is_empty() {
         if let Ok(positions_str) = load_portfolio_file(filename) {
@@ -22,7 +22,7 @@ pub async fn generate_markdown_report(
                 portfolio.get_total_value(),
                 currency
             ));
-            content.push_str(&format!("- Network Status: {:?}\n\n", network_status));
+            content.push_str(&format!("- Network Status: {network_status:?}\n\n"));
 
             if let Ok(policy) = Policy::from_file(policy_file) {
                 let review = Review::from_portfolio_and_policy(&portfolio, &policy, currency);
@@ -57,7 +57,7 @@ pub async fn generate_markdown_report(
                 if !review.suggested_actions.is_empty() {
                     content.push_str("## Suggested Actions\n\n");
                     for action in &review.suggested_actions {
-                        content.push_str(&format!("- {}\n", action));
+                        content.push_str(&format!("- {action}\n"));
                     }
                     content.push('\n');
                 }

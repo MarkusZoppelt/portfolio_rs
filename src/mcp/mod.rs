@@ -202,13 +202,11 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
     }
     let label = Path::new(&path)
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| id.clone());
+        .map_or_else(|| id.clone(), |n| n.to_string_lossy().into_owned());
     let label = match &workspace_dir {
         Some(d) => d
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(label),
+            .map_or(label, |n| n.to_string_lossy().into_owned()),
         None => label,
     };
     let snapshots_path = snapshots::data_dir(opts.data_dir.as_deref(), workspace_dir.as_deref())

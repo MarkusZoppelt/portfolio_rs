@@ -23,7 +23,7 @@ pub fn open_encrypted_file(filename: &str) -> Result<String> {
             .arg("-d")
             .arg(filename)
             .output()
-            .wrap_err_with(|| format!("failed to execute gpg to decrypt {}", filename))?;
+            .wrap_err_with(|| format!("failed to execute gpg to decrypt {filename}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -37,7 +37,7 @@ pub fn open_encrypted_file(filename: &str) -> Result<String> {
 
         String::from_utf8(output.stdout).wrap_err("gpg output is not valid UTF-8")
     } else {
-        read_to_string(filename).wrap_err_with(|| format!("failed to read file: {}", filename))
+        read_to_string(filename).wrap_err_with(|| format!("failed to read file: {filename}"))
     }
 }
 
@@ -102,7 +102,7 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
         Ok(p) => p,
         Err(e) => {
             if log_errors {
-                eprintln!("Error parsing positions: {:#}", e);
+                eprintln!("Error parsing positions: {e:#}");
             }
             return (Portfolio::new(), NetworkStatus::Disconnected);
         }
@@ -123,12 +123,11 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
         .collect();
 
     for (mut fallback, task) in tasks {
-        match task.await {
-            Ok(position) => portfolio.add_position(position),
-            Err(_) => {
-                apply_quote_result(&mut fallback, None);
-                portfolio.add_position(fallback);
-            }
+        if let Ok(position) = task.await {
+            portfolio.add_position(position)
+        } else {
+            apply_quote_result(&mut fallback, None);
+            portfolio.add_position(fallback);
         }
     }
 

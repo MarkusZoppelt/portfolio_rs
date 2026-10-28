@@ -113,10 +113,7 @@ impl Review {
                         "{} allocation is {} target: {:.1}% vs {:.1}%",
                         target.asset_class, direction, actual_percent, target.target_percent
                     ),
-                    detail: Some(format!(
-                        "Drift: {:.1}% (tolerance: ±{:.1}%)",
-                        drift, tolerance
-                    )),
+                    detail: Some(format!("Drift: {drift:.1}% (tolerance: ±{tolerance:.1}%)")),
                 });
 
                 suggested_actions.push(format!(
@@ -137,8 +134,7 @@ impl Review {
                     severity: Severity::Warning,
                     category: "Unknown Asset Class".to_string(),
                     message: format!(
-                        "Asset class '{}' ({:.1}%) is not defined in policy",
-                        asset_class, actual_percent
+                        "Asset class '{asset_class}' ({actual_percent:.1}%) is not defined in policy"
                     ),
                     detail: Some(
                         "Consider adding this asset class to your policy or reclassifying positions"
@@ -230,7 +226,7 @@ impl Review {
                     icon, finding.category, finding.message
                 ));
                 if let Some(detail) = &finding.detail {
-                    out.push_str(&format!("  > {}\n", detail));
+                    out.push_str(&format!("  > {detail}\n"));
                 }
             }
         }
@@ -273,7 +269,7 @@ impl Review {
 
         out.push_str("\n## Suggested Actions\n\n");
         for action in &self.suggested_actions {
-            out.push_str(&format!("- {}\n", action));
+            out.push_str(&format!("- {action}\n"));
         }
 
         out
@@ -317,9 +313,7 @@ fn check_constraints(
     // and the context risk flags: a cash buffer is not a concentration risk.
     if let Some(limit) = policy.constraints.single_position_limit_percent {
         for position in portfolio.positions.iter().filter(|p| !p.is_cash()) {
-            let weight = percent_of(position.balance_dec(), dec(total_value))
-                .map(to_f64)
-                .unwrap_or(0.0);
+            let weight = percent_of(position.balance_dec(), dec(total_value)).map_or(0.0, to_f64);
 
             if weight > limit {
                 checks.push(ConstraintCheck {
@@ -345,8 +339,7 @@ fn check_constraints(
                     name: "Asset Class Limit".to_string(),
                     passed: false,
                     message: format!(
-                        "{} is {:.1}% of portfolio (limit: {:.1}%)",
-                        asset_class, percent, limit
+                        "{asset_class} is {percent:.1}% of portfolio (limit: {limit:.1}%)"
                     ),
                 });
             }
