@@ -26,7 +26,9 @@ cargo fmt --check          # rustfmt.toml: max_width = 100
 
 - The full command surface (context, review, simulate, policy, decision, report,
   doctor, validate, init-workspace, agent, mcp, api) is defined in `src/cli.rs`;
-  README.md documents it — keep both in sync when adding commands.
+  README.md (command table) and `docs/` document it; keep them in sync when adding
+  commands. `tests/mcp_offline.rs` checks that `docs/mcp.md` lists every MCP tool and
+  resource.
 - CLI handlers in `src/commands/` return `eyre::Result` and propagate to `main`
   for non-zero exit codes. `validate` uses exit code 2 for validation failures.
 - `state::AppState` + its DTOs are the public facade consumed by the HTTP API and
