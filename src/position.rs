@@ -1,9 +1,10 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::hash::Hash;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::prelude::*;
 use eyre::{Result, WrapErr};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
@@ -11,15 +12,34 @@ use yahoo_finance_api as yahoo;
 use crate::money::{dec, div, percent_change, to_f64, Decimal};
 use crate::services::quotes::{DailyBar, Quote, QuoteError, QuoteProvider};
 
-// Type alias to reduce type complexity
-type HistoricCacheMap = HashMap<(String, i64, i64), Arc<yahoo::YResponse>>;
-// Caches for Yahoo API requests
-static QUOTE_CACHE: Lazy<Mutex<HashMap<String, Arc<yahoo::YResponse>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-static PREV_CLOSE_CACHE: Lazy<Mutex<HashMap<String, f64>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-static HISTORIC_CACHE: Lazy<Mutex<HistoricCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+// Caches for Yahoo API requests: the last successful response, used when a fetch fails.
+type Cache<K, V> = LazyLock<Mutex<HashMap<K, V>>>;
+static QUOTE_CACHE: Cache<String, Arc<yahoo::YResponse>> = LazyLock::new(Default::default);
+static PREV_CLOSE_CACHE: Cache<String, f64> = LazyLock::new(Default::default);
+static HISTORIC_CACHE: Cache<(String, i64, i64), Arc<yahoo::YResponse>> =
+    LazyLock::new(Default::default);
+static NAME_CACHE: Cache<String, String> = LazyLock::new(Default::default);
+
+/// Remembers a fetched value so a later failed fetch can fall back to it.
+fn remember<K: Eq + Hash, V>(cache: &Mutex<HashMap<K, V>>, key: K, value: V) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, value);
+    }
+}
+
+/// The remembered value for `key`, or `err` when there is none.
+fn recall<K, Q, V, E>(cache: &Mutex<HashMap<K, V>>, key: &Q, err: E) -> Result<V, E>
+where
+    K: Eq + Hash + Borrow<Q>,
+    Q: Eq + Hash + ?Sized,
+    V: Clone,
+{
+    cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+        .ok_or(err)
+}
 
 /// How an unpriced position's value was estimated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,10 +413,10 @@ impl PortfolioPosition {
 
     /// Held quantity: sum of purchase quantities, or `Amount` without purchases.
     pub fn quantity_dec(&self) -> Decimal {
-        if !self.purchases.is_empty() {
-            self.purchases.iter().map(|p| p.quantity).sum()
-        } else {
+        if self.purchases.is_empty() {
             self.amount
+        } else {
+            self.purchases.iter().map(|p| p.quantity).sum()
         }
     }
 
@@ -677,22 +697,10 @@ async fn get_quote_price(ticker: &str) -> Result<Arc<yahoo::YResponse>, yahoo::Y
     {
         Ok(resp) => {
             let response = Arc::new(resp);
-            if let Ok(mut cache) = QUOTE_CACHE.lock() {
-                cache.insert(ticker.to_string(), response.clone());
-            }
+            remember(&QUOTE_CACHE, ticker.to_string(), Arc::clone(&response));
             Ok(response)
         }
-        Err(e) => {
-            if let Ok(cache) = QUOTE_CACHE.lock() {
-                if let Some(cached) = cache.get(ticker) {
-                    Ok(Arc::clone(cached))
-                } else {
-                    Err(e)
-                }
-            } else {
-                Err(e)
-            }
-        }
+        Err(e) => recall(&QUOTE_CACHE, ticker, e),
     }
 }
 
@@ -713,27 +721,14 @@ async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
             } else {
                 return Err(yahoo::YahooError::NoResult);
             };
-            if let Ok(mut cache) = PREV_CLOSE_CACHE.lock() {
-                cache.insert(ticker.to_string(), prev_close);
-            }
+            remember(&PREV_CLOSE_CACHE, ticker.to_string(), prev_close);
             Ok(prev_close)
         }
-        Err(e) => {
-            if let Ok(cache) = PREV_CLOSE_CACHE.lock() {
-                if let Some(&cached) = cache.get(ticker) {
-                    Ok(cached)
-                } else {
-                    Err(e)
-                }
-            } else {
-                Err(e)
-            }
-        }
+        Err(e) => recall(&PREV_CLOSE_CACHE, ticker, e),
     }
 }
 
 pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
-    use chrono::NaiveDate;
     let s = date_str.trim();
     let parsed = NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(s, "%Y/%m/%d"))
@@ -762,22 +757,10 @@ pub async fn get_historic_price(
     {
         Ok(resp) => {
             let response = Arc::new(resp);
-            if let Ok(mut cache) = HISTORIC_CACHE.lock() {
-                cache.insert(cache_key.clone(), response.clone());
-            }
+            remember(&HISTORIC_CACHE, cache_key, Arc::clone(&response));
             Ok(response)
         }
-        Err(e) => {
-            if let Ok(cache) = HISTORIC_CACHE.lock() {
-                if let Some(cached) = cache.get(&cache_key) {
-                    Ok(Arc::clone(cached))
-                } else {
-                    Err(e)
-                }
-            } else {
-                Err(e)
-            }
-        }
+        Err(e) => recall(&HISTORIC_CACHE, &cache_key, e),
     }
 }
 
@@ -785,26 +768,11 @@ pub async fn get_historic_price(
 async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
     match yahoo::YahooConnector::new()?.search_ticker(ticker).await {
         Ok(resp) => {
-            if let Some(item) = resp.quotes.first() {
-                if let Ok(mut cache) = NAME_CACHE.lock() {
-                    cache.insert(ticker.to_string(), item.short_name.clone());
-                }
-                Ok(item.short_name.clone())
-            } else {
-                Err(yahoo::YahooError::NoResult)
-            }
+            let item = resp.quotes.first().ok_or(yahoo::YahooError::NoResult)?;
+            remember(&NAME_CACHE, ticker.to_string(), item.short_name.clone());
+            Ok(item.short_name.clone())
         }
-        Err(e) => {
-            if let Ok(cache) = NAME_CACHE.lock() {
-                if let Some(cached) = cache.get(ticker) {
-                    Ok(cached.clone())
-                } else {
-                    Err(e)
-                }
-            } else {
-                Err(e)
-            }
-        }
+        Err(e) => recall(&NAME_CACHE, ticker, e),
     }
 }
 
@@ -859,7 +827,7 @@ pub(crate) async fn yahoo_daily_bars(
     let resp = get_historic_price(symbol, from, to)
         .await
         .map_err(|e| QuoteError::Provider(e.to_string()))?;
-    let offset = resp.metadata().map(|m| m.gmtoffset as i64).unwrap_or(0);
+    let offset = resp.metadata().map_or(0, |m| m.gmtoffset as i64);
     let quotes = resp
         .quotes()
         .map_err(|_| QuoteError::Unavailable(symbol.to_string()))?;
@@ -937,7 +905,7 @@ pub async fn handle_position_with<P: QuoteProvider>(
         if !position.purchases.is_empty() {
             let mut filled_purchases = Vec::with_capacity(position.purchases.len());
             for mut p in position.purchases.clone() {
-                let needs_price = p.price.map(|v| v <= Decimal::ZERO).unwrap_or(true);
+                let needs_price = p.price.is_none_or(|v| v <= Decimal::ZERO);
                 if needs_price && p.quantity != Decimal::ZERO {
                     if let Some(date) = p.date.as_deref().and_then(parse_purchase_date) {
                         if let Ok(close) = provider.close_on(ticker, date).await {

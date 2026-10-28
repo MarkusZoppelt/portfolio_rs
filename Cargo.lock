@@ -2263,7 +2263,6 @@ dependencies = [
  "futures",
  "http-body-util",
  "jsonschema",
- "once_cell",
  "piechart",
  "predicates",
  "ratatui",
