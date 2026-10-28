@@ -1,13 +1,18 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt::Write as _;
+
+use chrono::prelude::*;
+use chrono::Duration;
+use comfy_table::presets::UTF8_FULL;
+use comfy_table::{Attribute, Cell, CellAlignment, Color as TColor, ContentArrangement, Table};
+use eyre::{bail, Result};
+use futures::future::join_all;
+use piechart::{Chart, Color};
 
 use crate::money::{dec, div, percent_change, percent_of, to_f64, Decimal};
 use crate::position::{PortfolioPosition, PriceStatus};
 use crate::services::quotes::{AnyProvider, QuoteError, QuoteProvider};
-
-use chrono::prelude::*;
-use eyre::bail;
-use eyre::Result;
-use piechart::{Chart, Color};
 
 #[derive(Debug, Clone)]
 pub struct Portfolio {
@@ -38,7 +43,7 @@ impl Portfolio {
         self.positions.sort_by(|a, b| {
             b.get_balance()
                 .partial_cmp(&a.get_balance())
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
         });
     }
 
@@ -130,7 +135,7 @@ impl Portfolio {
     /// Unrealized PnL over invested in percent (cash excluded), 0 without cost basis.
     pub fn hist_percent(&self) -> f64 {
         let (invested, pnl) = self.cost_basis_totals_dec();
-        percent_of(pnl, invested).map(to_f64).unwrap_or(0.0)
+        percent_of(pnl, invested).map_or(0.0, to_f64)
     }
 
     /// `(name, %day, day pnl)` of every position with a known daily change.
@@ -180,8 +185,6 @@ impl Portfolio {
         provider: &P,
         date: DateTime<Utc>,
     ) -> Result<(f64, f64)> {
-        use futures::future::join_all;
-
         let positions: Vec<&PortfolioPosition> = self.market_priced_securities().collect();
         let tasks = positions
             .iter()
@@ -260,115 +263,23 @@ impl Portfolio {
 
     /// The holdings table (and summary when `include_sum`) as printed by [`Self::print`].
     pub fn render(&self, include_sum: bool) -> String {
-        use std::fmt::Write as _;
         let mut out = String::new();
-        use comfy_table::{
-            presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
-            ContentArrangement, Table,
-        };
+        let mut table = styled_table(
+            TABLE_WIDTH,
+            &[
+                "Name", "Class", "Amount", "Avg Cost", "Invested", "Price", "Value", "PnL",
+                "%Hist", "%Day",
+            ],
+        );
 
-        let mut table = Table::new();
-        table
-            .load_style(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_width(120);
-
-        table.set_header(vec![
-            Cell::new("Name").add_attribute(Attribute::Bold),
-            Cell::new("Class").add_attribute(Attribute::Bold),
-            Cell::new("Amount").add_attribute(Attribute::Bold),
-            Cell::new("Avg Cost").add_attribute(Attribute::Bold),
-            Cell::new("Invested").add_attribute(Attribute::Bold),
-            Cell::new("Price").add_attribute(Attribute::Bold),
-            Cell::new("Value").add_attribute(Attribute::Bold),
-            Cell::new("PnL").add_attribute(Attribute::Bold),
-            Cell::new("%Hist").add_attribute(Attribute::Bold),
-            Cell::new("%Day").add_attribute(Attribute::Bold),
-        ]);
-
-        let breakdown = self.value_breakdown();
-        let total_value = to_f64(breakdown.total);
-        let cash_value = to_f64(breakdown.cash);
-        let securities_value = to_f64(breakdown.securities);
         for position in &self.positions {
-            let amount = position.get_amount();
-            let avg_cost = position.average_cost();
-            let invested = position.total_invested();
-            let price = position.market_price();
-            let value = position.market_value();
-            let pnl = position.pnl();
-            let day_var = position.daily_variation_percent();
-            let hist_var = position.historic_variation_percent();
-
             let is_cash = position.is_cash();
+            // Cash has no cost basis, PnL or returns.
+            let unless_cash = |v: Option<f64>| v.filter(|_| !is_cash);
+            let money_or_dash =
+                |v: Option<f64>| v.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
 
-            let avg_cost_str = if is_cash {
-                "-".to_string()
-            } else {
-                avg_cost
-                    .map(|v| format!("{v:.2}"))
-                    .unwrap_or_else(|| "-".to_string())
-            };
-            let invested_str = if is_cash {
-                "-".to_string()
-            } else {
-                invested
-                    .map(|v| format!("{v:.2}"))
-                    .unwrap_or_else(|| "-".to_string())
-            };
-            let asset_class = position.get_asset_class();
-            let asset_color = match asset_class.to_lowercase().as_str() {
-                "crypto" => TColor::DarkYellow,
-                "stocks" | "stock" => TColor::DarkBlue,
-                "bonds" | "bond" => TColor::DarkRed,
-                "commodities" | "commodity" => TColor::DarkMagenta,
-                "gold" => TColor::Yellow,
-                "cash" => TColor::DarkGreen,
-                _ => TColor::White,
-            };
-
-            let pnl_cell = if is_cash {
-                Cell::new("-").set_alignment(CellAlignment::Right)
-            } else {
-                match pnl {
-                    Some(v) => {
-                        let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                        Cell::new(format!("{v:.2}"))
-                            .set_alignment(CellAlignment::Right)
-                            .fg(c)
-                    }
-                    None => Cell::new("-").set_alignment(CellAlignment::Right),
-                }
-            };
-
-            let day_cell = if is_cash {
-                Cell::new("-").set_alignment(CellAlignment::Right)
-            } else {
-                match day_var {
-                    Some(v) => {
-                        let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                        Cell::new(format!("{v:.2}%"))
-                            .set_alignment(CellAlignment::Right)
-                            .fg(c)
-                    }
-                    None => Cell::new("-").set_alignment(CellAlignment::Right),
-                }
-            };
-
-            let hist_cell = if is_cash {
-                Cell::new("-").set_alignment(CellAlignment::Right)
-            } else {
-                match hist_var {
-                    Some(v) => {
-                        let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                        Cell::new(format!("{v:.2}%"))
-                            .set_alignment(CellAlignment::Right)
-                            .fg(c)
-                    }
-                    None => Cell::new("-").set_alignment(CellAlignment::Right),
-                }
-            };
-
+            let price = position.market_price();
             // Show the quote currency whenever it is converted (or cannot be).
             let price_ccy = match position.price_status() {
                 PriceStatus::FxUnavailable => position.price_currency(),
@@ -387,133 +298,45 @@ impl Portfolio {
                 format!("{price:.2}")
             };
             let value_str = if position.has_market_price() {
-                format!("{value:.2}")
+                format!("{:.2}", position.market_value())
             } else {
                 "n/a".to_string()
             };
 
+            let asset_class = position.get_asset_class();
             table.add_row(vec![
                 Cell::new(position.get_name()),
-                Cell::new(asset_class).fg(asset_color),
-                Cell::new(format!("{amount:.4}")).set_alignment(CellAlignment::Right),
-                Cell::new(avg_cost_str).set_alignment(CellAlignment::Right),
-                Cell::new(invested_str).set_alignment(CellAlignment::Right),
-                Cell::new(price_str).set_alignment(CellAlignment::Right),
-                Cell::new(value_str).set_alignment(CellAlignment::Right),
-                pnl_cell,
-                hist_cell,
-                day_cell,
+                Cell::new(asset_class).fg(asset_class_color(asset_class)),
+                right(format!("{:.4}", position.get_amount())),
+                right(money_or_dash(unless_cash(position.average_cost()))),
+                right(money_or_dash(unless_cash(position.total_invested()))),
+                right(price_str),
+                right(value_str),
+                signed_money_or_dash(unless_cash(position.pnl())),
+                signed_pct_or_dash(unless_cash(position.historic_variation_percent())),
+                signed_pct_or_dash(unless_cash(position.daily_variation_percent())),
             ]);
         }
 
-        // Cash is excluded: a cash balance is neither a gain nor a loss.
-        let (total_invested, total_pnl) = self.cost_basis_totals();
-        let hist_percent = self.hist_percent();
-
-        // Broker-style overview summary above balances
         if include_sum {
-            use comfy_table::{
-                presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
-                ContentArrangement, Table,
-            };
-            let day_pnl_abs = breakdown.day_pnl();
-            let total_day_var = breakdown.day_percent();
+            let breakdown = self.value_breakdown();
+            // Broker-style overview summary above balances
+            let _ = writeln!(out, "{}", self.overview_table(&breakdown));
 
-            let mut overview = Table::new();
-            overview
-                .load_style(UTF8_FULL)
-                .set_content_arrangement(ContentArrangement::Dynamic)
-                .set_width(120)
-                .set_header(vec![
-                    Cell::new("Total").add_attribute(Attribute::Bold),
-                    Cell::new("Securities").add_attribute(Attribute::Bold),
-                    Cell::new("Cash").add_attribute(Attribute::Bold),
-                    Cell::new("Invested").add_attribute(Attribute::Bold),
-                    Cell::new("Unreal. PnL").add_attribute(Attribute::Bold),
-                    Cell::new("%PnL").add_attribute(Attribute::Bold),
-                    Cell::new("Day PnL").add_attribute(Attribute::Bold),
-                    Cell::new("%Day").add_attribute(Attribute::Bold),
-                ]);
-
-            let colorize_pct = |v: f64| {
-                let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                Cell::new(format!("{v:.2}%"))
-                    .set_alignment(CellAlignment::Right)
-                    .fg(c)
-            };
-            let colorize_money = |v: f64| {
-                let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-                Cell::new(format!("{v:.2}"))
-                    .set_alignment(CellAlignment::Right)
-                    .fg(c)
-            };
-
-            overview.add_row(vec![
-                Cell::new(format!("{total_value:.2}")).set_alignment(CellAlignment::Right),
-                Cell::new(format!("{securities_value:.2}")).set_alignment(CellAlignment::Right),
-                Cell::new(format!("{cash_value:.2}")).set_alignment(CellAlignment::Right),
-                Cell::new(if total_invested > 0.0 {
-                    format!("{total_invested:.2}")
-                } else {
-                    "-".to_string()
-                })
-                .set_alignment(CellAlignment::Right),
-                colorize_money(total_pnl),
-                colorize_pct(hist_percent),
-                colorize_money(day_pnl_abs),
-                colorize_pct(total_day_var),
-            ]);
-
-            let _ = writeln!(out, "{overview}");
-        }
-
-        if include_sum {
-            let total_day_var = breakdown.day_percent();
+            // Cash is excluded: a cash balance is neither a gain nor a loss.
+            let (total_invested, total_pnl) = self.cost_basis_totals();
+            let bold = |cell: Cell| cell.add_attribute(Attribute::Bold);
             table.add_row(vec![
-                Cell::new("TOTAL").add_attribute(Attribute::Bold),
+                bold(Cell::new("TOTAL")),
                 Cell::new(""),
                 Cell::new(""),
                 Cell::new(""),
-                Cell::new(format!("{total_invested:.2}"))
-                    .set_alignment(CellAlignment::Right)
-                    .add_attribute(Attribute::Bold),
-                Cell::new("").set_alignment(CellAlignment::Right),
-                Cell::new(format!("{total_value:.2}"))
-                    .set_alignment(CellAlignment::Right)
-                    .add_attribute(Attribute::Bold),
-                {
-                    let c = if total_pnl >= 0.0 {
-                        TColor::Green
-                    } else {
-                        TColor::Red
-                    };
-                    Cell::new(format!("{total_pnl:.2}"))
-                        .set_alignment(CellAlignment::Right)
-                        .add_attribute(Attribute::Bold)
-                        .fg(c)
-                },
-                {
-                    let c = if hist_percent >= 0.0 {
-                        TColor::Green
-                    } else {
-                        TColor::Red
-                    };
-                    Cell::new(format!("{hist_percent:.2}%"))
-                        .set_alignment(CellAlignment::Right)
-                        .add_attribute(Attribute::Bold)
-                        .fg(c)
-                },
-                {
-                    let c = if total_day_var >= 0.0 {
-                        TColor::Green
-                    } else {
-                        TColor::Red
-                    };
-                    Cell::new(format!("{total_day_var:.2}%"))
-                        .set_alignment(CellAlignment::Right)
-                        .add_attribute(Attribute::Bold)
-                        .fg(c)
-                },
+                bold(right(format!("{total_invested:.2}"))),
+                right(""),
+                bold(right(format!("{:.2}", to_f64(breakdown.total)))),
+                bold(signed_money(total_pnl)),
+                bold(signed_pct(self.hist_percent())),
+                bold(signed_pct(breakdown.day_percent())),
             ]);
         }
 
@@ -523,41 +346,69 @@ impl Portfolio {
             .positions_without_price()
             .into_iter()
             .partition(|position| position.price_status() == PriceStatus::FxUnavailable);
-        let label = |position: &&PortfolioPosition| {
-            position
-                .get_ticker()
-                .unwrap_or_else(|| position.get_name())
-                .to_string()
+        let mut warn = |positions: &[&PortfolioPosition], what: &str| {
+            if positions.is_empty() {
+                return;
+            }
+            let labels = positions
+                .iter()
+                .map(|position| position.get_ticker().unwrap_or_else(|| position.get_name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "Warning: {} position(s) {what}: {labels}",
+                positions.len()
+            );
         };
-        if !no_price.is_empty() {
-            let labels = no_price.iter().map(label).collect::<Vec<_>>().join(", ");
-            let _ = writeln!(
-                out,
-                "Warning: {} position(s) without market price excluded from totals: {}",
-                no_price.len(),
-                labels
-            );
-        }
-        let no_basis = self.positions_without_cost_basis();
-        if !no_basis.is_empty() {
-            let labels = no_basis.iter().map(label).collect::<Vec<_>>().join(", ");
-            let _ = writeln!(
-                out,
-                "Warning: {} position(s) without complete cost basis excluded from invested/PnL: {}",
-                no_basis.len(),
-                labels
-            );
-        }
-        if !no_fx.is_empty() {
-            let labels = no_fx.iter().map(label).collect::<Vec<_>>().join(", ");
-            let _ = writeln!(
-                out,
-                "Warning: {} position(s) without FX rate to the base currency excluded from totals: {}",
-                no_fx.len(),
-                labels
-            );
-        }
+        warn(&no_price, "without market price excluded from totals");
+        warn(
+            &self.positions_without_cost_basis(),
+            "without complete cost basis excluded from invested/PnL",
+        );
+        warn(
+            &no_fx,
+            "without FX rate to the base currency excluded from totals",
+        );
         out
+    }
+
+    /// The broker-style summary shared by [`Self::render`] and
+    /// [`Self::render_performance_with`].
+    fn overview_table(&self, breakdown: &ValueBreakdown) -> Table {
+        // Inception invested and PnL. Cash is neither a gain nor a loss:
+        // do not subtract invested from total value (which includes cash).
+        let (total_invested, unrealized_pnl) = self.cost_basis_totals();
+        let mut overview = styled_table(
+            TABLE_WIDTH,
+            &[
+                "Total",
+                "Securities",
+                "Cash",
+                "Invested",
+                "Unreal. PnL",
+                "%PnL",
+                "Day PnL",
+                "%Day",
+            ],
+        );
+        overview.add_row(vec![
+            right(format!("{:.2}", to_f64(breakdown.total))),
+            right(format!("{:.2}", to_f64(breakdown.securities))),
+            right(format!("{:.2}", to_f64(breakdown.cash))),
+            right(if total_invested > 0.0 {
+                format!("{total_invested:.2}")
+            } else {
+                "-".to_string()
+            }),
+            signed_money(unrealized_pnl),
+            signed_pct(self.hist_percent()),
+            signed_money(breakdown.day_pnl()),
+            // 1D: whole priced portfolio (incl. cash) vs. its previous-close value;
+            // both sides contain the same positions, cash at an unchanged value.
+            signed_pct(breakdown.day_percent()),
+        ]);
+        overview
     }
 
     // Print the allocation in descending order %-wise
@@ -567,13 +418,12 @@ impl Portfolio {
 
     /// The allocation list as printed by [`Self::print_allocation`].
     pub fn render_allocation(&self) -> String {
-        use std::fmt::Write as _;
         let mut out = String::new();
         let allocation = self.get_allocation();
 
         // create a vector and sort it by the %-value of the allocation in descending order
         let mut allocation_vec: Vec<(&String, &f64)> = allocation.iter().collect();
-        allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+        allocation_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(Ordering::Equal));
 
         let _ = writeln!(out, "====================================");
         for (asset_class, percentage) in allocation_vec {
@@ -583,8 +433,6 @@ impl Portfolio {
     }
 
     pub fn draw_pie_chart(&self) {
-        let mut data = vec![];
-
         let colors = [
             Color::Red,
             Color::Green,
@@ -595,21 +443,17 @@ impl Portfolio {
             Color::Purple,
             Color::Black,
         ];
-
-        for (i, position) in self.positions.iter().enumerate() {
-            let name = {
-                let this = &position;
-                this.get_name()
-            };
-            let balance = position.get_balance() as f32;
-
-            data.push(piechart::Data {
-                label: name.to_string(),
-                value: balance,
-                color: Some(colors[i % colors.len()].into()),
+        let data: Vec<_> = self
+            .positions
+            .iter()
+            .zip(colors.into_iter().cycle())
+            .map(|(position, color)| piechart::Data {
+                label: position.get_name().to_string(),
+                value: position.get_balance() as f32,
+                color: Some(color.into()),
                 fill: '•',
-            });
-        }
+            })
+            .collect();
 
         Chart::new()
             .legend(true)
@@ -646,218 +490,136 @@ impl Portfolio {
         last_db: f64,
         now: DateTime<Utc>,
     ) -> String {
-        use comfy_table::{
-            presets::UTF8_FULL, Attribute, Cell, CellAlignment, Color as TColor,
-            ContentArrangement, Table,
-        };
-        use std::fmt::Write as _;
         let mut out = String::new();
-
-        // Reference points — Jan 1 and first of month are never ambiguous
-        let start_year = Utc.with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0).unwrap();
-
         let breakdown = self.value_breakdown();
-        let current_value = to_f64(breakdown.total);
 
-        // Inception invested and PnL. Cash is neither a gain nor a loss:
-        // do not subtract invested from total value (which includes cash).
-        let (total_invested, unrealized_pnl) = self.cost_basis_totals();
-        let hist_percent = self.hist_percent();
-
-        // 1D: whole priced portfolio (incl. cash) vs. its previous-close value;
-        // both sides contain the same positions, cash at an unchanged value.
-        let daily_percent = breakdown.day_percent();
-
-        // Period returns (1W..1Y, YTD): market return of the currently held,
-        // priced ticker positions at current quantities and FX. Cash and
-        // ticker-less holdings are excluded on both sides, and deposits,
-        // withdrawals and trades during the period are not accounted for.
-        let start_week = now - chrono::Duration::days(7);
-        let start_1m_roll = now - chrono::Duration::days(30);
-        let start_3m_roll = now - chrono::Duration::days(90);
-        let start_6m_roll = now - chrono::Duration::days(182);
-        let start_1y_roll = now - chrono::Duration::days(365);
-
-        let mut market_returns = Vec::new();
-        for start in [
-            start_week,
-            start_1m_roll,
-            start_3m_roll,
-            start_6m_roll,
+        // Period returns (1W, 1M, 3M, 6M, YTD, 1Y): market return of the
+        // currently held, priced ticker positions at current quantities and
+        // FX. Cash and ticker-less holdings are excluded on both sides, and
+        // deposits, withdrawals and trades during the period are not
+        // accounted for. Jan 1 is never ambiguous.
+        let start_year = Utc.with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0).unwrap();
+        let starts = [
+            now - Duration::days(7),
+            now - Duration::days(30),
+            now - Duration::days(90),
+            now - Duration::days(182),
             start_year,
-            start_1y_roll,
-        ] {
+            now - Duration::days(365),
+        ];
+        let mut market_returns = Vec::with_capacity(starts.len());
+        for start in starts {
+            let values = self
+                .historic_and_current_securities_value_with(provider, start)
+                .await;
             market_returns.push(
-                match self
-                    .historic_and_current_securities_value_with(provider, start)
-                    .await
-                {
-                    Ok((historic, current)) => period_return_percent(current, historic),
-                    Err(_) => None,
-                },
+                values
+                    .ok()
+                    .and_then(|(historic, current)| period_return_percent(current, historic)),
             );
         }
-        let [w1_market, m1_market, m3_market, m6_market, ytd_market, y1_market] =
-            market_returns[..]
-        else {
-            unreachable!("six periods requested")
-        };
 
         // "Since": total (incl. cash) vs. the last stored total balance; both
         // are totals, but deposits and withdrawals in between are not accounted for.
         let since_last_check_percent = if last_db.is_finite() {
-            percent_change(breakdown.total, dec(last_db))
-                .map(to_f64)
-                .unwrap_or(0.0)
+            percent_change(breakdown.total, dec(last_db)).map_or(0.0, to_f64)
         } else {
             0.0
         };
 
-        // Helpers
-        let colorize_pct = |v: f64| {
-            let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-            Cell::new(format!("{v:.2}%"))
-                .set_alignment(CellAlignment::Right)
-                .fg(c)
-        };
-        let colorize_money = |v: f64| {
-            let c = if v >= 0.0 { TColor::Green } else { TColor::Red };
-            Cell::new(format!("{v:.2}"))
-                .set_alignment(CellAlignment::Right)
-                .fg(c)
-        };
-        let pct_cell_opt = |ov: Option<f64>| match ov {
-            Some(v) => colorize_pct(v),
-            None => Cell::new("-").set_alignment(CellAlignment::Right),
-        };
-
-        let cash_value = to_f64(breakdown.cash);
-        let securities_value = to_f64(breakdown.securities);
-
-        // Overview table (professional summary)
-        let day_pnl_abs = breakdown.day_pnl();
-        let mut overview = Table::new();
-        overview
-            .load_style(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_width(120)
-            .set_header(vec![
-                Cell::new("Total").add_attribute(Attribute::Bold),
-                Cell::new("Securities").add_attribute(Attribute::Bold),
-                Cell::new("Cash").add_attribute(Attribute::Bold),
-                Cell::new("Invested").add_attribute(Attribute::Bold),
-                Cell::new("Unreal. PnL").add_attribute(Attribute::Bold),
-                Cell::new("%PnL").add_attribute(Attribute::Bold),
-                Cell::new("Day PnL").add_attribute(Attribute::Bold),
-                Cell::new("%Day").add_attribute(Attribute::Bold),
-            ]);
-        overview.add_row(vec![
-            Cell::new(format!("{current_value:.2}")).set_alignment(CellAlignment::Right),
-            Cell::new(format!("{securities_value:.2}")).set_alignment(CellAlignment::Right),
-            Cell::new(format!("{cash_value:.2}")).set_alignment(CellAlignment::Right),
-            Cell::new(if total_invested > 0.0 {
-                format!("{total_invested:.2}")
-            } else {
-                "-".to_string()
-            })
-            .set_alignment(CellAlignment::Right),
-            colorize_money(unrealized_pnl),
-            colorize_pct(hist_percent),
-            colorize_money(day_pnl_abs),
-            colorize_pct(daily_percent),
-        ]);
-
-        // Period returns (market-based)
-        let mut periods = Table::new();
-        periods
-            .load_style(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_width(120)
-            .set_header(vec![
-                Cell::new("1D").add_attribute(Attribute::Bold),
-                Cell::new("1W").add_attribute(Attribute::Bold),
-                Cell::new("1M").add_attribute(Attribute::Bold),
-                Cell::new("3M").add_attribute(Attribute::Bold),
-                Cell::new("6M").add_attribute(Attribute::Bold),
-                Cell::new("YTD").add_attribute(Attribute::Bold),
-                Cell::new("1Y").add_attribute(Attribute::Bold),
-                Cell::new("Since").add_attribute(Attribute::Bold),
-            ]);
-        periods.add_row(vec![
-            colorize_pct(daily_percent),
-            pct_cell_opt(w1_market),
-            pct_cell_opt(m1_market),
-            pct_cell_opt(m3_market),
-            pct_cell_opt(m6_market),
-            pct_cell_opt(ytd_market),
-            pct_cell_opt(y1_market),
-            colorize_pct(since_last_check_percent),
-        ]);
+        let mut periods = styled_table(
+            TABLE_WIDTH,
+            &["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "Since"],
+        );
+        let mut row = vec![signed_pct(breakdown.day_percent())];
+        row.extend(market_returns.into_iter().map(signed_pct_or_dash));
+        row.push(signed_pct(since_last_check_percent));
+        periods.add_row(row);
 
         // Top movers today
         let (gainers, losers) = top_movers(self.day_movers(), 3);
 
-        let mut top_gainers = Table::new();
-        top_gainers
-            .load_style(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_width(64)
-            .set_header(vec![
-                Cell::new("Top Gainers").add_attribute(Attribute::Bold),
-                Cell::new("%Day").add_attribute(Attribute::Bold),
-                Cell::new("Day PnL").add_attribute(Attribute::Bold),
-            ]);
-        for (name, pct, pnl) in &gainers {
-            let c = if *pct >= 0.0 {
-                TColor::Green
-            } else {
-                TColor::Red
-            };
-            top_gainers.add_row(vec![
-                Cell::new(name.clone()),
-                Cell::new(format!("{pct:.2}%"))
-                    .set_alignment(CellAlignment::Right)
-                    .fg(c),
-                colorize_money(*pnl),
-            ]);
-        }
-
-        let mut top_losers = Table::new();
-        top_losers
-            .load_style(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_width(64)
-            .set_header(vec![
-                Cell::new("Top Losers").add_attribute(Attribute::Bold),
-                Cell::new("%Day").add_attribute(Attribute::Bold),
-                Cell::new("Day PnL").add_attribute(Attribute::Bold),
-            ]);
-        for (name, pct, pnl) in &losers {
-            let c = if *pct >= 0.0 {
-                TColor::Green
-            } else {
-                TColor::Red
-            };
-            top_losers.add_row(vec![
-                Cell::new(name.clone()),
-                Cell::new(format!("{pct:.2}%"))
-                    .set_alignment(CellAlignment::Right)
-                    .fg(c),
-                colorize_money(*pnl),
-            ]);
-        }
-
-        // Print sections
-        let _ = writeln!(out, "{overview}");
+        let _ = writeln!(out, "{}", self.overview_table(&breakdown));
         let _ = writeln!(out, "{periods}");
         if !gainers.is_empty() {
-            let _ = writeln!(out, "{top_gainers}");
+            let _ = writeln!(out, "{}", movers_table("Top Gainers", &gainers));
         }
         if !losers.is_empty() {
-            let _ = writeln!(out, "{top_losers}");
+            let _ = writeln!(out, "{}", movers_table("Top Losers", &losers));
         }
         out
     }
+}
+
+const TABLE_WIDTH: u16 = 120;
+const MOVERS_TABLE_WIDTH: u16 = 64;
+
+/// A table in the CLI style with a bold `header`.
+fn styled_table(width: u16, header: &[&str]) -> Table {
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_width(width)
+        .set_header(
+            header
+                .iter()
+                .map(|title| Cell::new(title).add_attribute(Attribute::Bold))
+                .collect::<Vec<_>>(),
+        );
+    table
+}
+
+/// A right-aligned cell.
+fn right(text: impl ToString) -> Cell {
+    Cell::new(text).set_alignment(CellAlignment::Right)
+}
+
+/// A right-aligned `text`, green for a non-negative `value`, red otherwise.
+fn signed(value: f64, text: String) -> Cell {
+    let color = if value >= 0.0 {
+        TColor::Green
+    } else {
+        TColor::Red
+    };
+    right(text).fg(color)
+}
+
+fn signed_money(value: f64) -> Cell {
+    signed(value, format!("{value:.2}"))
+}
+
+fn signed_pct(value: f64) -> Cell {
+    signed(value, format!("{value:.2}%"))
+}
+
+fn signed_money_or_dash(value: Option<f64>) -> Cell {
+    value.map_or_else(|| right("-"), signed_money)
+}
+
+fn signed_pct_or_dash(value: Option<f64>) -> Cell {
+    value.map_or_else(|| right("-"), signed_pct)
+}
+
+fn asset_class_color(asset_class: &str) -> TColor {
+    match asset_class.to_lowercase().as_str() {
+        "crypto" => TColor::DarkYellow,
+        "stocks" | "stock" => TColor::DarkBlue,
+        "bonds" | "bond" => TColor::DarkRed,
+        "commodities" | "commodity" => TColor::DarkMagenta,
+        "gold" => TColor::Yellow,
+        "cash" => TColor::DarkGreen,
+        _ => TColor::White,
+    }
+}
+
+/// `title`, `%Day` and `Day PnL` of the top movers.
+fn movers_table(title: &str, movers: &[Mover<String>]) -> Table {
+    let mut table = styled_table(MOVERS_TABLE_WIDTH, &[title, "%Day", "Day PnL"]);
+    for (name, pct, pnl) in movers {
+        table.add_row(vec![Cell::new(name), signed_pct(*pct), signed_money(*pnl)]);
+    }
+    table
 }
 
 /// Sum `(historic, current)` base-currency values over positions paired with
@@ -897,9 +659,7 @@ impl ValueBreakdown {
 
     /// [`Self::day_pnl`] in percent of the previous-close total, 0 when that is not positive.
     pub fn day_percent(&self) -> f64 {
-        percent_change(self.total, self.previous_day)
-            .map(to_f64)
-            .unwrap_or(0.0)
+        percent_change(self.total, self.previous_day).map_or(0.0, to_f64)
     }
 }
 
@@ -910,7 +670,6 @@ pub type Mover<T> = (T, f64, f64);
 /// positive %day first) and top `n` losers (most negative first). A position
 /// is in at most one list; an unchanged one (0%) is in neither.
 pub fn top_movers<T: Clone>(movers: Vec<Mover<T>>, n: usize) -> (Vec<Mover<T>>, Vec<Mover<T>>) {
-    use std::cmp::Ordering;
     let mut gainers: Vec<_> = movers.iter().filter(|m| m.1 > 0.0).cloned().collect();
     gainers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     gainers.truncate(n);
