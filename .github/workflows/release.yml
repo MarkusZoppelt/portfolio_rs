@@ -8,9 +8,13 @@ on:
   push:
     tags:
       - v[0-9]+.*
+  # Manual run from a branch: checks crates.io Trusted Publishing with a dry
+  # run. It creates no release and publishes nothing.
+  workflow_dispatch:
 
 jobs:
   create-release:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,6 +24,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   upload-assets:
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       matrix:
         os:
@@ -62,3 +67,26 @@ jobs:
         run: nix build .#
       - name: Test the binary
         run: ./result/bin/portfolio_rs --help
+
+  # Publish to crates.io with Trusted Publishing (OIDC), so no registry token is
+  # stored anywhere. crates.io lists MarkusZoppelt/portfolio_rs, release.yml as
+  # the trusted publisher. A manual run only does a dry run.
+  publish-crate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Dry run
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: cargo publish --locked --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

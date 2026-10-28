@@ -51,4 +51,5 @@ cargo fmt --check          # rustfmt.toml: max_width = 100
   `include_str!`/`include_bytes!` target needs its extension added to that filter or
   `nix build`/`nix flake check` fails even though `cargo build` succeeds locally.
 - Release: pushing a `v*` tag triggers the GitHub release workflow; version lives in
-  `Cargo.toml`.
+  `Cargo.toml`. The same workflow publishes to crates.io via Trusted Publishing (no
+  stored token); running it manually (`workflow_dispatch`) only does a dry run.
