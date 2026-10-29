@@ -467,7 +467,7 @@ impl Portfolio {
     }
 
     pub async fn print_performance(&self) {
-        let db = match sled::open("database") {
+        let db = match crate::services::persistence::open_db() {
             Ok(db) => db,
             Err(e) => {
                 eprintln!("Warning: failed to open performance database: {e}");

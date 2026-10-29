@@ -997,7 +997,15 @@ fn older_than(ts: Option<&str>, now: chrono::DateTime<chrono::Utc>, days: i64) -
 /// Set each position's stale flag: a native price whose as-of (or a cached FX
 /// rate whose as-of) is more than `days` old. Unknown as-of is not stale.
 pub fn mark_stale(portfolio: &mut crate::portfolio::Portfolio, days: i64) {
-    let now = chrono::Utc::now();
+    mark_stale_at(portfolio, days, chrono::Utc::now());
+}
+
+/// [`mark_stale`] against an explicit clock.
+pub fn mark_stale_at(
+    portfolio: &mut crate::portfolio::Portfolio,
+    days: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     for p in &mut portfolio.positions {
         p.runtime.stale = p.has_native_price()
             && (older_than(p.price_as_of.as_deref(), now, days)
@@ -1658,13 +1666,20 @@ mod tests {
 
         let mut portfolio = crate::portfolio::Portfolio::new();
         portfolio.add_position(position);
-        mark_stale(&mut portfolio, DEFAULT_STALE_AFTER_DAYS);
+        // Fixed clock: the evening of the fixture's regularMarketTime.
+        let now = Utc.with_ymd_and_hms(2026, 10, 26, 18, 0, 0).unwrap();
+        mark_stale_at(&mut portfolio, DEFAULT_STALE_AFTER_DAYS, now);
         let position = &portfolio.positions[0];
         assert_eq!(position.price_status(), PriceStatus::Live);
         assert!(
             !position.is_stale(),
             "regularMarketTime is today, inside DEFAULT_STALE_AFTER_DAYS"
         );
-        assert!(position.has_native_price());
+
+        // Same quote, more than DEFAULT_STALE_AFTER_DAYS later: stale.
+        let later = now + chrono::Duration::days(DEFAULT_STALE_AFTER_DAYS + 1);
+        mark_stale_at(&mut portfolio, DEFAULT_STALE_AFTER_DAYS, later);
+        assert!(portfolio.positions[0].is_stale());
+        assert!(portfolio.positions[0].has_native_price());
     }
 }
