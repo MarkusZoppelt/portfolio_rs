@@ -729,19 +729,33 @@ async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
         .await
     {
         Ok(resp) => {
-            let quotes = resp.quotes()?;
-            let prev_close = if quotes.len() >= 2 {
-                quotes[quotes.len() - 2].close
-            } else if let Some(last) = quotes.last() {
-                last.close
-            } else {
-                return Err(yahoo::YahooError::NoResult);
-            };
+            let prev_close =
+                previous_close_at(&resp, Utc::now()).ok_or(yahoo::YahooError::NoResult)?;
             remember(&PREV_CLOSE_CACHE, ticker.to_string(), prev_close);
             Ok(prev_close)
         }
         Err(e) => recall(&PREV_CLOSE_CACHE, ticker, e),
     }
+}
+
+/// Previous close from a multi-day daily chart response, evaluated at `now`.
+///
+/// It is the last bar with a positive finite close dated strictly before
+/// "today" in the exchange's time zone (`gmtoffset`). `quotes()` already drops
+/// all-null bars, so indexing `len() - 2` would skip a day when today's bar is
+/// null; dating the bars avoids that and also works when today has no bar yet.
+///
+/// Meta `chartPreviousClose` / `previousClose` are deliberately not used: Yahoo
+/// defines them as the close before the chart range start, which is wrong for a
+/// multi-day range. `None` when no bar precedes today.
+fn previous_close_at(response: &yahoo::YResponse, now: DateTime<Utc>) -> Option<f64> {
+    let offset = response.metadata().map_or(0, |m| i64::from(m.gmtoffset));
+    let today = DateTime::from_timestamp(now.timestamp() + offset, 0)?.date_naive();
+    let quotes = response.quotes().ok()?;
+    quotes.iter().rev().find_map(|q| {
+        let date = DateTime::from_timestamp(q.timestamp + offset, 0)?.date_naive();
+        (date < today && positive_finite(q.close)).then_some(q.close)
+    })
 }
 
 pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
@@ -1586,6 +1600,54 @@ mod tests {
         position.price_source = Some(quote.source);
         apply_quote_result(&mut position, Some(quote.price));
         assert_eq!(position.price_status(), PriceStatus::Live);
+    }
+
+    fn five_day_response(today_close: Option<f64>) -> yahoo::YResponse {
+        let days = [
+            utc_unix(2026, 10, 20, 7, 0),
+            utc_unix(2026, 10, 21, 7, 0),
+            utc_unix(2026, 10, 22, 7, 0),
+            utc_unix(2026, 10, 23, 7, 0),
+            utc_unix(2026, 10, 26, 7, 0),
+        ];
+        let closes = [
+            Some(100.0),
+            Some(102.0),
+            Some(102.0),
+            Some(100.0),
+            today_close,
+        ];
+        fake_sg_response(&days, &closes, Some(97.0), Some(thin_dates().3), None)
+    }
+
+    fn day_change(prev: f64) -> (Option<f64>, Option<Decimal>) {
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKE.SG"), "Stocks", 10.0, 97.0, PriceStatus::Live);
+        position.previous_close = Some(dec(prev));
+        (position.daily_variation_percent(), position.day_pnl_dec())
+    }
+
+    #[test]
+    fn test_previous_close_skips_null_newest_bar() {
+        // 2026-10-26 17:55 UTC; the exchange is UTC+1, so "today" is the 26th.
+        let now = DateTime::from_timestamp(i64::from(thin_dates().3), 0).unwrap();
+        let prev = previous_close_at(&five_day_response(None), now).unwrap();
+        assert_eq!(prev, 100.0);
+        let (pct, pnl) = day_change(prev);
+        assert!((pct.unwrap() - -3.0).abs() < 1e-9);
+        assert_eq!(pnl, Some(dec(-30.0)));
+    }
+
+    #[test]
+    fn test_previous_close_with_todays_bar_uses_bar_before_it() {
+        let now = DateTime::from_timestamp(i64::from(thin_dates().3), 0).unwrap();
+        let prev = previous_close_at(&five_day_response(Some(98.0)), now).unwrap();
+        assert_eq!(prev, 100.0);
+        // No bar before today at all: no previous close.
+        let (d2, ..) = thin_dates();
+        let only_today = fake_sg_response(&[d2], &[Some(1.0)], None, None, None);
+        let early = DateTime::from_timestamp(d2, 0).unwrap();
+        assert_eq!(previous_close_at(&only_today, early), None);
     }
 
     #[test]
