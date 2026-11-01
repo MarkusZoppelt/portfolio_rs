@@ -511,6 +511,7 @@ pub struct PositionRow {
     pub value_base: Option<f64>,
     pub weight_percent: Option<f64>,
     pub average_cost: Option<f64>,
+    /// Cost basis in the base currency; null for cash and when unknown.
     pub invested: Option<f64>,
     pub unrealized_pnl: Option<f64>,
     pub unrealized_pnl_percent: Option<f64>,
@@ -531,16 +532,18 @@ pub struct PositionsOutput {
     pub total_value: f64,
     /// Sum of the rounded cash `valueBase` figures, rounded once more.
     pub cash_value: f64,
-    /// Portfolio-level cost basis of the priced market positions (base
-    /// currency); positions without the input are left out (`pnlPartial`).
+    /// Portfolio-level cost basis (base currency) of the market and manual
+    /// positions, as in the CLI `balances` totals (a manual holding is valued
+    /// at its `Amount` against its purchases); cash has none. Positions without the input are left out (`pnlPartial`).
     pub invested: Option<f64>,
-    /// Unrealized PnL of the priced market positions.
+    /// Unrealized PnL of the same positions.
     pub unrealized_pnl: Option<f64>,
     pub unrealized_pnl_percent: Option<f64>,
     /// Today's PnL of the priced market positions vs. the previous close.
     pub day_pnl: Option<f64>,
-    /// True when invested/PnL/dayPnl leave out a market position (no price,
-    /// FX, cost basis or previous close).
+    /// True when invested/PnL leave out a market or manual position (no
+    /// price, FX or cost basis), or dayPnl a market position (no previous
+    /// close).
     pub pnl_partial: bool,
     pub positions: Vec<PositionRow>,
 }
