@@ -54,9 +54,10 @@ pub struct Meta {
     /// allocation then cover only the priced positions (see `dataQuality`).
     pub complete: bool,
     pub data_quality: DataQuality,
-    /// True when any used price or FX rate came from the last-known-price
-    /// cache (see `stalePositions`). Cached prices within the max age count
-    /// towards `complete`.
+    /// True when any used price or FX rate is older than the stale threshold
+    /// (`--stale-after`, default 3 days), live or from the last-known-price
+    /// cache (see `stalePositions`). Stale prices still count towards
+    /// `complete`.
     pub has_stale: bool,
     /// connected | partial | offline | fixture, derived from the quotes actually
     /// present; identical across all tools and `get_context`.
@@ -64,10 +65,10 @@ pub struct Meta {
     /// Oldest `priceAsOf` among the priced market positions; null when none
     /// reports one.
     pub price_as_of: Option<String>,
-    /// `pos_` ids whose price or FX rate came from the cache.
+    /// `pos_` ids whose price or FX rate is stale (see `hasStale`).
     pub stale_positions: Vec<String>,
     /// complete (every value known and fresh) | partial (`complete` is
-    /// false) | stale (all known, but some from the quote cache).
+    /// false) | stale (all known, but some older than the stale threshold).
     /// `get_performance` may also report `insufficient_history` when there is
     /// no usable start snapshot (`complete` is false, `method` is `none`).
     /// Other tools never use that value; `complete` | `partial` | `stale` are
@@ -209,7 +210,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "stale_prices",
         "data_quality",
         "warning",
-        "Some prices or FX rates are last-known values from the quote cache; dataStatus is stale.",
+        "Some prices or FX rates are older than the stale threshold (live or from the quote cache); dataStatus is stale.",
     ),
     (
         "possible_breach",
@@ -497,7 +498,7 @@ pub struct PositionRow {
     /// Currency the holding is denominated in: the quote currency for market
     /// positions (null when unknown), the base currency for cash and manual.
     pub currency: Option<String>,
-    /// True when the price or its FX rate came from the last-known-price cache.
+    /// True when the price or its FX rate is older than the stale threshold.
     pub is_stale: bool,
     /// live | cache | fixture | none
     pub price_source: String,

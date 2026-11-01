@@ -57,7 +57,7 @@ pub fn price_source(p: &PortfolioPosition) -> &'static str {
 }
 
 /// Oldest `priceAsOf` among the priced market positions, and the ids of
-/// those whose price or FX rate came from the cache.
+/// those whose price or FX rate is stale (older than `--stale-after`).
 pub fn price_freshness(portfolio: &Portfolio) -> (Option<String>, Vec<String>) {
     let priced: Vec<_> = portfolio
         .positions
@@ -292,7 +292,7 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
                 Severity::Warning,
                 Category::DataQuality,
                 format!(
-                    "{} position(s) use last-known prices or FX rates from the quote cache (oldest as of {}); values are not current.",
+                    "{} position(s) have prices or FX rates older than the stale threshold (oldest as of {}); values are not current.",
                     stale.len(),
                     oldest.as_deref().unwrap_or("unknown")
                 ),

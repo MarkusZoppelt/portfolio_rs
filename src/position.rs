@@ -476,7 +476,6 @@ impl PortfolioPosition {
         self.price_source
     }
 
-    /// Whether the price or its FX rate came from the last-known-price cache.
     /// The price or FX rate is older than the stale threshold (see
     /// [`mark_stale`]). Coming from the cache alone is not stale.
     pub fn is_stale(&self) -> bool {
