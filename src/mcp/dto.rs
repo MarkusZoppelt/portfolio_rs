@@ -765,9 +765,10 @@ pub struct ContextOutput {
     pub context: Option<Value>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Period {
+    #[default]
     Day,
     Week,
     Month,
@@ -777,6 +778,27 @@ pub enum Period {
     OneYear,
     SinceInception,
     Custom,
+}
+
+impl Period {
+    pub const ALLOWED: &'static str = "day, week, month, mtd, ytd, 1y, since_inception, custom";
+}
+
+/// `period`: missing or null is `day`. Anything that is not one of the
+/// allowed strings (also a number or an object) is an error listing them,
+/// instead of serde's "invalid type" or "unknown variant".
+fn deserialize_period<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Period, D::Error> {
+    match Option::<Value>::deserialize(deserializer)? {
+        None => Ok(Period::Day),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+            serde::de::Error::custom(format!(
+                "invalid period {value}; allowed: {}",
+                Period::ALLOWED
+            ))
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -792,8 +814,10 @@ pub enum GroupBy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GetPerformanceInput {
     pub portfolio_id: Option<String>,
-    /// day | week (last 7 days) | month (last 30 days) | mtd | ytd | 1y |
-    /// since_inception | custom (needs from and to).
+    /// day (the default) | week (last 7 days) | month (last 30 days) | mtd |
+    /// ytd | 1y | since_inception | custom (needs from and to).
+    #[serde(default, deserialize_with = "deserialize_period")]
+    #[schemars(with = "Option<Period>")]
     pub period: Period,
     /// YYYY-MM-DD, first day of the period (custom only).
     pub from: Option<String>,
@@ -905,6 +929,30 @@ pub struct PerformanceOutput {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn period_allowed_lists_every_variant_and_defaults_to_day() {
+        for name in Period::ALLOWED.split(", ") {
+            let period: Period = serde_json::from_value(Value::from(name)).unwrap();
+            assert_eq!(serde_json::to_value(period).unwrap(), name);
+        }
+        let parse = |v: Value| serde_json::from_value::<GetPerformanceInput>(v);
+        assert_eq!(parse(serde_json::json!({})).unwrap().period, Period::Day);
+        assert_eq!(
+            parse(serde_json::json!({"period": null})).unwrap().period,
+            Period::Day
+        );
+        for bad in [
+            serde_json::json!(5),
+            serde_json::json!({}),
+            serde_json::json!("fortnight"),
+        ] {
+            let err = parse(serde_json::json!({ "period": bad }))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(Period::ALLOWED), "{err}");
+        }
+    }
 
     #[test]
     fn sum_money_matches_rounded_parts_not_the_rounded_sum() {

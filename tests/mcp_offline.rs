@@ -4199,3 +4199,32 @@ async fn missing_cost_basis_names_excluded_manual_and_market_positions() {
     assert_eq!(flagged.len(), 2, "{v}");
     client.cancel().await.unwrap();
 }
+
+/// `period` is optional: missing or null is `day`. Any other value is an
+/// `invalid_argument` listing the allowed periods.
+#[tokio::test]
+async fn get_performance_period_defaults_to_day() {
+    let client = connect(opts()).await;
+    let explicit = ok(&client, "get_performance", json!({"period": "day"})).await;
+    for args in [json!({}), json!({"period": null})] {
+        let v = ok(&client, "get_performance", args).await;
+        for key in ["period", "from", "to", "method", "dataStatus"] {
+            assert_eq!(v[key], explicit[key], "{key}");
+        }
+    }
+    for bad in [json!("fortnight"), json!(5), json!(true), json!({})] {
+        let (code, message) = err_parts(&client, "get_performance", json!({"period": bad})).await;
+        assert_eq!(code, "invalid_argument", "{bad}: {message}");
+        assert!(
+            message.contains("day, week, month, mtd, ytd, 1y, since_inception, custom"),
+            "{bad}: {message}"
+        );
+    }
+    let tools = client.list_all_tools().await.unwrap();
+    let tool = tools.iter().find(|t| t.name == "get_performance").unwrap();
+    let schema = Value::Object((*tool.input_schema).clone());
+    let required = schema["required"].as_array().cloned().unwrap_or_default();
+    assert!(!required.contains(&json!("period")), "{schema}");
+    assert!(schema.to_string().contains("since_inception"), "{schema}");
+    client.cancel().await.unwrap();
+}
