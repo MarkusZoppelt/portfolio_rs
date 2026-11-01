@@ -233,7 +233,7 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "missing_cost_basis",
         "data_quality",
         "info",
-        "Purchases are missing or have no price; PnL is unknown.",
+        "Purchases are missing or have no price; the position is left out of invested and PnL (market and manual holdings).",
     ),
     (
         "missing_ticker",

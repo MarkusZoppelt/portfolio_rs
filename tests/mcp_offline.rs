@@ -4167,3 +4167,35 @@ async fn manual_cost_basis_matches_cli_balances() {
         assert!(total.contains(figure), "{figure} in {total}");
     }
 }
+
+/// A valued holding without a cost basis is left out of invested/PnL: the
+/// totals say so with pnlPartial, and a missing_cost_basis finding names it,
+/// for manual holdings as for market positions.
+#[tokio::test]
+async fn missing_cost_basis_names_excluded_manual_and_market_positions() {
+    let tmp = TempDir::new().unwrap();
+    let client = connect_positions(
+        &tmp,
+        r#"[{"Name": "Fake ETF", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 10,
+             "Purchases": [{"Date": "2025/01/15", "Quantity": 10, "Price": 100.0}]},
+            {"Name": "No cost", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 2},
+            {"Name": "Fake Watch", "AssetClass": "Other", "Amount": 250}]"#,
+    )
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["pnlPartial"], true, "{v}");
+    assert_eq!(v["invested"], 1000.0, "{v}");
+    let flagged: Vec<&Value> = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "missing_cost_basis")
+        .map(|w| &w["positionId"])
+        .collect();
+    for name in ["No cost", "Fake Watch"] {
+        let id = &by_name(&v["positions"], name)["id"];
+        assert!(flagged.contains(&id), "{name}: {v}");
+    }
+    assert_eq!(flagged.len(), 2, "{v}");
+    client.cancel().await.unwrap();
+}
