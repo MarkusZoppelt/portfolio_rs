@@ -245,7 +245,7 @@ impl PortfolioContext {
                 name: position.get_name().to_string(),
                 ticker: position.get_ticker().map(ToString::to_string),
                 asset_class,
-                quantity: position.get_amount(),
+                quantity: to_f64(position.quantity_dec()),
                 // Native quote even without FX; only `value` needs the rate.
                 price: (position.get_ticker().is_some() && position.has_native_price())
                     .then(|| position.market_price()),

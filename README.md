@@ -29,6 +29,11 @@ Rust library.
 
     portfolio_rs my_positions.json
 
+A position's `Amount` is its number of units when it has a `Ticker`, and the
+balance for cash. A position with neither is a *manual* holding whose `Amount`
+is its value: without `Purchases` it counts as one item (quantity 1) and shows
+no price; with `Purchases` its quantity is the sum of the purchase quantities.
+
 A positions file that does not parse is never shown as an empty portfolio:
 every command that reads it prints `Error parsing positions in <file>: <reason>
 at line L column C` and exits with code 2, like `validate`, and `snapshot`
@@ -65,7 +70,7 @@ Switch tabs with `h`/`l`, `Tab` or `1`/`2`, quit with `q`. Start on a tab with
 | Command | Description |
 |---|---|
 | `portfolio_rs [FILE]` | Interactive TUI (default) |
-| `balances [FILE]` | Balances table with PnL |
+| `balances [FILE]` | Balances table (quantity, cost, value, PnL) |
 | `allocation [FILE]` | Allocation pie chart and breakdown |
 | `performance [FILE]` | Performance metrics (YTD, total return) |
 | `sort [FILE]` | Positions sorted by value (display only) |
