@@ -29,6 +29,11 @@ Rust library.
 
     portfolio_rs my_positions.json
 
+A positions file that does not parse is never shown as an empty portfolio:
+every command that reads it prints `Error parsing positions in <file>: <reason>
+at line L column C` and exits with code 2, like `validate`, and `snapshot`
+writes nothing.
+
 **Workspace mode.** For policies, diary, decisions, and reports, create a
 workspace:
 

@@ -149,6 +149,12 @@ async fn ok(client: &Client, name: &str, args: Value) -> Value {
 
 /// The error code of a failed call (`isError: true`).
 async fn err(client: &Client, name: &str, args: Value) -> String {
+    err_parts(client, name, args).await.0
+}
+
+/// Code and message of a failed call (`isError: true`). A body that is not
+/// a JSON error object is returned whole as the code.
+async fn err_parts(client: &Client, name: &str, args: Value) -> (String, String) {
     let result = call(client, name, args).await;
     assert_eq!(result.is_error, Some(true), "{name} unexpectedly succeeded");
     let text = serde_json::to_value(&result.content[0]).unwrap()["text"]
@@ -156,9 +162,39 @@ async fn err(client: &Client, name: &str, args: Value) -> String {
         .unwrap()
         .to_string();
     match serde_json::from_str::<Value>(&text) {
-        Ok(v) => v["error"]["code"].as_str().unwrap_or_default().to_string(),
-        Err(_) => text,
+        Ok(v) => (
+            v["error"]["code"].as_str().unwrap_or_default().to_string(),
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        Err(_) => (text, String::new()),
     }
+}
+
+/// `positions` written to `<tmp>/positions.json`; returns the path.
+fn write_positions(tmp: &TempDir, positions: &str) -> String {
+    let path = tmp.path().join("positions.json");
+    std::fs::write(&path, positions).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// Quotes for the made-up FAKEETF ticker used by the small inline portfolios.
+const FAKE_QUOTES: &str = r#"{"latest":{"FAKEETF":{"price":150.0,"currency":"EUR","asOf":"2026-10-27T12:00:00Z"}},"previous_close":{"FAKEETF":149.0}}"#;
+
+fn fake_quotes() -> AnyProvider {
+    AnyProvider::Fixture(Box::new(FixtureProvider::from_json(FAKE_QUOTES).unwrap()))
+}
+
+/// The server over an inline positions file and FAKEETF quotes.
+async fn connect_positions(tmp: &TempDir, positions: &str) -> Client {
+    connect(McpOptions {
+        file: Some(write_positions(tmp, positions)),
+        quotes: Some(fake_quotes()),
+        ..opts()
+    })
+    .await
 }
 
 async fn read(client: &Client, uri: &str) -> Result<(String, String), rmcp::ServiceError> {
@@ -3993,5 +4029,47 @@ async fn external_unknown_flows_are_flagged_once() {
         approx_reason(&v, "external_unknown_flows").is_empty(),
         "{v}"
     );
+    client.cancel().await.unwrap();
+}
+
+/// An unparseable positions file is `invalid_data` on every tool that reads
+/// positions, never an empty portfolio. The message names the file but not
+/// its directory, and carries the line and column of the file as written.
+#[tokio::test]
+async fn unparseable_positions_are_invalid_data() {
+    let tmp = TempDir::new().unwrap();
+    let broken = "[\n {\n  \"Name\": \"Fake Watch\",\n  \"AssetClass\": \"Other\"\n }\n]";
+    let client = connect_positions(&tmp, broken).await;
+    for tool in [
+        "get_positions",
+        "get_allocation",
+        "check_policy",
+        "get_transactions",
+        "list_portfolios",
+        "get_performance",
+        "get_context",
+    ] {
+        let args = if tool == "get_performance" {
+            json!({"period": "day"})
+        } else {
+            json!({})
+        };
+        let (code, message) = err_parts(&client, tool, args).await;
+        assert_eq!(code, "invalid_data", "{tool}: {message}");
+        assert_eq!(
+            message,
+            "Error parsing positions in positions.json: missing field `Amount` at line 5 column 2",
+            "{tool}"
+        );
+    }
+    let resource = read(&client, "portfolio://main/context.md").await;
+    assert!(resource.is_err(), "{resource:?}");
+    client.cancel().await.unwrap();
+
+    // An empty list is a valid, empty portfolio.
+    let client = connect_positions(&tmp, "[]").await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["positions"], json!([]), "{v}");
+    assert_eq!(v["dataStatus"], "complete", "{v}");
     client.cancel().await.unwrap();
 }

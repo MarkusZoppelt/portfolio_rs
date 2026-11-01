@@ -172,11 +172,32 @@ impl PortfolioServer {
         }
     }
 
-    async fn portfolio(&self, refresh: bool) -> Portfolio {
+    /// The valued portfolio, or `invalid_data` when the positions file does
+    /// not parse (it must not look like an empty portfolio).
+    async fn portfolio(&self, refresh: bool) -> Result<Portfolio, ToolError> {
+        self.check_data().await?;
         if refresh {
             self.served.state.refresh_prices().await;
         }
-        self.served.state.portfolio().await
+        Ok(self.served.state.portfolio().await)
+    }
+
+    /// `invalid_data` when the positions file does not parse. The message
+    /// names the file without its directory: paths are only shown on request
+    /// (`list_portfolios` `includePaths`).
+    async fn check_data(&self) -> Result<(), ToolError> {
+        match self.data_error().await {
+            Some(message) => Err(ToolError::new("invalid_data", message)),
+            None => Ok(()),
+        }
+    }
+
+    async fn data_error(&self) -> Option<String> {
+        let mut e = self.served.state.positions_error().await?;
+        if let Some(name) = std::path::Path::new(&e.file).file_name() {
+            e.file = name.to_string_lossy().into_owned();
+        }
+        Some(e.to_string())
     }
 
     fn policy_options(&self) -> analytics::PolicyOptions {
@@ -224,7 +245,7 @@ impl PortfolioServer {
         Parameters(input): Parameters<GetPositionsInput>,
     ) -> Result<Json<PositionsOutput>, ToolError> {
         self.check_id(&input.portfolio_id)?;
-        let portfolio = self.portfolio(input.refresh.unwrap_or(false)).await;
+        let portfolio = self.portfolio(input.refresh.unwrap_or(false)).await?;
         self.check_class(&portfolio, &input.asset_class).await?;
         let base = self.base_currency().await;
         let pnl = analytics::portfolio_pnl(&portfolio);
@@ -264,7 +285,7 @@ impl PortfolioServer {
         Parameters(input): Parameters<GetAllocationInput>,
     ) -> Result<Json<AllocationOutput>, ToolError> {
         self.check_id(&input.portfolio_id)?;
-        let portfolio = self.portfolio(false).await;
+        let portfolio = self.portfolio(false).await?;
         let policy = self.served.state.policy().await;
         let opts = self.policy_options();
         let alloc = analytics::allocation_with(
@@ -309,7 +330,7 @@ impl PortfolioServer {
     ) -> Result<Json<PolicyCheckOutput>, ToolError> {
         self.check_id(&input.portfolio_id)?;
         let min = input.min_severity.unwrap_or(Severity::Info);
-        let portfolio = self.portfolio(false).await;
+        let portfolio = self.portfolio(false).await?;
         let policy = self.served.state.policy().await;
         let opts = self.policy_options();
         let (findings, checks) = match &policy {
@@ -432,7 +453,7 @@ impl PortfolioServer {
                     ToolError::invalid("cursor is not a value returned as nextCursor")
                 })?,
         };
-        let portfolio = self.portfolio(false).await;
+        let portfolio = self.portfolio(false).await?;
         let base = self.base_currency().await;
         self.check_class(&portfolio, &input.asset_class).await?;
         let file_date = std::fs::metadata(&self.served.path)
@@ -559,7 +580,7 @@ impl PortfolioServer {
         let s = &self.served;
         let has_policy = s.state.policy().await.is_some();
         let data_status = self
-            .meta(&self.portfolio(false).await, Vec::new())
+            .meta(&self.portfolio(false).await?, Vec::new())
             .await
             .data_status;
         Ok(Json(PortfoliosOutput {
@@ -626,7 +647,7 @@ impl PortfolioServer {
             from.format("%Y-%m-%d").to_string(),
             to.format("%Y-%m-%d").to_string(),
         );
-        let portfolio = self.portfolio(false).await;
+        let portfolio = self.portfolio(false).await?;
         let base = self.base_currency().await;
         let mut warnings = analytics::data_quality(&portfolio);
         let mut meta = self.meta(&portfolio, Vec::new()).await;
@@ -1143,6 +1164,7 @@ impl PortfolioServer {
         Parameters(input): Parameters<GetContextInput>,
     ) -> Result<Json<ContextOutput>, ToolError> {
         self.check_id(&input.portfolio_id)?;
+        self.check_data().await?;
         let format = input.format.unwrap_or_default();
         let context = self
             .context()
@@ -1159,7 +1181,7 @@ impl PortfolioServer {
                 (None, Some(json))
             }
         };
-        let portfolio = self.portfolio(false).await;
+        let portfolio = self.portfolio(false).await?;
         Ok(Json(ContextOutput {
             meta: self
                 .meta(&portfolio, analytics::data_quality(&portfolio))
@@ -1381,6 +1403,9 @@ impl ServerHandler for PortfolioServer {
         }
         match what {
             "context.md" => {
+                if let Some(message) = self.data_error().await {
+                    return Err(McpError::internal_error(message, None));
+                }
                 let ctx = self.context().await.map_err(|_| {
                     McpError::internal_error("could not build the portfolio context", None)
                 })?;

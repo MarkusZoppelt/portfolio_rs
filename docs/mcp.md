@@ -281,8 +281,13 @@ governed by the cash-buffer and asset-class rules instead.
 
 Errors come back as tool results with `isError: true` and
 `{"error": {"code", "message"}}`, codes `unknown_portfolio`,
-`invalid_argument` (also an `assetClass` that no position or policy uses) and
-`not_found` (an unknown `positionId`). Error and finding messages never contain amounts.
+`invalid_argument` (also an `assetClass` that no position or policy uses),
+`invalid_data` (the positions file does not parse; every tool that reads
+positions returns it instead of an empty portfolio, and `context.md` fails to
+read) and `not_found` (an unknown `positionId`). Error and finding messages
+never contain amounts: an `invalid_data` message names the file without its
+directory, the reason (such as ``missing field `Amount` ``) and the line and
+column as written, never the offending value.
 
 ## Resources
 

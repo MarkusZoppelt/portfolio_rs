@@ -19,6 +19,7 @@ use crate::money::{dec, to_f64, Decimal};
 use crate::services::atomic_write::write_atomic_with_backup;
 use crate::services::quotes::AnyProvider;
 use crate::{
+    check_positions,
     context::PortfolioContext,
     create_live_portfolio_with,
     decision::generate_decision_draft,
@@ -33,7 +34,7 @@ use crate::{
     review::Review,
     simulate::{simulate_rebalance, RebalanceSimulation},
     validate::{validate_portfolio_file, ValidationReport},
-    AppConfig, NetworkStatus, Portfolio, PortfolioPosition, Purchase,
+    AppConfig, NetworkStatus, Portfolio, PortfolioPosition, PositionsParseError, Purchase,
 };
 /// How long a fetched portfolio (with live quotes) stays fresh before the
 /// next [`AppState::portfolio`] call re-fetches quotes.
@@ -208,12 +209,27 @@ impl AppState {
     /// Re-fetch live prices for the currently loaded positions, bypassing
     /// the portfolio cache.
     pub async fn refresh_prices(&self) {
+        // Unparseable JSON values as an empty portfolio. Keep the text as
+        // written instead of replacing it with "[]", which a save would write.
+        if self.positions_error().await.is_some() {
+            return;
+        }
         let portfolio = self.fetch_portfolio().await;
         // Cache the enriched JSON (with names filled in from Yahoo) for saving.
         if let Ok(enriched) = positions_to_string(&portfolio.positions) {
             let mut positions_json = self.positions_json.write().await;
             *positions_json = enriched;
         }
+    }
+
+    /// Why the loaded positions JSON does not parse, or `None` when it does.
+    /// The error names the loaded file (or "the positions data" when none is).
+    pub async fn positions_error(&self) -> Option<PositionsParseError> {
+        let file = self
+            .file_path()
+            .await
+            .unwrap_or_else(|| "the positions data".to_string());
+        check_positions(&file, &self.positions_json.read().await).err()
     }
 
     /// Build a live portfolio from the current JSON.
@@ -1007,6 +1023,11 @@ impl PositionKey {
 /// Give positions without an `Id` one, so `pos_` lookups work before the
 /// first save. Unparsable JSON is returned unchanged (the loader reports it).
 fn with_position_ids(json: String) -> String {
+    // Leave text that does not parse as positions exactly as written, so a
+    // parse error's line and column still point into the user's file.
+    if check_positions("", &json).is_err() {
+        return json;
+    }
     let Ok(mut values) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else {
         return json;
     };
@@ -1094,6 +1115,12 @@ mod tests {
         assert_eq!(v[0]["Id"], "pos_keep");
         assert!(v[1]["Id"].as_str().unwrap().starts_with("pos_"));
         assert_eq!(with_position_ids("not json".to_string()), "not json");
+        // Valid JSON that is not a positions list stays byte for byte.
+        let missing_amount = "[\n {\"AssetClass\": \"Cash\"}\n]";
+        assert_eq!(
+            with_position_ids(missing_amount.to_string()),
+            missing_amount
+        );
     }
 
     #[test]

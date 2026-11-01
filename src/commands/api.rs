@@ -2,13 +2,12 @@ use clap::ArgMatches;
 use eyre::Result;
 
 use crate::api::{run_server, ServerConfig};
-use crate::commands::{defaulted_arg, resolve_portfolio_file};
-use crate::services::portfolio_loader::load_portfolio_file;
+use crate::commands::{defaulted_arg, load_positions_checked, resolve_portfolio_file};
 use crate::AppConfig;
 
 pub async fn handle_api(sub_matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
     let filename = resolve_portfolio_file(sub_matches, cfg);
-    let positions_json = load_portfolio_file(&filename)?;
+    let positions_json = load_positions_checked(&filename)?;
     run_server(ServerConfig {
         host: defaulted_arg(sub_matches, "host").to_string(),
         port: *sub_matches

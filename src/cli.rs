@@ -17,6 +17,7 @@ use crate::{
         workspace::handle_init_workspace,
     },
     config_path, load_config,
+    services::portfolio_loader::PositionsParseError,
     tui::{Component, Tab},
 };
 use clap::{arg, Arg, ArgAction, ArgMatches, Command};
@@ -637,38 +638,51 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    match matches.subcommand() {
-        Some(("balances", sub_matches)) => handle_balances(sub_matches, &cfg).await?,
-        Some(("allocation", sub_matches)) => handle_allocation(sub_matches, &cfg).await?,
-        Some(("performance", sub_matches)) => handle_performance(sub_matches, &cfg).await?,
-        Some(("context", sub_matches)) => handle_context(sub_matches, &cfg).await?,
-        Some(("sort", sub_matches)) => handle_sort(sub_matches, &cfg).await?,
-        Some(("review", sub_matches)) => handle_review(sub_matches, &cfg).await?,
-        Some(("simulate", sub_matches)) => handle_simulate(sub_matches, &cfg).await?,
-        Some(("policy", sub_matches)) => handle_policy(sub_matches)?,
-        Some(("init-workspace", sub_matches)) => handle_init_workspace(sub_matches)?,
-        Some(("agent", sub_matches)) => handle_agent(sub_matches)?,
-        Some(("decision", sub_matches)) => handle_decision(sub_matches, &cfg).await?,
-        Some(("report", sub_matches)) => handle_report(sub_matches, &cfg).await?,
-        Some(("doctor", sub_matches)) => handle_doctor(sub_matches)?,
-        Some(("validate", sub_matches)) => handle_validate(sub_matches, &cfg).await?,
-        Some(("mcp", sub_matches)) => handle_mcp(sub_matches, &cfg).await?,
-        Some(("snapshot", sub_matches)) => handle_snapshot(sub_matches, &cfg).await?,
-        Some(("api", sub_matches)) => handle_api(sub_matches, &cfg).await?,
+    let result = match matches.subcommand() {
+        Some(("balances", sub_matches)) => handle_balances(sub_matches, &cfg).await,
+        Some(("allocation", sub_matches)) => handle_allocation(sub_matches, &cfg).await,
+        Some(("performance", sub_matches)) => handle_performance(sub_matches, &cfg).await,
+        Some(("context", sub_matches)) => handle_context(sub_matches, &cfg).await,
+        Some(("sort", sub_matches)) => handle_sort(sub_matches, &cfg).await,
+        Some(("review", sub_matches)) => handle_review(sub_matches, &cfg).await,
+        Some(("simulate", sub_matches)) => handle_simulate(sub_matches, &cfg).await,
+        Some(("policy", sub_matches)) => handle_policy(sub_matches),
+        Some(("init-workspace", sub_matches)) => handle_init_workspace(sub_matches),
+        Some(("agent", sub_matches)) => handle_agent(sub_matches),
+        Some(("decision", sub_matches)) => handle_decision(sub_matches, &cfg).await,
+        Some(("report", sub_matches)) => handle_report(sub_matches, &cfg).await,
+        Some(("doctor", sub_matches)) => handle_doctor(sub_matches),
+        Some(("validate", sub_matches)) => handle_validate(sub_matches, &cfg).await,
+        Some(("mcp", sub_matches)) => handle_mcp(sub_matches, &cfg).await,
+        Some(("snapshot", sub_matches)) => handle_snapshot(sub_matches, &cfg).await,
+        Some(("api", sub_matches)) => handle_api(sub_matches, &cfg).await,
         _ => {
             // Default: launch the interactive TUI. On failure, show the error
             // followed by usage help, and exit non-zero.
             if let Err(e) = handle_tui(&matches, &cfg, disabled_components).await {
+                exit_on_parse_error(&e);
                 eprintln!("{e:#}\n");
                 build_cli()
                     .print_help()
                     .wrap_err("failed to print help message")?;
                 std::process::exit(1);
             }
+            Ok(())
         }
-    }
+    };
 
-    Ok(())
+    if let Err(e) = &result {
+        exit_on_parse_error(e);
+    }
+    result
+}
+
+/// A positions file that does not parse exits with code 2, like `validate`.
+fn exit_on_parse_error(e: &eyre::Report) {
+    if let Some(parse) = e.downcast_ref::<PositionsParseError>() {
+        eprintln!("{parse}");
+        std::process::exit(2);
+    }
 }
 
 /// `CLASS=FACTOR` (or `CLASS=never`) for `--gain-factor`.
