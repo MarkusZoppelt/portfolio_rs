@@ -356,16 +356,35 @@ pub fn data_quality(portfolio: &Portfolio) -> Vec<Finding> {
                     );
                 }
             }
-            "manual" => out.push(
-                Finding::new(
-                    "missing_ticker",
-                    Severity::Info,
-                    Category::DataQuality,
-                    format!("{} has no ticker and is valued manually.", p.get_name()),
-                )
-                .position(id)
-                .class(p.get_asset_class()),
-            ),
+            "manual" => {
+                out.push(
+                    Finding::new(
+                        "missing_ticker",
+                        Severity::Info,
+                        Category::DataQuality,
+                        format!("{} has no ticker and is valued manually.", p.get_name()),
+                    )
+                    .position(id)
+                    .class(p.get_asset_class()),
+                );
+                // Same rule as the CLI balances warning: a manual holding
+                // counts towards invested/PnL only with priced purchases.
+                if !p.has_complete_cost_basis() && p.get_amount() > 0.0 {
+                    out.push(
+                        Finding::new(
+                            "missing_cost_basis",
+                            Severity::Info,
+                            Category::DataQuality,
+                            format!(
+                                "{} has no complete cost basis; it is left out of invested and PnL.",
+                                p.get_name()
+                            ),
+                        )
+                        .position(id)
+                        .class(p.get_asset_class()),
+                    );
+                }
+            }
             _ => {}
         }
     }
