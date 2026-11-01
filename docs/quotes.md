@@ -11,6 +11,12 @@ the network.
 
     PORTFOLIO_RS_QUOTES=fixture:tests/fixtures/quotes_example.json portfolio_rs context example_data.json
 
+From Yahoo, the latest price is the newest daily bar with a positive close.
+On thinly traded venues the day's trade often appears only in the chart's
+`regularMarketPrice` while today's bar is still empty; that price is used when
+its `regularMarketTime` is newer than the bar. The previous close (for the day
+change) is the newest close dated before today in the exchange's time zone.
+
 The MCP server and HTTP API also keep a last-known-price cache next to the
 positions file; see [MCP server](mcp.md#last-known-price-cache).
 

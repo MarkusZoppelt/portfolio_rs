@@ -713,19 +713,37 @@ async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
         .await
     {
         Ok(resp) => {
-            let quotes = resp.quotes()?;
-            let prev_close = if quotes.len() >= 2 {
-                quotes[quotes.len() - 2].close
-            } else if let Some(last) = quotes.last() {
-                last.close
-            } else {
-                return Err(yahoo::YahooError::NoResult);
-            };
+            let prev_close =
+                previous_close_at(&resp, Utc::now()).ok_or(yahoo::YahooError::NoResult)?;
             remember(&PREV_CLOSE_CACHE, ticker.to_string(), prev_close);
             Ok(prev_close)
         }
         Err(e) => recall(&PREV_CLOSE_CACHE, ticker, e),
     }
+}
+
+/// Calendar date of a bar timestamp in the exchange's time zone.
+fn exchange_date(response: &yahoo::YResponse, timestamp: i64) -> Option<NaiveDate> {
+    let offset = response.metadata().map_or(0, |m| i64::from(m.gmtoffset));
+    Some(DateTime::from_timestamp(timestamp + offset, 0)?.date_naive())
+}
+
+/// Previous close from a multi-day daily chart, as seen at `now`: the newest
+/// bar with a positive close dated before today (exchange time).
+///
+/// `quotes()` drops all-null bars, so taking the second-to-last bar skipped a
+/// day whenever today's bar was still empty. Dating the bars avoids that and
+/// also works before today's bar exists. Meta `chartPreviousClose` is not
+/// used: it is the close before the chart range start, not before today.
+/// `None` when no bar precedes today.
+fn previous_close_at(response: &yahoo::YResponse, now: DateTime<Utc>) -> Option<f64> {
+    let today = exchange_date(response, now.timestamp())?;
+    let quotes = response.quotes().ok()?;
+    quotes
+        .iter()
+        .rev()
+        .find(|q| positive_finite(q.close) && exchange_date(response, q.timestamp) < Some(today))
+        .map(|q| q.close)
 }
 
 pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
@@ -848,14 +866,13 @@ pub(crate) async fn yahoo_daily_bars(
     let resp = get_historic_price(symbol, from, to)
         .await
         .map_err(|e| QuoteError::Provider(e.to_string()))?;
-    let offset = resp.metadata().map_or(0, |m| m.gmtoffset as i64);
     let quotes = resp
         .quotes()
         .map_err(|_| QuoteError::Unavailable(symbol.to_string()))?;
     Ok(quotes
         .iter()
         .filter_map(|q| {
-            let date = DateTime::from_timestamp(q.timestamp + offset, 0)?.date_naive();
+            let date = exchange_date(&resp, q.timestamp)?;
             Some(DailyBar {
                 date,
                 close: q.close,
@@ -1541,6 +1558,47 @@ mod tests {
         let response = chart(&thin_venue_days(), &[None, None, None], None, None);
         assert_eq!(latest_price(&response), None);
         assert!(quote_from_response("FAKE.SG", &response).is_err());
+    }
+
+    /// Mon 2026-10-20 .. Mon 2026-10-26 at 07:00 UTC; today's close is `today`.
+    fn five_days(today: Option<f64>) -> yahoo::YResponse {
+        let days = [20, 21, 22, 23, 26].map(|d| utc_unix(2026, 10, d, 7));
+        let closes = [Some(100.0), Some(102.0), Some(102.0), Some(100.0), today];
+        chart(&days, &closes, Some((97.0, meta_time())), None)
+    }
+
+    #[test]
+    fn test_previous_close_skips_null_newest_bar() {
+        // 17:55 UTC is 18:55 at the UTC+1 exchange: still the 26th.
+        let now = DateTime::from_timestamp(meta_time(), 0).unwrap();
+        let prev = previous_close_at(&five_days(None), now).unwrap();
+        // Friday's close, not Thursday's (the old second-to-last bar).
+        assert_eq!(prev, 100.0);
+
+        let mut position =
+            PortfolioPosition::for_test(Some("FAKE.SG"), "Stocks", 10.0, 97.0, PriceStatus::Live);
+        position.previous_close = Some(dec(prev));
+        assert!((position.daily_variation_percent().unwrap() + 3.0).abs() < 1e-9);
+        assert_eq!(position.day_pnl_dec(), Some(dec(-30.0)));
+    }
+
+    #[test]
+    fn test_previous_close_ignores_todays_bar() {
+        let now = DateTime::from_timestamp(meta_time(), 0).unwrap();
+        assert_eq!(previous_close_at(&five_days(Some(98.0)), now), Some(100.0));
+
+        // Before today's bar exists the newest bar is already the previous close.
+        let tuesday = DateTime::from_timestamp(utc_unix(2026, 10, 27, 6), 0).unwrap();
+        assert_eq!(
+            previous_close_at(&five_days(Some(98.0)), tuesday),
+            Some(98.0)
+        );
+
+        // Nothing before today: no previous close.
+        let day = utc_unix(2026, 10, 22, 7);
+        let only_today = chart(&[day], &[Some(1.0)], None, None);
+        let now = DateTime::from_timestamp(day, 0).unwrap();
+        assert_eq!(previous_close_at(&only_today, now), None);
     }
 
     /// A meta quote is an ordinary live quote: fresh today, stale once it is
