@@ -112,7 +112,7 @@ impl Portfolio {
         self.positions
             .iter()
             .filter(|p| !p.is_cash() && p.has_market_price() && p.total_invested_dec().is_none())
-            .filter(|p| p.quantity_dec() > Decimal::ZERO)
+            .filter(|p| p.get_amount() > 0.0)
             .collect()
     }
 
@@ -267,7 +267,7 @@ impl Portfolio {
         let mut table = styled_table(
             TABLE_WIDTH,
             &[
-                "Name", "Class", "Amount", "Avg Cost", "Invested", "Price", "Value", "PnL",
+                "Name", "Class", "Quantity", "Avg Cost", "Invested", "Price", "Value", "PnL",
                 "%Hist", "%Day",
             ],
         );
@@ -290,6 +290,9 @@ impl Portfolio {
                 "-".to_string()
             } else if position.price_status() == PriceStatus::FxUnavailable && price > 0.0 {
                 format!("{price:.2} {}", price_ccy.unwrap_or_default())
+            } else if position.get_ticker().is_none() {
+                // A manual holding is valued by hand; it has no price.
+                "-".to_string()
             } else if !position.has_market_price() {
                 "n/a".to_string()
             } else if let Some(ccy) = price_ccy {
@@ -307,7 +310,7 @@ impl Portfolio {
             table.add_row(vec![
                 Cell::new(position.get_name()),
                 Cell::new(asset_class).fg(asset_class_color(asset_class)),
-                right(format!("{:.4}", position.get_amount())),
+                right(format!("{:.4}", to_f64(position.quantity_dec()))),
                 right(money_or_dash(unless_cash(position.average_cost()))),
                 right(money_or_dash(unless_cash(position.total_invested()))),
                 right(price_str),

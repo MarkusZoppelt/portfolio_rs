@@ -218,6 +218,15 @@ fn by_ticker<'a>(positions: &'a Value, ticker: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no {ticker}"))
 }
 
+fn by_name<'a>(positions: &'a Value, name: &str) -> &'a Value {
+    positions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == name)
+        .unwrap_or_else(|| panic!("no {name}"))
+}
+
 fn codes(findings: &Value) -> Vec<String> {
     findings
         .as_array()
@@ -4071,5 +4080,31 @@ async fn unparseable_positions_are_invalid_data() {
     let v = ok(&client, "get_positions", json!({})).await;
     assert_eq!(v["positions"], json!([]), "{v}");
     assert_eq!(v["dataStatus"], "complete", "{v}");
+    client.cancel().await.unwrap();
+}
+
+/// A manual holding without purchases reports quantity 1 (one item valued at
+/// `Amount`); a ticker without purchases holds `Amount` units.
+#[tokio::test]
+async fn manual_holding_without_purchases_has_quantity_one() {
+    let tmp = TempDir::new().unwrap();
+    let client = connect_positions(
+        &tmp,
+        r#"[{"Name": "Fake ETF", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 4},
+            {"Name": "Fake Watch", "AssetClass": "Other", "Amount": 250}]"#,
+    )
+    .await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    let watch = by_name(&v["positions"], "Fake Watch");
+    assert_eq!(watch["quantity"], 1.0, "{watch}");
+    assert_eq!(watch["valueBase"], 250.0, "{watch}");
+    let etf = by_ticker(&v["positions"], "FAKEETF");
+    assert_eq!(etf["quantity"], 4.0, "{etf}");
+    assert_eq!(etf["valueBase"], 600.0, "{etf}");
+    assert_eq!(v["totalValue"], 850.0, "{v}");
+
+    let ctx = ok(&client, "get_context", json!({"format": "json"})).await;
+    let row = by_name(&ctx["context"]["positions"], "Fake Watch");
+    assert_eq!(row["quantity"], 1.0, "{row}");
     client.cancel().await.unwrap();
 }

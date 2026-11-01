@@ -975,3 +975,34 @@ fn test_snapshot_keeps_existing_line_on_unparseable_positions() {
         assert_eq!(entries, 1, "no temp file left behind");
     }
 }
+
+/// A manual holding without purchases is one item valued at `Amount`: the
+/// balances table shows quantity 1, no price and `Amount` as its value.
+#[test]
+fn test_balances_manual_holding_is_one_item_without_price() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    std::fs::write(
+        &file,
+        r#"[{"Name": "Fake Watch", "AssetClass": "Collectibles", "Amount": 250}]"#,
+    )
+    .unwrap();
+    let out = bin()
+        .current_dir(tmp.path())
+        .arg("balances")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("Quantity"), "{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.contains("Fake Watch"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    // Name, Class, Quantity, Avg Cost, Invested, Price, Value, ...
+    let cells: Vec<&str> = row.split('┆').map(|c| c.trim_matches(['│', ' '])).collect();
+    assert_eq!(cells[2], "1.0000", "{row}");
+    assert_eq!(cells[5], "-", "{row}");
+    assert_eq!(cells[6], "250.00", "{row}");
+}

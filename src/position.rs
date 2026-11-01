@@ -407,16 +407,30 @@ impl PortfolioPosition {
         }
     }
 
+    /// The data-format amount: the sum of purchase quantities, or `Amount`
+    /// without purchases (units for a ticker, the balance for cash, the value
+    /// for a manual holding). See [`Self::quantity_dec`] for the quantity.
     pub fn get_amount(&self) -> f64 {
-        to_f64(self.quantity_dec())
+        to_f64(self.amount_dec())
     }
 
-    /// Held quantity: sum of purchase quantities, or `Amount` without purchases.
-    pub fn quantity_dec(&self) -> Decimal {
+    fn amount_dec(&self) -> Decimal {
         if self.purchases.is_empty() {
             self.amount
         } else {
             self.purchases.iter().map(|p| p.quantity).sum()
+        }
+    }
+
+    /// Held quantity: the sum of purchase quantities, or `Amount` without
+    /// purchases. A manual holding (no ticker, not cash) without purchases
+    /// is one item valued at `Amount`, so its quantity is 1. Valuation never
+    /// uses this for manual holdings: their value is always `Amount`.
+    pub fn quantity_dec(&self) -> Decimal {
+        if self.purchases.is_empty() && self.ticker.is_none() && !self.is_cash() {
+            Decimal::ONE
+        } else {
+            self.amount_dec()
         }
     }
 
@@ -1425,6 +1439,26 @@ mod tests {
         // A sell without a price does not make the basis unknown.
         position.purchases[2].price = None;
         assert_eq!(position.total_invested(), Some(45.0));
+    }
+
+    #[test]
+    fn test_manual_holding_without_purchases_is_one_item() {
+        let manual = PortfolioPosition::for_test(None, "Other", 250.0, 0.0, PriceStatus::Live);
+        assert_eq!(manual.quantity_dec(), Decimal::ONE);
+        assert_eq!(manual.get_amount(), 250.0);
+        assert_eq!(manual.get_balance(), 250.0);
+
+        // Units for a ticker, the balance for cash.
+        let etf = PortfolioPosition::for_test(Some("FAKE"), "Stocks", 4.0, 10.0, PriceStatus::Live);
+        assert_eq!(etf.quantity_dec(), dec(4.0));
+        let cash = PortfolioPosition::for_test(None, "Cash", 500.0, 0.0, PriceStatus::Live);
+        assert_eq!(cash.quantity_dec(), dec(500.0));
+
+        // With purchases a manual holding has the purchased quantity.
+        let mut bought = manual.clone();
+        bought.purchases = vec![buy(2.0, Some(100.0))];
+        assert_eq!(bought.quantity_dec(), dec(2.0));
+        assert_eq!(bought.get_balance(), 250.0);
     }
 
     fn utc_unix(year: i32, month: u32, day: u32, hour: u32) -> i64 {

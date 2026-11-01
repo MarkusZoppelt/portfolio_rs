@@ -154,7 +154,8 @@ The MCP server only reads snapshots. Write them with:
 Each run values the portfolio and stores one line per day (a second run that
 day replaces it) in `<data-dir>/<portfolio>/snapshots.jsonl`, written
 atomically with mode 0600 (the directory, and any parents the snapshot
-creates, get 0700); cash `quantity` is the balance (`Amount`). `totalBase`
+creates, get 0700); cash `quantity` is the balance (`Amount`), and a manual
+holding without purchases has `quantity` 1. `totalBase`
 and `cashBase` are the sum of the rounded position `valueBase` figures (the
 same cents as `get_positions`). The data dir is
 `--data-dir`, else `PORTFOLIO_RS_DATA_DIR`, else `<workspace>/portfolio/history`

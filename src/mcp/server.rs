@@ -828,7 +828,7 @@ impl PortfolioServer {
             if p.get_ticker().is_some() || p.is_cash() {
                 continue;
             }
-            let quantity = p.get_amount();
+            let quantity = crate::money::to_f64(p.quantity_dec());
             if quantity > 0.0 {
                 tx.price = Some((p.get_balance() / quantity * 1e6).round() / 1e6);
                 tx.price_source = "manual_unit_value".to_string();
