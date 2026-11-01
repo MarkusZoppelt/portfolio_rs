@@ -142,7 +142,11 @@ Figures are null, never 0, when they are unknown: no usable start snapshot
 (`insufficient_history`, `dataStatus: insufficient_history`, `complete`
 false; `endValue` still holds a known end value), or a missing price or FX
 rate in the start or end valuation (`performance_partial`, `dataStatus:
-partial`). A stale start, end or live price makes `dataStatus: stale`.
+partial`). A stale start, end or live price makes `dataStatus: stale`. A
+stored start or end snapshot that was stale adds a `start_point_stale` or
+`end_point_stale` warning (`detail`: `{point, date, positions}`) and its stale
+positions to `stalePositions`; for a line written before snapshots recorded
+them, `positions` is empty.
 `insufficient_history` is a `get_performance`-only `dataStatus`; other tools
 still report only `complete`, `partial` or `stale`. `endValue` is the sum of
 the rounded per-position values, so it matches `get_positions` `totalValue`
@@ -172,10 +176,11 @@ snapshots then turn incomplete. An incomplete snapshot never replaces a
 complete one for the same day; `snapshot` warns and keeps the complete
 line. Each line is
 `{date, baseCurrency, positions: [{positionId, kind, assetClass, quantity,
-price, priceCurrency, fxRate, valueBase, ledgerBase}], cashBase, totalBase, netFlowsBase,
-complete, dataStatus}`. The workspace `.gitignore` template covers
-`/portfolio/history/`, `snapshots.jsonl` and `.snapshots.jsonl.tmp-*`, and
-`doctor` warns when they are missing or tracked by git.
+price, priceCurrency, fxRate, valueBase, ledgerBase, stale}], cashBase, totalBase,
+netFlowsBase, complete, dataStatus}`, where `stale` says whether that
+position's price or FX rate was stale (absent on older lines). The workspace
+`.gitignore` template covers `/portfolio/history/`, `snapshots.jsonl` and
+`.snapshots.jsonl.tmp-*`, and `doctor` warns when they are missing or tracked by git.
 
 ## Client configuration
 

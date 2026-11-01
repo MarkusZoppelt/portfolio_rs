@@ -103,6 +103,54 @@ fn push_approximate(warnings: &mut Vec<Finding>, finding: Finding) {
     warnings.push(finding);
 }
 
+/// `start_point_stale` / `end_point_stale` for a stored snapshot whose
+/// dataStatus is stale, naming its stale positions and adding them to
+/// `stale_positions`. A line written before snapshots recorded per-position
+/// staleness still gets the warning, with an empty list.
+fn note_stale_point(
+    warnings: &mut Vec<Finding>,
+    stale_positions: &mut Vec<String>,
+    point: &str,
+    snap: &snapshots::Snapshot,
+) {
+    if snap.data_status != "stale" {
+        return;
+    }
+    let recorded = snap.positions.iter().any(|p| p.stale.is_some());
+    let ids: Vec<String> = snap
+        .positions
+        .iter()
+        .filter(|p| p.stale == Some(true))
+        .map(|p| p.position_id.clone())
+        .collect();
+    for id in &ids {
+        if !stale_positions.contains(id) {
+            stale_positions.push(id.clone());
+        }
+    }
+    let message = if recorded {
+        format!(
+            "The {point} snapshot ({}) used stale prices for {}.",
+            snap.date,
+            ids.join(", ")
+        )
+    } else {
+        format!(
+            "The {point} snapshot ({}) used stale prices; it predates recording which positions were stale.",
+            snap.date
+        )
+    };
+    warnings.push(
+        Finding::new(
+            &format!("{point}_point_stale"),
+            Severity::Warning,
+            Category::DataQuality,
+            message,
+        )
+        .detail(json!({ "point": point, "date": snap.date, "positions": ids })),
+    );
+}
+
 impl PortfolioServer {
     pub fn new(served: ServedPortfolio) -> Self {
         Self {
@@ -809,6 +857,12 @@ impl PortfolioServer {
         meta.complete = meta.complete && complete;
         meta.has_stale = has_stale;
         meta.data_status = analytics::data_status(meta.complete, has_stale).to_string();
+        // A live end is covered by stale_prices; stored points say which
+        // positions made them stale.
+        note_stale_point(&mut warnings, &mut meta.stale_positions, "start", &start);
+        if !end_is_live {
+            note_stale_point(&mut warnings, &mut meta.stale_positions, "end", &end);
+        }
         let mut txs = analytics::transactions(&portfolio, &base, None);
         // Local copy only: a manual add-on with no price is valued at
         // Amount/Quantity so position_effects can estimate it. get_transactions

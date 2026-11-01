@@ -4228,3 +4228,74 @@ async fn get_performance_period_defaults_to_day() {
     assert!(schema.to_string().contains("since_inception"), "{schema}");
     client.cancel().await.unwrap();
 }
+
+/// Re-date today's seeded snapshot to yesterday with `dataStatus: stale`.
+/// With `mark`, one market position carries `stale: true`; without it the
+/// marker is stripped, as on a line written before it existed.
+async fn stale_start_snapshot(dir: &Path, mark: bool) -> String {
+    let (path, mut snap) = seed_today(dir).await;
+    snap["date"] = json!(day(-1));
+    snap["dataStatus"] = json!("stale");
+    let positions = snap["positions"].as_array_mut().unwrap();
+    let id = positions.iter().find(|p| p["kind"] == "market").unwrap()["positionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for p in positions {
+        let p = p.as_object_mut().unwrap();
+        if !mark {
+            p.remove("stale");
+        } else if p["positionId"] == id.as_str() {
+            p.insert("stale".into(), json!(true));
+        }
+    }
+    std::fs::write(&path, format!("{snap}\n")).unwrap();
+    id
+}
+
+async fn day_performance_from(dir: &Path) -> Value {
+    let client = connect(McpOptions {
+        data_dir: Some(dir.to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "day"})).await;
+    client.cancel().await.unwrap();
+    v
+}
+
+/// A stale start snapshot names its stale positions instead of only
+/// flipping dataStatus.
+#[tokio::test]
+async fn get_performance_names_the_stale_start_point() {
+    let tmp = TempDir::new().unwrap();
+    let id = stale_start_snapshot(tmp.path(), true).await;
+    let v = day_performance_from(tmp.path()).await;
+    assert_eq!(v["dataStatus"], "stale", "{v}");
+    assert_eq!(v["complete"], true, "{v}");
+    assert_eq!(v["stalePositions"], json!([id]), "{v}");
+    assert_eq!(v["dataQuality"]["affectedPositions"], json!([]), "{v}");
+    let w = has_code(&v, "start_point_stale").expect("start_point_stale");
+    assert_eq!(w["severity"], "warning", "{w}");
+    assert_eq!(
+        w["detail"],
+        json!({"point": "start", "date": day(-1), "positions": [id]})
+    );
+    assert!(w["message"].as_str().unwrap().contains(&id), "{w}");
+    // Today's live end is fresh: no end warning.
+    assert!(has_code(&v, "end_point_stale").is_none(), "{v}");
+}
+
+/// A stale start line from before the per-position marker still gets the
+/// warning, with no positions.
+#[tokio::test]
+async fn get_performance_legacy_stale_start_has_no_positions() {
+    let tmp = TempDir::new().unwrap();
+    stale_start_snapshot(tmp.path(), false).await;
+    let v = day_performance_from(tmp.path()).await;
+    assert_eq!(v["dataStatus"], "stale", "{v}");
+    assert_eq!(v["stalePositions"], json!([]), "{v}");
+    let w = has_code(&v, "start_point_stale").expect("start_point_stale");
+    assert_eq!(w["detail"]["positions"], json!([]), "{w}");
+    assert!(w["message"].as_str().unwrap().contains("predates"), "{w}");
+}

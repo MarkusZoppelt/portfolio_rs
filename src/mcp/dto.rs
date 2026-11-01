@@ -279,6 +279,18 @@ pub const FINDING_CODES: &[(&str, &str, &str, &str)] = &[
         "No usable snapshot for the period (none recent enough before the start, or none inside the window); dataStatus is insufficient_history and complete is false. Run `portfolio_rs snapshot` daily (cron or a systemd timer).",
     ),
     (
+        "start_point_stale",
+        "data_quality",
+        "warning",
+        "The start snapshot used stale prices; detail.positions names them (empty for a snapshot that did not record which). They are added to stalePositions.",
+    ),
+    (
+        "end_point_stale",
+        "data_quality",
+        "warning",
+        "A past end snapshot used stale prices; detail.positions names them (empty for a snapshot that did not record which). They are added to stalePositions.",
+    ),
+    (
         "start_point_gap",
         "data_quality",
         "info",
