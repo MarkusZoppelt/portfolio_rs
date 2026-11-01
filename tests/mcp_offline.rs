@@ -4108,3 +4108,62 @@ async fn manual_holding_without_purchases_has_quantity_one() {
     assert_eq!(row["quantity"], 1.0, "{row}");
     client.cancel().await.unwrap();
 }
+
+/// Invested and unrealized PnL include manual holdings with purchases, so the
+/// rows add up to the totals and the totals match CLI `balances`.
+#[tokio::test]
+async fn manual_cost_basis_matches_cli_balances() {
+    let tmp = TempDir::new().unwrap();
+    let positions = r#"[
+        {"Name": "Fake ETF", "AssetClass": "Stocks", "Ticker": "FAKEETF", "Amount": 10,
+         "Purchases": [{"Date": "2025/01/15", "Quantity": 10, "Price": 100.0}]},
+        {"Name": "Fake Watch", "AssetClass": "Other", "Amount": 98,
+         "Purchases": [{"Date": "2025/01/15", "Quantity": 1, "Price": 100.0}]},
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 50}
+    ]"#;
+    let client = connect_positions(&tmp, positions).await;
+    let v = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(v["invested"], 1100.0, "{v}");
+    assert_eq!(v["unrealizedPnl"], 498.0, "{v}");
+    assert_eq!(v["unrealizedPnlPercent"], 45.27, "{v}");
+    assert_eq!(v["pnlPartial"], false, "{v}");
+    let watch = by_name(&v["positions"], "Fake Watch");
+    assert_eq!(watch["invested"], 100.0, "{watch}");
+    assert_eq!(watch["valueBase"], 98.0, "{watch}");
+    assert_eq!(watch["unrealizedPnl"], -2.0, "{watch}");
+    assert_eq!(by_name(&v["positions"], "Cash")["invested"], Value::Null);
+    let sum = |key: &str| -> f64 {
+        v["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p[key].as_f64())
+            .sum()
+    };
+    assert!((sum("invested") - 1100.0).abs() < 1e-9, "{v}");
+    assert!((sum("unrealizedPnl") - 498.0).abs() < 1e-9, "{v}");
+    client.cancel().await.unwrap();
+
+    let quotes = tmp.path().join("quotes.json");
+    std::fs::write(&quotes, FAKE_QUOTES).unwrap();
+    let home = TempDir::new().unwrap();
+    let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("portfolio_rs"))
+        .arg("balances")
+        .arg(tmp.path().join("positions.json"))
+        .current_dir(tmp.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env(
+            "PORTFOLIO_RS_QUOTES",
+            format!("fixture:{}", quotes.display()),
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let total = stdout.lines().find(|l| l.contains("TOTAL")).unwrap();
+    for figure in ["1100.00", "498.00", "45.27"] {
+        assert!(total.contains(figure), "{figure} in {total}");
+    }
+}

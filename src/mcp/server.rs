@@ -237,7 +237,7 @@ impl PortfolioServer {
 impl PortfolioServer {
     #[tool(
         name = "get_positions",
-        description = "Holdings with quantity, price, base-currency value, weight, cost basis and PnL. Money is rounded to 2 decimals; null means unknown (e.g. no live quote).",
+        description = "Holdings with quantity, price, base-currency value, weight, cost basis and PnL. Invested and PnL cover market and manual positions (a manual holding is valued at its Amount against its purchases), as in the CLI balances totals; cash has none. Money is rounded to 2 decimals; null means unknown (e.g. no live quote).",
         annotations(title = "Get positions", read_only_hint = true, open_world_hint = true)
     )]
     async fn get_positions(
