@@ -68,8 +68,10 @@ pattern is in the workspace `.gitignore` template and checked by `doctor`.
 `get_performance` reports a period's change split into `netContributions`,
 `marketEffect` (price and FX on market positions), `incomeEffect` and
 `manualRevaluation`; `change` always equals their sum (within 0.01).
-Periods: `day`, `week` (last 7 days), `month` (last 30 days), `mtd`, `ytd`,
-`1y`, `since_inception` and `custom` (with `from` and `to`, YYYY-MM-DD).
+Periods: `day` (the default, also for `period: null`), `week` (last 7 days),
+`month` (last 30 days), `mtd`, `ytd`, `1y`, `since_inception` and `custom`
+(with `from` and `to`, YYYY-MM-DD). Any other value is `invalid_argument`
+with the allowed values in the message.
 `groupBy` is `none`, `assetClass` or `position` (position rows carry `name` and
 `ticker`). Breakdown rows also split `netContributions` into
 `internalTransfers` (between tracked positions: a buy paid from tracked cash is
