@@ -947,7 +947,11 @@ fn older_than(ts: Option<&str>, now: chrono::DateTime<chrono::Utc>, days: i64) -
 /// Set each position's stale flag: a native price whose as-of (or a cached FX
 /// rate whose as-of) is more than `days` old. Unknown as-of is not stale.
 pub fn mark_stale(portfolio: &mut crate::portfolio::Portfolio, days: i64) {
-    let now = chrono::Utc::now();
+    mark_stale_at(portfolio, days, Utc::now());
+}
+
+/// [`mark_stale`] against an explicit clock.
+pub fn mark_stale_at(portfolio: &mut crate::portfolio::Portfolio, days: i64, now: DateTime<Utc>) {
     for p in &mut portfolio.positions {
         p.runtime.stale = p.has_native_price()
             && (older_than(p.price_as_of.as_deref(), now, days)
