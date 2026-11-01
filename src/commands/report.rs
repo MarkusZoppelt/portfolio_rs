@@ -29,6 +29,7 @@ async fn report_weekly(
     dry_run: bool,
     cfg: &AppConfig,
 ) -> Result<()> {
+    crate::commands::check_positions_file(&filename)?;
     let date = today();
     let file_path = weekly_report_path(Path::new(dir), &date);
     let content = generate_markdown_report(&filename, policy_file, &date, &cfg.currency).await;

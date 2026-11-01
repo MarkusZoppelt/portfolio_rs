@@ -21,8 +21,32 @@ use clap::ArgMatches;
 use eyre::{Result, WrapErr};
 
 use crate::policy::Policy;
-use crate::services::portfolio_loader::{create_live_portfolio_with_logging, load_portfolio_file};
+use crate::services::portfolio_loader::{
+    check_positions, create_live_portfolio_with_logging, load_portfolio_file,
+};
 use crate::{AppConfig, NetworkStatus, Portfolio};
+
+/// Load the positions text, failing with a
+/// [`PositionsParseError`](crate::services::portfolio_loader::PositionsParseError)
+/// when it does not parse, so no command shows an empty portfolio for a
+/// broken file. `cli::run` turns that error into exit code 2.
+pub(crate) fn load_positions_checked(filename: &str) -> Result<String> {
+    let text = load_portfolio_file(filename)?;
+    check_positions(filename, &text)?;
+    Ok(text)
+}
+
+/// For drafts that tolerate a missing or unreadable file (report, decision):
+/// only a file that reads but does not parse is an error.
+pub(crate) fn check_positions_file(filename: &str) -> Result<()> {
+    if filename.is_empty() {
+        return Ok(());
+    }
+    match load_portfolio_file(filename) {
+        Ok(text) => Ok(check_positions(filename, &text)?),
+        Err(_) => Ok(()),
+    }
+}
 
 /// Resolve the portfolio file: an explicit `FILE` argument wins, otherwise
 /// fall back to the configured portfolio file (workspace-aware).
@@ -51,7 +75,7 @@ pub(crate) async fn load_live_portfolio(
     cfg: &AppConfig,
 ) -> Result<(Portfolio, NetworkStatus)> {
     let filename = resolve_portfolio_file(matches, cfg);
-    let positions_str = load_portfolio_file(&filename)?;
+    let positions_str = load_positions_checked(&filename)?;
     Ok(create_live_portfolio_with_logging(positions_str, true).await)
 }
 

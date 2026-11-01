@@ -880,3 +880,98 @@ fn test_snapshot_command_writes_data_dir() {
         assert_eq!(mode & 0o777, 0o600);
     }
 }
+
+/// Positions where the second entry lacks `Amount` (line 11 column 2).
+const MISSING_AMOUNT: &str = r#"[
+ {
+  "Name": "Fake ETF",
+  "Ticker": "FAKEETF",
+  "AssetClass": "Stocks",
+  "Amount": 10
+ },
+ {
+  "Name": "Fake Watch",
+  "AssetClass": "Collectibles"
+ }
+]"#;
+
+/// Every command that reads positions refuses an unparseable file with exit
+/// code 2 instead of showing an empty portfolio.
+#[test]
+fn test_unparseable_positions_exit_2() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("bad.json");
+    std::fs::write(&file, MISSING_AMOUNT).unwrap();
+    let file = file.to_str().unwrap();
+    let dir = tmp.path().to_str().unwrap();
+    let expected =
+        format!("Error parsing positions in {file}: missing field `Amount` at line 11 column 2");
+    for args in [
+        vec![file],
+        vec!["balances", file],
+        vec!["allocation", file],
+        vec!["performance", file],
+        vec!["context", file],
+        vec!["sort", file],
+        vec!["review", file],
+        vec!["simulate", file],
+        vec!["api", file, "--port", "0"],
+        vec!["report", "weekly", file, "--dir", dir, "--dry-run"],
+        vec!["decision", "draft", file, "--dir", dir, "--dry-run"],
+    ] {
+        let out = bin()
+            .args(&args)
+            .current_dir(tmp.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains(&expected), "{args:?}: {stderr}");
+        assert!(!stdout.contains("TOTAL"), "{args:?}: {stdout}");
+    }
+}
+
+/// `snapshot` with an unparseable file writes nothing and keeps the
+/// existing snapshot line.
+#[test]
+fn test_snapshot_keeps_existing_line_on_unparseable_positions() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    let snapshot = |file: &std::path::Path| {
+        bin()
+            .env(
+                "PORTFOLIO_RS_QUOTES",
+                format!("fixture:{}", quotes_fixture()),
+            )
+            .args([
+                "snapshot",
+                "--no-cache",
+                "--portfolio",
+                "demo",
+                "--data-dir",
+            ])
+            .arg(&data_dir)
+            .arg(file)
+            .output()
+            .unwrap()
+    };
+    let good = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example_data.json");
+    assert!(snapshot(&good).status.success());
+    let path = data_dir.join("demo/snapshots.jsonl");
+    let before = std::fs::read(&path).unwrap();
+
+    let bad = tmp.path().join("bad.json");
+    for text in [MISSING_AMOUNT, "", "not json", r#"{"Name": "x"}"#] {
+        std::fs::write(&bad, text).unwrap();
+        let out = snapshot(&bad);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{text}: {stderr}");
+        assert!(stderr.contains("Error parsing positions"), "{stderr}");
+        assert!(!stderr.contains("Snapshot written"), "{stderr}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{text}");
+        let entries = std::fs::read_dir(data_dir.join("demo")).unwrap().count();
+        assert_eq!(entries, 1, "no temp file left behind");
+    }
+}

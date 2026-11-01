@@ -257,6 +257,10 @@ pub async fn serve_stdio(opts: McpOptions) -> Result<()> {
 /// server itself never writes snapshots.
 pub async fn record_snapshot(opts: &McpOptions) -> Result<(PathBuf, snapshots::Upsert, bool)> {
     let served = load(opts).await?;
+    // A broken positions file must never replace a good snapshot.
+    if let Some(e) = served.state.positions_error().await {
+        return Err(e.into());
+    }
     let path = served.snapshots_path.clone().ok_or_else(|| {
         eyre::eyre!("no snapshot dir: pass --data-dir or set PORTFOLIO_RS_DATA_DIR")
     })?;

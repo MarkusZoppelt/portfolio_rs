@@ -49,6 +49,61 @@ pub fn load_portfolio_file(filename: &str) -> Result<String> {
     open_encrypted_file(filename)
 }
 
+/// A positions file that does not parse as a list of positions.
+///
+/// Displays as `Error parsing positions in <file>: <reason> at line L column C`.
+/// Line and column refer to the text as written. `reason` never contains the
+/// offending value (it may be an amount): serde's ``invalid type: floating
+/// point `1234.5`, expected a string`` becomes `invalid type, expected a string`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionsParseError {
+    pub file: String,
+    pub reason: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl std::fmt::Display for PositionsParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Error parsing positions in {}: {} at line {} column {}",
+            self.file, self.reason, self.line, self.column
+        )
+    }
+}
+
+impl std::error::Error for PositionsParseError {}
+
+/// Check that `text` parses as a list of positions; `file` names it in the error.
+pub fn check_positions(file: &str, text: &str) -> Result<(), PositionsParseError> {
+    let Err(e) = serde_json::from_str::<Vec<PortfolioPosition>>(text) else {
+        return Ok(());
+    };
+    // serde's Display is "<message> at line L column C"; keep only the message.
+    let full = e.to_string();
+    let message = full
+        .strip_suffix(&format!(" at line {} column {}", e.line(), e.column()))
+        .unwrap_or(&full);
+    // These carry the value from the file; keep the kind and what was expected.
+    let kind = ["invalid type", "invalid value", "unknown variant"]
+        .into_iter()
+        .find(|kind| message.starts_with(kind));
+    let reason = match kind {
+        Some(kind) => match message.rfind(", expected") {
+            Some(at) => format!("{kind}{}", &message[at..]),
+            None => kind.to_string(),
+        },
+        None => message.to_string(),
+    };
+    Err(PositionsParseError {
+        file: file.to_string(),
+        reason,
+        line: e.line(),
+        column: e.column(),
+    })
+}
+
 /// Returns a portfolio with the latest quotes from JSON data.
 ///
 /// Values are converted to the configured base currency (read-only; see
@@ -353,6 +408,33 @@ mod tests {
 
     use super::*;
     use crate::services::quotes::{FixtureProvider, OfflineProvider};
+
+    #[test]
+    fn test_check_positions_names_field_and_position() {
+        let text = "[\n {\n  \"Name\": \"Fake Watch\",\n  \"AssetClass\": \"Other\"\n }\n]";
+        let err = check_positions("positions.json", text).unwrap_err();
+        assert_eq!(err.reason, "missing field `Amount`");
+        assert_eq!((err.line, err.column), (5, 2));
+        assert_eq!(
+            err.to_string(),
+            "Error parsing positions in positions.json: missing field `Amount` at line 5 column 2"
+        );
+        assert!(check_positions("p.json", "[]").is_ok());
+        assert!(check_positions("p.json", "").is_err());
+        assert!(check_positions("p.json", r#"{"Name": "x"}"#).is_err());
+    }
+
+    #[test]
+    fn test_check_positions_never_echoes_the_value() {
+        for text in [
+            r#"[{"Name": "x", "Ticker": 4321.5, "AssetClass": "Stocks", "Amount": 1}]"#,
+            r#"[{"Name": 4321.5, "AssetClass": "Stocks", "Amount": 1}]"#,
+        ] {
+            let err = check_positions("p.json", text).unwrap_err();
+            assert!(!err.to_string().contains("4321"), "{err}");
+            assert!(err.reason.starts_with("invalid type, expected"), "{err}");
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires network access to Yahoo Finance"]

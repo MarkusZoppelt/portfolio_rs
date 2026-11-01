@@ -5,7 +5,7 @@ use crate::cli::{get_arg_value, parse_tab};
 use crate::commands::{defaulted_arg, load_live_portfolio, resolve_portfolio_file};
 use crate::context::{ContextOutputFormat, PortfolioContext};
 use crate::services::persistence::store_balance_in_db;
-use crate::services::portfolio_loader::{create_live_portfolio, load_portfolio_file};
+use crate::services::portfolio_loader::create_live_portfolio;
 use crate::tui;
 use crate::AppConfig;
 
@@ -67,7 +67,7 @@ pub async fn handle_tui(
     let filename = resolve_portfolio_file(matches, cfg);
     let tab_value = parse_tab(get_arg_value(Some(matches), "tab"));
 
-    let positions_str = load_portfolio_file(&filename)?;
+    let positions_str = crate::commands::load_positions_checked(&filename)?;
     let (mut portfolio, _network_status) = create_live_portfolio(positions_str.clone()).await;
     portfolio.sort_positions_by_value_desc();
     tui::run_tui(

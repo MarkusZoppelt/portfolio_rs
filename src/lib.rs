@@ -51,8 +51,8 @@ pub use portfolio::Portfolio;
 pub use position::{from_string, PortfolioPosition, Purchase};
 pub use review::Review;
 pub use services::portfolio_loader::{
-    create_live_portfolio, create_live_portfolio_in, create_live_portfolio_with,
-    load_portfolio_file,
+    check_positions, create_live_portfolio, create_live_portfolio_in, create_live_portfolio_with,
+    load_portfolio_file, PositionsParseError,
 };
 pub use services::quotes::{
     AnyProvider, FixtureProvider, OfflineProvider, Quote, QuoteProvider, YahooProvider,
