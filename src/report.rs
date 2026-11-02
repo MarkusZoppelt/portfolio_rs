@@ -43,24 +43,21 @@ pub async fn generate_markdown_report(
                 }
                 content.push('\n');
 
-                if !review.findings.is_empty() {
-                    content.push_str("## Findings\n\n");
-                    for finding in &review.findings {
-                        content.push_str(&format!(
-                            "- **{}**: {}\n",
-                            finding.category, finding.message
-                        ));
-                    }
-                    content.push('\n');
+                // A review always has at least one finding and one action.
+                content.push_str("## Findings\n\n");
+                for finding in &review.findings {
+                    content.push_str(&format!(
+                        "- **{}**: {}\n",
+                        finding.category, finding.message
+                    ));
                 }
+                content.push('\n');
 
-                if !review.suggested_actions.is_empty() {
-                    content.push_str("## Suggested Actions\n\n");
-                    for action in &review.suggested_actions {
-                        content.push_str(&format!("- {action}\n"));
-                    }
-                    content.push('\n');
+                content.push_str("## Suggested Actions\n\n");
+                for action in &review.suggested_actions {
+                    content.push_str(&format!("- {action}\n"));
                 }
+                content.push('\n');
             }
         }
     }

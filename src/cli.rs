@@ -8,11 +8,11 @@ use crate::{
         policy::handle_policy,
         portfolio::{
             handle_allocation, handle_balances, handle_context, handle_performance, handle_sort,
-            handle_tui,
         },
         report::handle_report,
         review::handle_review,
         simulate::handle_simulate,
+        tui_io::handle_tui,
         validate::handle_validate,
         workspace::handle_init_workspace,
     },
@@ -21,7 +21,7 @@ use crate::{
     tui::{Component, Tab},
 };
 use clap::{arg, Arg, ArgAction, ArgMatches, Command};
-use eyre::{Result, WrapErr};
+use eyre::Result;
 
 /// `[FILE]` positional arg for the portfolio JSON file, reused by nearly
 /// every subcommand (falls back to the config file when omitted).
@@ -656,25 +656,26 @@ pub async fn run() -> Result<()> {
         Some(("mcp", sub_matches)) => handle_mcp(sub_matches, &cfg).await,
         Some(("snapshot", sub_matches)) => handle_snapshot(sub_matches, &cfg).await,
         Some(("api", sub_matches)) => handle_api(sub_matches, &cfg).await,
-        _ => {
-            // Default: launch the interactive TUI. On failure, show the error
-            // followed by usage help, and exit non-zero.
-            if let Err(e) = handle_tui(&matches, &cfg, disabled_components).await {
-                exit_on_parse_error(&e);
-                eprintln!("{e:#}\n");
-                build_cli()
-                    .print_help()
-                    .wrap_err("failed to print help message")?;
-                std::process::exit(1);
-            }
-            Ok(())
-        }
+        // Default: launch the interactive TUI.
+        _ => handle_tui(&matches, &cfg, disabled_components)
+            .await
+            .or_else(|e| -> Result<()> { exit_tui_failure(&e) }),
     };
 
     if let Err(e) = &result {
         exit_on_parse_error(e);
     }
     result
+}
+
+/// The default TUI could not start: show the error followed by usage help
+/// and exit 1 (2 for a positions file that does not parse).
+fn exit_tui_failure(e: &eyre::Report) -> ! {
+    exit_on_parse_error(e);
+    eprintln!("{e:#}\n");
+    // Best effort: the exit code is 1 whether or not the help prints.
+    let _ = build_cli().print_help();
+    std::process::exit(1)
 }
 
 /// A positions file that does not parse exits with code 2, like `validate`.

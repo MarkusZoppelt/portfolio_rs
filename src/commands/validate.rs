@@ -2,7 +2,7 @@ use clap::ArgMatches;
 use eyre::{bail, Result};
 
 use crate::commands::resolve_portfolio_file;
-use crate::validate::{validate_portfolio_file, ValidationSeverity};
+use crate::validate::{validate_portfolio_file, ValidationIssue, ValidationSeverity};
 use crate::AppConfig;
 
 /// Exit codes: 0 = valid, 1 = usage error, 2 = validation failed.
@@ -30,11 +30,7 @@ pub async fn handle_validate(sub_matches: &ArgMatches, cfg: &AppConfig) -> Resul
                 ValidationSeverity::Error => "❌",
                 ValidationSeverity::Warning => "⚠️",
             };
-            if let Some(position) = &issue.position {
-                eprintln!("{} {}: {}", icon, position, issue.message);
-            } else {
-                eprintln!("{} {}", icon, issue.message);
-            }
+            eprintln!("{}", issue_line(icon, issue));
         }
         std::process::exit(2);
     }
@@ -45,15 +41,20 @@ pub async fn handle_validate(sub_matches: &ArgMatches, cfg: &AppConfig) -> Resul
             report.warning_count
         );
         for issue in &report.issues {
-            if let Some(position) = &issue.position {
-                eprintln!("⚠️  {}: {}", position, issue.message);
-            } else {
-                eprintln!("⚠️  {}", issue.message);
-            }
+            eprintln!("{}", issue_line("⚠️ ", issue));
         }
     } else {
         println!("✅ Portfolio file is valid: {filename}");
         println!("   Positions: {}", report.position_count);
     }
     Ok(())
+}
+
+/// `<icon> <position>: <message>`, or `<icon> <message>` for an issue that
+/// is not about one position.
+fn issue_line(icon: &str, issue: &ValidationIssue) -> String {
+    match &issue.position {
+        Some(position) => format!("{icon} {position}: {}", issue.message),
+        None => format!("{icon} {}", issue.message),
+    }
 }

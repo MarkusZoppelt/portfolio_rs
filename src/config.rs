@@ -99,17 +99,33 @@ impl Default for AppConfig {
 /// Unlike [`AppConfig::load`], this never creates, migrates, or writes the
 /// config file. Returns `"EUR"` when no config file exists or it cannot be read.
 pub fn configured_base_currency() -> String {
-    const DEFAULT: &str = "EUR";
-    let Ok(path) = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME) else {
-        return DEFAULT.to_string();
-    };
+    config_file_path()
+        .ok()
+        .and_then(|path| base_currency_at(&path))
+        .unwrap_or_else(|| "EUR".to_string())
+}
+
+/// The non-empty currency of the config file at `path`, if it exists and
+/// parses. Never creates the file.
+fn base_currency_at(path: &Path) -> Option<String> {
     if !path.is_file() {
-        return DEFAULT.to_string();
+        return None;
     }
-    match confy::load_path::<AppConfig>(&path) {
-        Ok(cfg) if !cfg.currency.trim().is_empty() => cfg.currency,
-        _ => DEFAULT.to_string(),
-    }
+    let cfg = confy::load_path::<AppConfig>(path).ok()?;
+    Some(cfg.currency).filter(|c| !c.trim().is_empty())
+}
+
+/// Where confy keeps the config file (under the user config dir).
+fn config_file_path() -> Result<PathBuf> {
+    confy::get_configuration_file_path(APP_NAME, CONFIG_NAME)
+        .wrap_err("failed to get configuration file path")
+}
+
+/// `path` as a string; errors on invalid UTF-8.
+fn path_to_utf8(path: &Path) -> Result<String> {
+    path.to_str()
+        .map(String::from)
+        .ok_or_else(|| eyre!("configuration path contains invalid UTF-8"))
 }
 
 impl AppConfig {
@@ -119,9 +135,7 @@ impl AppConfig {
     /// be parsed (as the current or the legacy format) is an error and is left
     /// untouched, so settings such as `llm_api_key` are never wiped.
     pub fn load() -> Result<Self> {
-        let path = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME)
-            .wrap_err("failed to get configuration file path")?;
-        Self::load_from(&path)
+        Self::load_from(&config_file_path()?)
     }
 
     /// [`AppConfig::load`] for an explicit path.
@@ -183,9 +197,7 @@ impl AppConfig {
 
     /// Persist the config to disk.
     pub fn save(&self) -> Result<()> {
-        let path = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME)
-            .wrap_err("failed to get configuration file path")?;
-        self.save_to(&path)
+        self.save_to(&config_file_path()?)
     }
 
     /// [`AppConfig::save`] for an explicit path.
@@ -226,11 +238,7 @@ impl AppConfig {
 
     /// Return the path to the configuration file.
     pub fn path() -> Result<String> {
-        let path = confy::get_configuration_file_path(APP_NAME, CONFIG_NAME)
-            .wrap_err("failed to get configuration file path")?;
-        path.to_str()
-            .map(String::from)
-            .ok_or_else(|| eyre!("configuration path contains invalid UTF-8"))
+        path_to_utf8(&config_file_path()?)
     }
 
     /// Resolve the effective portfolio file path.

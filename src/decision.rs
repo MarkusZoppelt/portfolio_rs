@@ -27,13 +27,12 @@ pub async fn generate_decision_draft(
                     review.portfolio_value, review.currency
                 ));
 
-                if !review.findings.is_empty() {
-                    content.push_str("Key findings from review:\n\n");
-                    for finding in &review.findings {
-                        content.push_str(&format!("- {}: {}\n", finding.category, finding.message));
-                    }
-                    content.push('\n');
+                // A review always has at least one finding.
+                content.push_str("Key findings from review:\n\n");
+                for finding in &review.findings {
+                    content.push_str(&format!("- {}: {}\n", finding.category, finding.message));
                 }
+                content.push('\n');
             }
         }
     }

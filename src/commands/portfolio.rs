@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::ArgMatches;
 use eyre::Result;
 
@@ -5,9 +7,10 @@ use crate::cli::{get_arg_value, parse_tab};
 use crate::commands::{defaulted_arg, load_live_portfolio, resolve_portfolio_file};
 use crate::context::{ContextOutputFormat, PortfolioContext};
 use crate::services::persistence::store_balance_in_db;
-use crate::services::portfolio_loader::create_live_portfolio;
-use crate::tui;
-use crate::AppConfig;
+use crate::services::portfolio_loader::create_live_portfolio_with;
+use crate::services::quotes::QuoteProvider;
+use crate::tui::Tab;
+use crate::{AppConfig, Portfolio};
 
 pub async fn handle_balances(sub_matches: &ArgMatches, cfg: &AppConfig) -> Result<()> {
     let (mut portfolio, _network_status) = load_live_portfolio(sub_matches, cfg).await?;
@@ -58,25 +61,38 @@ pub async fn handle_sort(sub_matches: &ArgMatches, cfg: &AppConfig) -> Result<()
     Ok(())
 }
 
-/// Launch the interactive TUI (default when no subcommand is given).
-pub async fn handle_tui(
+/// Everything the interactive TUI starts with.
+#[derive(Debug)]
+pub struct TuiLaunch {
+    pub portfolio: Portfolio,
+    pub currency: String,
+    pub positions_str: String,
+    pub filename: String,
+    pub tab: Option<Tab>,
+}
+
+/// Resolve, load and value the portfolio for the TUI (default when no
+/// subcommand is given), with quotes and FX from `provider` in
+/// `base_currency`. Launching the terminal itself lives in
+/// [`crate::commands::tui_io`].
+pub async fn prepare_tui<P: QuoteProvider>(
     matches: &ArgMatches,
     cfg: &AppConfig,
-    disabled_components: Vec<String>,
-) -> Result<()> {
+    provider: Arc<P>,
+    base_currency: &str,
+) -> Result<TuiLaunch> {
     let filename = resolve_portfolio_file(matches, cfg);
-    let tab_value = parse_tab(get_arg_value(Some(matches), "tab"));
+    let tab = parse_tab(get_arg_value(Some(matches), "tab"));
 
     let positions_str = crate::commands::load_positions_checked(&filename)?;
-    let (mut portfolio, _network_status) = create_live_portfolio(positions_str.clone()).await;
+    let (mut portfolio, _network_status) =
+        create_live_portfolio_with(provider, positions_str.clone(), base_currency, false).await;
     portfolio.sort_positions_by_value_desc();
-    tui::run_tui(
+    Ok(TuiLaunch {
         portfolio,
-        cfg.currency.clone(),
+        currency: cfg.currency.clone(),
         positions_str,
         filename,
-        tab_value,
-        disabled_components,
-    )
-    .await
+        tab,
+    })
 }

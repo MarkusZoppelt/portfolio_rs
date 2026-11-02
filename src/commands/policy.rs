@@ -48,7 +48,8 @@ pub fn policy_init(strategy: &str, dir: &str, dry_run: bool) -> Result<()> {
     let policy =
         policy_from_strategy(strategy).ok_or_else(|| eyre!("unknown strategy: {strategy}"))?;
 
-    let policy_path = Path::new(dir).join("portfolio/policy.toml");
+    let policy_dir = Path::new(dir).join("portfolio");
+    let policy_path = policy_dir.join("policy.toml");
 
     if policy_path.exists() {
         bail!(
@@ -63,10 +64,8 @@ pub fn policy_init(strategy: &str, dir: &str, dry_run: bool) -> Result<()> {
         println!("Dry-run: would create policy at {}", policy_path.display());
         println!("\n{toml_content}");
     } else {
-        if let Some(parent) = policy_path.parent() {
-            fs::create_dir_all(parent)
-                .wrap_err_with(|| format!("failed to create directory: {}", parent.display()))?;
-        }
+        fs::create_dir_all(&policy_dir)
+            .wrap_err_with(|| format!("failed to create directory: {}", policy_dir.display()))?;
         write_new_private(&policy_path, toml_content.as_bytes())
             .wrap_err_with(|| format!("failed to write policy file: {}", policy_path.display()))?;
         println!("Created policy at {}", policy_path.display());
