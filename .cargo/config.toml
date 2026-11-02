@@ -1,0 +1,13 @@
+[alias]
+# The coverage gate. CI runs exactly this; agents run it before finishing.
+#
+# Every line under src/ must be executed by `cargo test`, except files named
+# `*_io.rs`. Those hold the thin imperative shell that cannot run offline
+# (live network calls, the real terminal). Keep them small and free of logic:
+# anything that can be tested belongs in a covered file.
+coverage = [
+  "llvm-cov",
+  "--ignore-filename-regex", "_io\\.rs$",
+  "--fail-under-lines", "100",
+  "--show-missing-lines",
+]
