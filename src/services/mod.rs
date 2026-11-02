@@ -3,3 +3,4 @@ pub mod persistence;
 pub mod portfolio_loader;
 pub mod quote_cache;
 pub mod quotes;
+mod yahoo_io;

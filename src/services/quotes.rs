@@ -136,40 +136,52 @@ pub trait QuoteProvider: Send + Sync + 'static {
 }
 
 /// Yahoo Finance, using the process-wide caches in [`crate::position`].
+///
+/// Its [`QuoteProvider`] impl is network glue in `yahoo_io.rs`; the historic
+/// lookups it delegates to ([`bars_close_on_or_after`], [`bars_close_before`])
+/// live here.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct YahooProvider;
 
-impl QuoteProvider for YahooProvider {
-    async fn latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
-        crate::position::yahoo_latest(symbol).await
-    }
+/// Daily bars of a symbol in `[from, to]`, dated in the exchange's time zone:
+/// the one fetch the historic lookups need.
+pub(crate) trait DailyBarSource: Sync {
+    fn daily_bars(
+        &self,
+        symbol: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> impl Future<Output = Result<Vec<DailyBar>, QuoteError>> + Send;
+}
 
-    async fn previous_close(&self, symbol: &str) -> Result<f64, QuoteError> {
-        crate::position::yahoo_previous_close(symbol).await
-    }
+/// Purchase price on `date`: the first close in the week from `date`.
+pub(crate) async fn bars_close_on_or_after(
+    source: &impl DailyBarSource,
+    symbol: &str,
+    date: DateTime<Utc>,
+) -> Result<f64, QuoteError> {
+    let bars = source
+        .daily_bars(symbol, date, date + chrono::Duration::days(7))
+        .await?;
+    first_close_on_or_after(&bars, date.date_naive())
+        .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
+}
 
-    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
-        let bars =
-            crate::position::yahoo_daily_bars(symbol, date, date + chrono::Duration::days(7))
-                .await?;
-        first_close_on_or_after(&bars, date.date_naive())
-            .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
-    }
-
-    async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
-        let bars = crate::position::yahoo_daily_bars(
+/// Period start value: the last close in the ten days before `date`.
+pub(crate) async fn bars_close_before(
+    source: &impl DailyBarSource,
+    symbol: &str,
+    date: DateTime<Utc>,
+) -> Result<f64, QuoteError> {
+    let bars = source
+        .daily_bars(
             symbol,
             date - chrono::Duration::days(10),
             date + chrono::Duration::days(1),
         )
         .await?;
-        last_close_before(&bars, date.date_naive())
-            .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
-    }
-
-    async fn name(&self, symbol: &str) -> Option<String> {
-        crate::position::yahoo_name(symbol).await
-    }
+    last_close_before(&bars, date.date_naive())
+        .ok_or_else(|| QuoteError::Unavailable(symbol.to_string()))
 }
 
 /// Fixed prices from memory or JSON, for tests and fixtures.
@@ -331,28 +343,22 @@ impl AnyProvider {
 impl QuoteProvider for AnyProvider {
     async fn latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
         match self {
-            Self::Yahoo => YahooProvider.latest(symbol).await,
-            Self::Offline => OfflineProvider.latest(symbol).await,
-            Self::Fixture(f) => f.latest(symbol).await,
             Self::Cached(c) => c.latest(symbol).await,
+            _ => self.base(&YahooProvider).latest(symbol).await,
         }
     }
 
     async fn previous_close(&self, symbol: &str) -> Result<f64, QuoteError> {
         match self {
-            Self::Yahoo => YahooProvider.previous_close(symbol).await,
-            Self::Offline => OfflineProvider.previous_close(symbol).await,
-            Self::Fixture(f) => f.previous_close(symbol).await,
             Self::Cached(c) => c.previous_close(symbol).await,
+            _ => self.base(&YahooProvider).previous_close(symbol).await,
         }
     }
 
     async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
         match self {
-            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
-            Self::Offline => OfflineProvider.close_on(symbol, date).await,
-            Self::Fixture(f) => f.close_on(symbol, date).await,
             Self::Cached(c) => c.close_on(symbol, date).await,
+            _ => self.base(&YahooProvider).close_on(symbol, date).await,
         }
     }
 
@@ -363,28 +369,22 @@ impl QuoteProvider for AnyProvider {
     ) -> Result<f64, QuoteError> {
         // Dispatch, so a fixture's date-aware override is not skipped.
         match self {
-            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
-            Self::Offline => OfflineProvider.close_on(symbol, date).await,
-            Self::Fixture(f) => f.close_on(symbol, date).await,
             Self::Cached(c) => c.close_on(symbol, date).await,
+            _ => self.base(&YahooProvider).close_on(symbol, date).await,
         }
     }
 
     async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
         match self {
-            Self::Yahoo => YahooProvider.close_before(symbol, date).await,
-            Self::Offline => OfflineProvider.close_before(symbol, date).await,
-            Self::Fixture(f) => f.close_before(symbol, date).await,
             Self::Cached(c) => c.close_before(symbol, date).await,
+            _ => self.base(&YahooProvider).close_before(symbol, date).await,
         }
     }
 
     async fn name(&self, symbol: &str) -> Option<String> {
         match self {
-            Self::Yahoo => YahooProvider.name(symbol).await,
-            Self::Offline => OfflineProvider.name(symbol).await,
-            Self::Fixture(f) => f.name(symbol).await,
             Self::Cached(c) => c.name(symbol).await,
+            _ => self.base(&YahooProvider).name(symbol).await,
         }
     }
 
@@ -409,24 +409,76 @@ impl QuoteProvider for AnyProvider {
     }
 }
 
+/// A non-cached provider: what an [`AnyProvider`] resolves to below the
+/// quote cache. `Y` is the Yahoo backend ([`YahooProvider`] outside tests).
+#[derive(Debug)]
+enum Base<'a, Y> {
+    Yahoo(&'a Y),
+    Offline,
+    Fixture(&'a FixtureProvider),
+}
+
+impl<Y: QuoteProvider> Base<'_, Y> {
+    async fn latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
+        match self {
+            Self::Yahoo(y) => y.latest(symbol).await,
+            Self::Offline => OfflineProvider.latest(symbol).await,
+            Self::Fixture(f) => f.latest(symbol).await,
+        }
+    }
+
+    async fn previous_close(&self, symbol: &str) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo(y) => y.previous_close(symbol).await,
+            Self::Offline => OfflineProvider.previous_close(symbol).await,
+            Self::Fixture(f) => f.previous_close(symbol).await,
+        }
+    }
+
+    async fn close_on(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo(y) => y.close_on(symbol, date).await,
+            Self::Offline => OfflineProvider.close_on(symbol, date).await,
+            Self::Fixture(f) => f.close_on(symbol, date).await,
+        }
+    }
+
+    async fn close_before(&self, symbol: &str, date: DateTime<Utc>) -> Result<f64, QuoteError> {
+        match self {
+            Self::Yahoo(y) => y.close_before(symbol, date).await,
+            Self::Offline => OfflineProvider.close_before(symbol, date).await,
+            Self::Fixture(f) => f.close_before(symbol, date).await,
+        }
+    }
+
+    async fn name(&self, symbol: &str) -> Option<String> {
+        match self {
+            Self::Yahoo(y) => y.name(symbol).await,
+            Self::Offline => OfflineProvider.name(symbol).await,
+            Self::Fixture(f) => f.name(symbol).await,
+        }
+    }
+}
+
 /// The non-cached providers [`CachedProvider`](crate::services::quote_cache::CachedProvider)
 /// wraps (a cached provider inside a cache is treated as offline). Kept
 /// separate from [`AnyProvider`]'s impl so the future types are not recursive.
 impl AnyProvider {
-    pub(crate) async fn base_latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
+    /// Resolve to a non-cached provider, with `yahoo` as the Yahoo backend.
+    fn base<'a, Y>(&'a self, yahoo: &'a Y) -> Base<'a, Y> {
         match self {
-            Self::Yahoo => YahooProvider.latest(symbol).await,
-            Self::Fixture(f) => f.latest(symbol).await,
-            Self::Offline | Self::Cached(_) => OfflineProvider.latest(symbol).await,
+            Self::Yahoo => Base::Yahoo(yahoo),
+            Self::Fixture(f) => Base::Fixture(f),
+            Self::Offline | Self::Cached(_) => Base::Offline,
         }
     }
 
+    pub(crate) async fn base_latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
+        self.base(&YahooProvider).latest(symbol).await
+    }
+
     pub(crate) async fn base_previous_close(&self, symbol: &str) -> Result<f64, QuoteError> {
-        match self {
-            Self::Yahoo => YahooProvider.previous_close(symbol).await,
-            Self::Fixture(f) => f.previous_close(symbol).await,
-            Self::Offline | Self::Cached(_) => OfflineProvider.previous_close(symbol).await,
-        }
+        self.base(&YahooProvider).previous_close(symbol).await
     }
 
     pub(crate) async fn base_close_on(
@@ -434,11 +486,7 @@ impl AnyProvider {
         symbol: &str,
         date: DateTime<Utc>,
     ) -> Result<f64, QuoteError> {
-        match self {
-            Self::Yahoo => YahooProvider.close_on(symbol, date).await,
-            Self::Fixture(f) => f.close_on(symbol, date).await,
-            Self::Offline | Self::Cached(_) => OfflineProvider.close_on(symbol, date).await,
-        }
+        self.base(&YahooProvider).close_on(symbol, date).await
     }
 
     pub(crate) async fn base_close_before(
@@ -446,19 +494,11 @@ impl AnyProvider {
         symbol: &str,
         date: DateTime<Utc>,
     ) -> Result<f64, QuoteError> {
-        match self {
-            Self::Yahoo => YahooProvider.close_before(symbol, date).await,
-            Self::Fixture(f) => f.close_before(symbol, date).await,
-            Self::Offline | Self::Cached(_) => OfflineProvider.close_before(symbol, date).await,
-        }
+        self.base(&YahooProvider).close_before(symbol, date).await
     }
 
     pub(crate) async fn base_name(&self, symbol: &str) -> Option<String> {
-        match self {
-            Self::Yahoo => YahooProvider.name(symbol).await,
-            Self::Fixture(f) => f.name(symbol).await,
-            Self::Offline | Self::Cached(_) => None,
-        }
+        self.base(&YahooProvider).name(symbol).await
     }
 }
 

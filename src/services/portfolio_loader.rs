@@ -18,8 +18,13 @@ use crate::tui::NetworkStatus;
 ///
 /// Decrypted content is only ever held in memory; it is never written to disk.
 pub fn open_encrypted_file(filename: &str) -> Result<String> {
+    open_with_gpg(filename, std::ffi::OsStr::new("gpg"))
+}
+
+/// [`open_encrypted_file`] decrypting with the `gpg` program at `gpg`.
+fn open_with_gpg(filename: &str, gpg: &std::ffi::OsStr) -> Result<String> {
     if filename.ends_with(".gpg") {
-        let output = std::process::Command::new("gpg")
+        let output = std::process::Command::new(gpg)
             .arg("-d")
             .arg(filename)
             .output()
@@ -90,10 +95,10 @@ pub fn check_positions(file: &str, text: &str) -> Result<(), PositionsParseError
         .into_iter()
         .find(|kind| message.starts_with(kind));
     let reason = match kind {
-        Some(kind) => match message.rfind(", expected") {
-            Some(at) => format!("{kind}{}", &message[at..]),
-            None => kind.to_string(),
-        },
+        Some(kind) => {
+            let expected = message.rfind(", expected").map_or("", |at| &message[at..]);
+            format!("{kind}{expected}")
+        }
         None => message.to_string(),
     };
     Err(PositionsParseError {
