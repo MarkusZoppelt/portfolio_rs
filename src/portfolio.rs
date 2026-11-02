@@ -191,36 +191,7 @@ impl Portfolio {
             .filter_map(|position| position.get_ticker())
             .map(|ticker| provider.close_before(ticker, date));
         let results = join_all(tasks).await;
-
-        let mut errors = Vec::new();
-        let mut closes = Vec::with_capacity(positions.len());
-        for (position, close) in positions.iter().zip(results) {
-            let label = position.get_ticker().unwrap_or(position.get_name());
-            let close = match close {
-                Ok(close) => Some(close),
-                Err(QuoteError::Unavailable(_)) => None,
-                Err(e) => {
-                    let err_str = format!("{e}");
-                    // Typically: not listed yet at `date`.
-                    if !err_str.contains("Bad Request") {
-                        errors.push(format!(
-                            "Error getting historic price data for {label}: {err_str}"
-                        ));
-                    }
-                    None
-                }
-            };
-            closes.push(close);
-        }
-
-        let (historic, current) = like_for_like_values(positions.into_iter().zip(closes));
-        if historic <= 0.0 && !errors.is_empty() {
-            bail!(
-                "failed to get historic securities value: {}",
-                errors.join("; ")
-            );
-        }
-        Ok((historic, current))
+        historic_and_current_from(positions, results)
     }
 
     pub fn positions_without_price(&self) -> Vec<&PortfolioPosition> {
@@ -554,6 +525,47 @@ impl Portfolio {
     }
 }
 
+/// `(historic, current)` from each priced position's historic close lookup
+/// (`results` in the order of `positions`).
+///
+/// An unavailable close, or a "Bad Request" (typically: not listed yet at the
+/// start date), leaves the position out of both sums. Other lookup errors
+/// fail the whole value only when no position has a historic close.
+fn historic_and_current_from(
+    positions: Vec<&PortfolioPosition>,
+    results: Vec<Result<f64, QuoteError>>,
+) -> Result<(f64, f64)> {
+    let mut errors = Vec::new();
+    let mut closes = Vec::with_capacity(positions.len());
+    for (position, close) in positions.iter().zip(results) {
+        let label = position.get_ticker().unwrap_or(position.get_name());
+        let close = match close {
+            Ok(close) => Some(close),
+            Err(QuoteError::Unavailable(_)) => None,
+            Err(e) => {
+                let err_str = format!("{e}");
+                // Typically: not listed yet at `date`.
+                if !err_str.contains("Bad Request") {
+                    errors.push(format!(
+                        "Error getting historic price data for {label}: {err_str}"
+                    ));
+                }
+                None
+            }
+        };
+        closes.push(close);
+    }
+
+    let (historic, current) = like_for_like_values(positions.into_iter().zip(closes));
+    if historic <= 0.0 && !errors.is_empty() {
+        bail!(
+            "failed to get historic securities value: {}",
+            errors.join("; ")
+        );
+    }
+    Ok((historic, current))
+}
+
 const TABLE_WIDTH: u16 = 120;
 const MOVERS_TABLE_WIDTH: u16 = 64;
 
@@ -844,12 +856,7 @@ mod tests {
         let (invested, pnl) = portfolio.cost_basis_totals();
         assert_eq!(invested, 1_320.0);
         assert_eq!(pnl, -20.0);
-        let pct = if invested > 0.0 {
-            pnl / invested * 100.0
-        } else {
-            0.0
-        };
-        assert!((pct - (-20.0 / 1_320.0 * 100.0)).abs() < 1e-9);
+        assert!((portfolio.hist_percent() - (-20.0 / 1_320.0 * 100.0)).abs() < 1e-9);
 
         // Old basis: total value (incl. cash) minus invested treated cash as profit
         // and would have hidden the securities loss.
@@ -940,21 +947,42 @@ mod tests {
 
     /// Compare with `tests/snapshots/<name>.snap`; `UPDATE_SNAPSHOTS=1` rewrites it.
     fn assert_snapshot(name: &str, actual: &str) {
-        let actual = strip_ansi(actual);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/snapshots")
             .join(format!("{name}.snap"));
-        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+        check_snapshot(
+            &path,
+            actual,
+            std::env::var_os("UPDATE_SNAPSHOTS").is_some(),
+        );
+    }
+
+    /// Compare `actual` (ANSI codes stripped) with `path`, or rewrite it when `update`.
+    fn check_snapshot(path: &std::path::Path, actual: &str, update: bool) {
+        let actual = strip_ansi(actual);
+        let name = path.display();
+        if update {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, &actual).unwrap();
+            std::fs::write(path, &actual).unwrap();
             return;
         }
-        let expected = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("missing snapshot {}: {e}", path.display()));
+        let expected = std::fs::read_to_string(path)
+            .expect("snapshot is readable (UPDATE_SNAPSHOTS=1 creates it)");
         assert_eq!(
             actual, expected,
             "snapshot {name} differs; UPDATE_SNAPSHOTS=1 to accept"
         );
+    }
+
+    #[test]
+    fn check_snapshot_updates_then_compares_without_ansi_codes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("nested/demo.snap");
+        check_snapshot(&path, "\u{1b}[1mbold\u{1b}[0m text\n", true);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "bold text\n");
+        // Same content (plain or styled) matches the stored snapshot.
+        check_snapshot(&path, "bold text\n", false);
+        check_snapshot(&path, "\u{1b}[31mbold\u{1b}[0m text\n", false);
     }
 
     #[test]
@@ -1006,5 +1034,163 @@ mod tests {
             .unwrap();
         assert_eq!(historic, 40.0, "YTD base is Dec 31's close");
         assert_eq!(current, 60.0);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::position::{PortfolioPosition, PriceStatus};
+    use crate::services::quotes::FixtureProvider;
+
+    fn live(ticker: &str, amount: f64, price: f64) -> PortfolioPosition {
+        PortfolioPosition::for_test(Some(ticker), "Stocks", amount, price, PriceStatus::Live)
+    }
+
+    #[test]
+    fn default_is_an_empty_portfolio() {
+        let portfolio = Portfolio::default();
+        assert!(portfolio.positions.is_empty());
+        assert!(!portfolio.quotes_fixture);
+        assert_eq!(portfolio.get_total_value(), 0.0);
+    }
+
+    #[test]
+    fn historic_lookup_errors_fail_only_without_any_close() {
+        let a = live("FAKEA", 10.0, 110.0);
+        let b = live("FAKEB", 1.0, 50.0);
+        let provider_err = |msg: &str| Err(QuoteError::Provider(msg.to_string()));
+
+        let err = historic_and_current_from(
+            vec![&a, &b],
+            vec![provider_err("HTTP 500"), provider_err("Bad Request")],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "failed to get historic securities value: \
+             Error getting historic price data for FAKEA: quote lookup failed: HTTP 500"
+        );
+
+        // With one close the other error is ignored and the position left out.
+        let values =
+            historic_and_current_from(vec![&a, &b], vec![Ok(100.0), provider_err("HTTP 500")]);
+        assert_eq!(values.unwrap(), (1000.0, 1100.0));
+
+        // "Bad Request" and unavailable closes are not errors.
+        let values = historic_and_current_from(
+            vec![&a, &b],
+            vec![
+                provider_err("Bad Request"),
+                Err(QuoteError::Unavailable("FAKEB".to_string())),
+            ],
+        );
+        assert_eq!(values.unwrap(), (0.0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn historic_securities_value_with_fixture_closes() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(live("FAKEA", 10.0, 110.0));
+        portfolio.add_position(live("FAKEB", 2.0, 50.0));
+        let provider = FixtureProvider {
+            close_on: [("FAKEA".to_string(), 100.0)].into_iter().collect(),
+            ..Default::default()
+        };
+        let date = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+        let value = portfolio
+            .get_historic_securities_value_with(&provider, date)
+            .await
+            .unwrap();
+        assert_eq!(value, 1000.0, "FAKEB has no close and is left out");
+    }
+
+    #[test]
+    fn render_shows_quote_currency_of_converted_and_unconvertible_prices() {
+        let mut converted = live("FAKEUS", 2.0, 120.0);
+        converted.fx_rate = Some(dec(0.5));
+        converted.price_currency = Some("USD".to_string());
+        let mut no_fx = PortfolioPosition::for_test(
+            Some("FAKEGB"),
+            "Stocks",
+            1.0,
+            80.0,
+            PriceStatus::FxUnavailable,
+        );
+        no_fx.price_currency = Some("GBP".to_string());
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(converted);
+        portfolio.add_position(no_fx);
+
+        let out = portfolio.render(false);
+        assert!(out.contains("120.00 USD"), "{out}");
+        assert!(out.contains("80.00 GBP"), "{out}");
+        assert!(
+            out.contains(
+                "Warning: 1 position(s) without FX rate to the base currency \
+                 excluded from totals: FAKEGB"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("TOTAL"),
+            "no sum row without include_sum: {out}"
+        );
+    }
+
+    #[test]
+    fn render_shows_no_price_for_manual_holdings() {
+        let mut house =
+            PortfolioPosition::for_test(None, "RealEstate", 250.0, 0.0, PriceStatus::Live);
+        house.name = Some("House".to_string());
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(house);
+        let out = portfolio.render(false);
+        let row = out.lines().find(|l| l.contains("House")).unwrap();
+        let cells: Vec<&str> = row.split('┆').map(str::trim).collect();
+        // Name, Class, Quantity, Avg Cost, Invested, Price, Value, ...
+        assert_eq!(cells[5], "-", "{row}");
+        assert_eq!(cells[6], "250.00", "{row}");
+    }
+
+    #[tokio::test]
+    async fn performance_since_a_non_finite_stored_balance_is_zero() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            100.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        let now = Utc.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap();
+        let provider = FixtureProvider::default();
+        // The "Since" cell of the periods row. comfy-table colours cells only
+        // on a TTY (the Nix build log is one), so check the cell's text, not
+        // the raw line.
+        let since = |out: &str| {
+            let row = out.lines().nth(8).unwrap_or_default();
+            row.rsplit('┆').next().unwrap_or_default().to_string()
+        };
+        let nan = portfolio
+            .render_performance_with(&provider, f64::NAN, now)
+            .await;
+        let half = portfolio
+            .render_performance_with(&provider, 50.0, now)
+            .await;
+        // Periods row: 1D, six period returns (no securities: "-") and Since.
+        let (nan_cell, half_cell) = (since(&nan), since(&half));
+        assert!(
+            nan_cell.contains(" 0.00% ") && !nan_cell.contains("100"),
+            "{nan}"
+        );
+        assert!(half_cell.contains(" 100.00% "), "{half}");
+    }
+
+    #[test]
+    fn period_return_of_non_finite_values_is_none() {
+        assert_eq!(period_return_percent(f64::NAN, 100.0), None);
+        assert_eq!(period_return_percent(100.0, f64::INFINITY), None);
+        assert_eq!(period_return_percent(110.0, 100.0), Some(10.0));
     }
 }
