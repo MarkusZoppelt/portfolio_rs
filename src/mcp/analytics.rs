@@ -735,11 +735,10 @@ pub fn allocation_with(
         let reported = (*value).map(|_| money_f(rounded_sums.get(key).copied().unwrap_or(0.0)));
         classes.push(class_row(
             label,
-            *value,
             reported,
             total,
             target.map(band),
-            range(key),
+            class_basis(*value, range(key)),
         ));
     }
     let mut missing = Vec::new();
@@ -750,11 +749,10 @@ pub fn allocation_with(
                 missing.push(t.asset_class.clone());
                 classes.push(class_row(
                     &t.asset_class,
-                    Some(Decimal::ZERO),
                     Some(0.0),
                     total,
                     Some(band(t)),
-                    range(&key),
+                    class_basis(Some(Decimal::ZERO), range(&key)),
                 ));
             }
         }
@@ -806,19 +804,28 @@ fn range_status(min: f64, max: f64, low: f64, high: f64) -> &'static str {
     }
 }
 
+/// What a class row is judged on: its exact value (`Ok`, complete or
+/// immaterial data) or, with partial data, its possible share range (`Err`).
+type ClassBasis = Result<Decimal, (f64, f64)>;
+
+/// A class value is unknown only with partial data, which always has a range.
+fn class_basis(value: Option<Decimal>, range: Option<(f64, f64)>) -> ClassBasis {
+    range.map_or(Ok(value.unwrap_or_default()), Err)
+}
+
 fn class_row(
     label: &str,
-    value: Option<Decimal>,
     reported: Option<f64>,
     total: Decimal,
     target: Option<(f64, f64)>,
-    range: Option<(f64, f64)>,
+    basis: ClassBasis,
 ) -> ClassAllocation {
     // Percentages and amountToTarget stay on the unrounded sum. `reported`
     // is the sum of the rounded per-position values.
-    let actual = value
-        .filter(|_| range.is_none())
+    let actual = basis
+        .ok()
         .map(|v| percent_of(v, total).unwrap_or(Decimal::ZERO));
+    let range = basis.err();
     let mut row = ClassAllocation {
         asset_class: label.to_string(),
         value: reported,
@@ -842,22 +849,22 @@ fn class_row(
     row.tolerance_percent = Some(tol);
     row.band_low = Some(low);
     row.band_high = Some(high);
-    row.status = "unknown".to_string();
-    if let Some((min, max)) = range {
+    match basis {
         // Partial data: no drift or amount, a band status only when certain.
-        row.status = range_status(min, max, low, high).to_string();
-    } else if let (Some(v), Some(actual)) = (value, actual) {
-        let drift = actual - dec(t);
-        row.status = if drift.abs() <= dec(tol) {
-            "within_band"
-        } else if drift < Decimal::ZERO {
-            "below_band"
-        } else {
-            "above_band"
+        Err((min, max)) => row.status = range_status(min, max, low, high).to_string(),
+        Ok(v) => {
+            let drift = percent_of(v, total).unwrap_or(Decimal::ZERO) - dec(t);
+            row.status = if drift.abs() <= dec(tol) {
+                "within_band"
+            } else if drift < Decimal::ZERO {
+                "below_band"
+            } else {
+                "above_band"
+            }
+            .to_string();
+            row.drift_points = Some(pct(drift));
+            row.amount_to_target = Some(money(total * dec(t) / dec(100.0) - v));
         }
-        .to_string();
-        row.drift_points = Some(pct(drift));
-        row.amount_to_target = Some(money(total * dec(t) / dec(100.0) - v));
     }
     row
 }
@@ -1235,32 +1242,32 @@ pub fn check_policy_with(
                 f.asset_class.clone().unwrap_or_default().to_lowercase(),
             )
         };
-        let mut merged: Vec<Finding> = Vec::new();
+        // (finding, its position ids, whether another one with an id joined it)
+        let mut merged: Vec<(Finding, Vec<String>, bool)> = Vec::new();
         for f in findings.drain(..) {
-            if f.code == "possible_breach" {
-                if let Some(first) = merged
-                    .iter_mut()
-                    .find(|m| m.code == "possible_breach" && key(m) == key(&f))
-                {
-                    if let (Some(d), Some(id)) = (first.detail.as_mut(), f.position_id.clone()) {
-                        let ids = d
-                            .as_object_mut()
-                            .map(|o| o.entry("positionIds").or_insert_with(|| json!([])));
-                        if let Some(serde_json::Value::Array(a)) = ids {
-                            if a.is_empty() {
-                                if let Some(own) = &first.position_id {
-                                    a.push(json!(own));
-                                }
-                            }
-                            a.push(json!(id));
-                        }
-                    }
-                    continue;
+            let first = merged.iter_mut().find(|(m, _, _)| {
+                f.code == "possible_breach" && m.code == "possible_breach" && key(m) == key(&f)
+            });
+            match first {
+                Some((_, ids, joined)) => {
+                    *joined |= f.position_id.is_some();
+                    ids.extend(f.position_id);
+                }
+                None => {
+                    let ids = f.position_id.iter().cloned().collect();
+                    merged.push((f, ids, false));
                 }
             }
-            merged.push(f);
         }
-        findings = merged;
+        findings = merged
+            .into_iter()
+            .map(|(mut f, ids, joined)| {
+                for d in f.detail.iter_mut().filter(|_| joined) {
+                    d["positionIds"] = json!(ids);
+                }
+                f
+            })
+            .collect();
         let unknown: Vec<&str> = alloc
             .classes
             .iter()

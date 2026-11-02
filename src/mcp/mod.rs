@@ -106,12 +106,13 @@ impl ServedPortfolio {
     }
 }
 
-fn quote_provider(offline: bool) -> AnyProvider {
-    let configured = AnyProvider::configured().clone();
+/// The provider for `configured` (`PORTFOLIO_RS_QUOTES`): `--offline` wins
+/// over everything but a fixture.
+fn quote_provider(configured: &AnyProvider, offline: bool) -> AnyProvider {
     match configured {
-        AnyProvider::Fixture(_) => configured,
+        AnyProvider::Fixture(_) => configured.clone(),
         _ if offline => AnyProvider::Offline,
-        other => other,
+        other => other.clone(),
     }
 }
 
@@ -131,7 +132,7 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
     let provider = opts
         .quotes
         .clone()
-        .unwrap_or_else(|| quote_provider(opts.offline));
+        .unwrap_or_else(|| quote_provider(AnyProvider::configured(), opts.offline));
     let network = matches!(provider, AnyProvider::Yahoo);
     let quote_source = provider.source_name();
     let data_file = match (&opts.workspace, &opts.file) {
@@ -200,9 +201,12 @@ pub async fn load(opts: &McpOptions) -> Result<ServedPortfolio> {
     if let Some(err) = &policy_error {
         eprintln!("Warning: policy not loaded: {err}");
     }
+    // `path` loaded as a file, so it has a file name.
     let label = Path::new(&path)
         .file_name()
-        .map_or_else(|| id.clone(), |n| n.to_string_lossy().into_owned());
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     let label = match &workspace_dir {
         Some(d) => d
             .file_name()
@@ -256,7 +260,18 @@ pub async fn serve_stdio(opts: McpOptions) -> Result<()> {
 /// the new snapshot was complete. Used by `portfolio_rs snapshot`; the MCP
 /// server itself never writes snapshots.
 pub async fn record_snapshot(opts: &McpOptions) -> Result<(PathBuf, snapshots::Upsert, bool)> {
-    let served = load(opts).await?;
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    record_snapshot_on(load(opts).await?, &today).await
+}
+
+/// [`record_snapshot`] for an already loaded portfolio and a given date.
+async fn record_snapshot_on(
+    served: ServedPortfolio,
+    today: &str,
+) -> Result<(PathBuf, snapshots::Upsert, bool)> {
     // A broken positions file must never replace a good snapshot.
     if let Some(e) = served.state.positions_error().await {
         return Err(e.into());
@@ -268,11 +283,7 @@ pub async fn record_snapshot(opts: &McpOptions) -> Result<(PathBuf, snapshots::U
     let portfolio = served.state.portfolio().await;
     let base = served.state.currency().await;
     let stale = portfolio.positions.iter().any(|p| p.is_stale());
-    let today = chrono::Local::now()
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
-    let snap = snapshots::from_portfolio(&portfolio, &base, &today, stale);
+    let snap = snapshots::from_portfolio(&portfolio, &base, today, stale);
     let outcome = snapshots::upsert(&path, &snap)?;
     Ok((path, outcome, snap.complete))
 }
