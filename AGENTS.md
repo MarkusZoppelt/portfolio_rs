@@ -14,7 +14,38 @@ cargo build
 cargo test                 # unit tests + tests/{e2e_offline,api_offline}.rs
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check          # rustfmt.toml: max_width = 100
+cargo coverage             # 100% line coverage gate (needs the nix dev shell)
 ```
+
+A change is done only when all five pass. Run them before you call a task finished,
+not just the tests you touched.
+
+## Coverage: 100% lines, enforced
+
+Every line under `src/` runs under `cargo test`. CI fails below 100%. The gate is
+the `coverage` alias in `.cargo/config.toml` (cargo-llvm-cov). The dev shell provides
+cargo-llvm-cov and the matching LLVM tools. Outside it, install `cargo-llvm-cov` and
+the `llvm-tools-preview` rustup component. When it fails, it lists the missing lines
+per file.
+
+- New or changed code ships with tests in the same change. Don't lower the threshold,
+  and don't add exclusions to get green.
+- Tests must assert behavior: outputs, errors, state, exit codes. A test that only
+  executes code to turn lines green is not a test. Cover error paths on purpose.
+- Tests stay offline and deterministic. Use the `fixture:`/`offline` quote providers
+  (`src/services/quotes.rs`), tempdirs, and `example_data.json`. Never use the network,
+  the real config dir, `./database`, or `positions.json`.
+- If code is hard to reach, refactor it so it can be tested. Split pure logic from
+  I/O, inject the provider/clock/writer, delete unreachable branches. Don't write
+  contrived tests.
+- The only exclusion is files named `*_io.rs`. They hold the thin shell that cannot run
+  offline: live Yahoo calls, the real terminal loop. Keep them tiny and logic-free.
+  Moving logic into one to dodge coverage is a review failure. A new `*_io.rs` file
+  needs a reason in its module doc comment.
+- `#[coverage(off)]`, `--ignore-filename-regex` changes, and threshold changes are
+  human decisions. Don't make them on your own.
+
+## Testing notes
 
 - Network tests are all `#[ignore]`: `cargo test --test e2e_network -- --ignored`
   (requires internet / Yahoo Finance). Don't un-ignore them.

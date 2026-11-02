@@ -33,6 +33,21 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # The gate lives in .cargo/config.toml so CI, humans and agents run
+      # the same command: 100% line coverage, `*_io.rs` excluded.
+      - name: Coverage gate
+        run: cargo coverage
+
   nix-build:
     runs-on: ubuntu-latest
     steps:
