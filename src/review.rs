@@ -26,7 +26,8 @@ pub struct Finding {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Ordered by severity: `Info < Warning < Critical`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,
     Warning,
@@ -166,15 +167,8 @@ impl Review {
             });
         }
 
-        // Sort findings by severity
-        findings.sort_by(|a, b| {
-            let severity_order = |s: &Severity| match s {
-                Severity::Critical => 0,
-                Severity::Warning => 1,
-                Severity::Info => 2,
-            };
-            severity_order(&a.severity).cmp(&severity_order(&b.severity))
-        });
+        // Most severe first (stable: same-severity findings keep their order).
+        findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
         if findings.is_empty() {
             findings.push(Finding {
@@ -532,5 +526,219 @@ mod tests {
         assert!(issues.contains(&"No FX rate for USD -> EUR — excluded from totals"));
         assert!(!issues.iter().any(|issue| issue.contains("No market price")));
         assert_eq!(review.portfolio_value, 0.0);
+    }
+
+    fn cash(amount: f64) -> PortfolioPosition {
+        PortfolioPosition::for_test(None, "Cash", amount, 0.0, PriceStatus::Live)
+    }
+
+    /// A policy with only allocation targets and no constraints.
+    fn unconstrained_policy(targets: &[(&str, f64)]) -> Policy {
+        Policy {
+            constraints: Constraints::default(),
+            allocations: targets
+                .iter()
+                .map(|(class, target)| AllocationTarget {
+                    asset_class: class.to_string(),
+                    target_percent: *target,
+                    tolerance_percent: None,
+                })
+                .collect(),
+            ..create_test_policy()
+        }
+    }
+
+    #[test]
+    fn test_severity_orders_info_warning_critical() {
+        assert!(Severity::Info < Severity::Warning);
+        assert!(Severity::Warning < Severity::Critical);
+    }
+
+    #[test]
+    fn test_aligned_portfolio_reports_no_issues() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(cash(5_000.0));
+        let policy = unconstrained_policy(&[("Cash", 100.0)]);
+        let review = Review::from_portfolio_and_policy(&portfolio, &policy, "EUR");
+
+        assert!(review.constraint_checks.is_empty(), "no constraints set");
+        assert!(review.data_quality.is_empty());
+        assert_eq!(review.findings.len(), 1);
+        assert!(matches!(review.findings[0].severity, Severity::Info));
+        assert_eq!(review.findings[0].category, "Policy Alignment");
+        let md = review.to_markdown();
+        assert!(
+            md.contains("✅ **Policy Alignment** — Portfolio is aligned with policy."),
+            "{md}"
+        );
+        assert!(!md.contains("## Data Quality"), "{md}");
+        assert_eq!(review.allocations[0].tolerance_percent, None);
+        assert!(review.allocations[0].within_tolerance);
+    }
+
+    #[test]
+    fn test_critical_drift_sorts_before_warnings() {
+        // 100 % stocks against a 60/40 policy (tolerance 10): stocks +40
+        // (> 2x tolerance) is critical, cash -40 too; the cash buffer and the
+        // concentration limits are violated (warnings).
+        let mut portfolio = Portfolio::new();
+        let mut stock =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 10.0, 100.0, PriceStatus::Live);
+        stock.purchases.push(crate::position::Purchase {
+            quantity: dec(10.0),
+            price: Some(dec(90.0)),
+            ..Default::default()
+        });
+        portfolio.add_position(stock);
+        let review = Review::from_portfolio_and_policy(&portfolio, &create_test_policy(), "EUR");
+
+        let severities: Vec<String> = review
+            .findings
+            .iter()
+            .map(|f| format!("{:?}", f.severity))
+            .collect();
+        assert_eq!(
+            severities,
+            ["Critical", "Critical", "Warning", "Warning", "Warning"]
+        );
+        assert_eq!(
+            review.findings[0].message,
+            "Stocks allocation is above target: 100.0% vs 60.0%"
+        );
+        assert_eq!(
+            review.findings[1].message,
+            "Cash allocation is below target: 0.0% vs 40.0%"
+        );
+        let failed: Vec<&str> = review
+            .constraint_checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                "Minimum Cash Amount",
+                "Single Position Limit",
+                "Asset Class Limit"
+            ]
+        );
+        let md = review.to_markdown();
+        assert!(md.contains("❌ **Allocation Drift** — Stocks"), "{md}");
+        assert!(
+            md.contains("  > Drift: 40.0% (tolerance: ±10.0%)\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn test_moderate_drift_and_unknown_asset_class_are_warnings() {
+        // 70 % stocks, 30 % gold vs. 60/40 stocks/cash (tolerance 10):
+        // stocks +10 is within tolerance, cash -40 is critical, Gold is unknown.
+        // With tolerance 5 for stocks, +10 is a warning (not above 2x).
+        let mut policy = unconstrained_policy(&[("Stocks", 60.0), ("Cash", 40.0)]);
+        policy.allocations[0].tolerance_percent = Some(5.0);
+        let mut portfolio = Portfolio::new();
+        let mut stock =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 7.0, 100.0, PriceStatus::Live);
+        stock.purchases.push(crate::position::Purchase {
+            quantity: dec(7.0),
+            price: Some(dec(100.0)),
+            ..Default::default()
+        });
+        portfolio.add_position(stock);
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Gold",
+            300.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        let review = Review::from_portfolio_and_policy(&portfolio, &policy, "EUR");
+
+        let findings: Vec<(String, &str, &str)> = review
+            .findings
+            .iter()
+            .map(|f| {
+                (
+                    format!("{:?}", f.severity),
+                    f.category.as_str(),
+                    f.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            findings[0],
+            (
+                "Critical".to_string(),
+                "Allocation Drift",
+                "Cash allocation is below target: 0.0% vs 40.0%"
+            )
+        );
+        assert!(findings.contains(&(
+            "Warning".to_string(),
+            "Allocation Drift",
+            "Stocks allocation is above target: 70.0% vs 60.0%"
+        )));
+        assert!(findings.contains(&(
+            "Warning".to_string(),
+            "Unknown Asset Class",
+            "Asset class 'Gold' (30.0%) is not defined in policy"
+        )));
+        assert!(review
+            .suggested_actions
+            .contains(&"Rebalance Stocks: currently 70.0%, target 60.0% (±5.0%)".to_string()));
+    }
+
+    #[test]
+    fn test_position_without_ticker_is_a_data_quality_warning() {
+        let mut portfolio = Portfolio::new();
+        let mut house =
+            PortfolioPosition::for_test(None, "RealEstate", 1.0, 0.0, PriceStatus::Live);
+        house.name = Some("House".to_string());
+        portfolio.add_position(house);
+        let policy = unconstrained_policy(&[("RealEstate", 100.0)]);
+        let review = Review::from_portfolio_and_policy(&portfolio, &policy, "EUR");
+
+        assert_eq!(review.data_quality.len(), 1);
+        assert_eq!(review.data_quality[0].position, "House");
+        assert_eq!(
+            review.data_quality[0].issue,
+            "No ticker — live pricing unavailable"
+        );
+        let md = review.to_markdown();
+        assert!(
+            md.contains("## Data Quality\n\n⚠️ **House**: No ticker — live pricing unavailable\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn test_markdown_of_a_hand_built_review_renders_every_severity() {
+        let issue = |severity, position: &str| DataQualityIssue {
+            severity,
+            position: position.to_string(),
+            issue: "check".to_string(),
+        };
+        let review = Review {
+            portfolio_value: 0.0,
+            currency: "EUR".to_string(),
+            policy_name: "P".to_string(),
+            findings: vec![],
+            allocations: vec![],
+            constraint_checks: vec![],
+            data_quality: vec![
+                issue(Severity::Critical, "A"),
+                issue(Severity::Warning, "B"),
+                issue(Severity::Info, "C"),
+            ],
+            suggested_actions: vec![],
+        };
+        let md = review.to_markdown();
+        assert!(md.contains("## Findings\n\nNo findings.\n"), "{md}");
+        assert!(
+            md.contains("❌ **A**: check\n⚠️ **B**: check\nℹ️ **C**: check\n"),
+            "{md}"
+        );
     }
 }

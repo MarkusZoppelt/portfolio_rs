@@ -550,10 +550,12 @@ fn risk_flags(
         return flags;
     }
 
-    for position in positions.iter().filter(|p| !p.is_cash) {
-        let Some(weight) = position.weight_percent else {
-            continue;
-        };
+    // Complete data: every position and class has a weight.
+    let weighted = positions
+        .iter()
+        .filter(|p| !p.is_cash)
+        .filter_map(|p| Some((p, p.weight_percent?)));
+    for (position, weight) in weighted {
         if weight > single_limit {
             flags.push(format!(
                 "Single-position concentration: {} is {} of the portfolio (limit {}, cash excluded).",
@@ -564,10 +566,10 @@ fn risk_flags(
         }
     }
 
-    for item in allocation {
-        let Some(percent) = item.percent else {
-            continue;
-        };
+    let weighted = allocation
+        .iter()
+        .filter_map(|item| Some((item, item.percent?)));
+    for (item, percent) in weighted {
         if percent >= ASSET_CLASS_CONCENTRATION_THRESHOLD {
             flags.push(format!(
                 "Asset-class concentration: {} is {} of the portfolio.",
@@ -665,5 +667,165 @@ mod tests {
         assert_eq!(quantity(10.0), "10");
         assert_eq!(quantity(10.123456), "10.1235");
         assert_eq!(quantity(0.123456789), "0.12345679");
+    }
+
+    use crate::position::PortfolioPosition;
+
+    fn policy_with_min_cash(minimum: f64) -> Policy {
+        let mut policy = crate::policy::default_balanced_growth_policy();
+        policy.constraints.minimum_cash_amount = Some(minimum);
+        policy
+    }
+
+    #[test]
+    fn test_empty_portfolio_flags_and_lists_no_data_quality_issues() {
+        let context = PortfolioContext::from_portfolio(&Portfolio::new(), "EUR", "Connected");
+        assert_eq!(
+            context.risk_flags,
+            vec!["Portfolio is empty or has no positive value."]
+        );
+        assert!(context.data_quality_flags.is_empty());
+        assert!(context.complete);
+        let md = context.to_markdown();
+        assert!(
+            md.contains("## Data Quality Flags\n\n- None\n"),
+            "empty list renders as None: {md}"
+        );
+        assert!(md.contains("- Positions: 0\n"), "{md}");
+        assert!(!md.contains("Largest Position"), "{md}");
+    }
+
+    #[test]
+    fn test_cash_buffer_shortfall_is_rendered_as_shortfall() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            1_000.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        let policy = policy_with_min_cash(1_500.0);
+        let context =
+            PortfolioContext::from_portfolio_with_policy(&portfolio, "EUR", "x", Some(&policy));
+        assert_eq!(context.cash_buffer.surplus, Some(-500.0));
+        let md = context.to_markdown();
+        assert!(
+            md.contains("- Cash Buffer: minimum 1500.00 EUR, shortfall 500.00 EUR\n"),
+            "{md}"
+        );
+
+        let policy = policy_with_min_cash(400.0);
+        let md =
+            PortfolioContext::from_portfolio_with_policy(&portfolio, "EUR", "x", Some(&policy))
+                .to_markdown();
+        assert!(
+            md.contains("- Cash Buffer: minimum 400.00 EUR, surplus 600.00 EUR\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn test_all_unpriced_portfolio_has_no_largest_position() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("FAKEGONE"),
+            "Stocks",
+            2.0,
+            0.0,
+            PriceStatus::Unavailable,
+        ));
+        let context = PortfolioContext::from_portfolio(&portfolio, "EUR", "Disconnected");
+        assert!(!context.complete);
+        assert_eq!(context.summary.largest_position, None);
+        assert_eq!(
+            context.risk_flags,
+            vec!["Data is incomplete; concentration and liquidity flags are not evaluated."]
+        );
+        let md = context.to_markdown();
+        assert!(md.contains("- Positions: 1\n"), "{md}");
+        assert!(!md.contains("Largest Position"), "{md}");
+        assert!(
+            md.contains("No current market price for FAKEGONE"),
+            "data quality flag is listed: {md}"
+        );
+    }
+
+    fn stock_and_cash(stock_value: f64, cash: f64) -> Portfolio {
+        let mut portfolio = Portfolio::new();
+        for (ticker, class) in [("FAKEA", "Stocks"), ("FAKEB", "Bonds")] {
+            portfolio.add_position(PortfolioPosition::for_test(
+                Some(ticker),
+                class,
+                1.0,
+                stock_value / 2.0,
+                PriceStatus::Live,
+            ));
+        }
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            cash,
+            0.0,
+            PriceStatus::Live,
+        ));
+        portfolio
+    }
+
+    #[test]
+    fn test_low_cash_and_no_flag_cases() {
+        // Policy limit 60 %: two 49.5 % positions, 1 % cash.
+        let mut policy = crate::policy::default_balanced_growth_policy();
+        policy.constraints.single_position_limit_percent = Some(60.0);
+        let context = PortfolioContext::from_portfolio_with_policy(
+            &stock_and_cash(990.0, 10.0),
+            "EUR",
+            "x",
+            Some(&policy),
+        );
+        assert_eq!(
+            context.risk_flags,
+            vec![
+                "Cash allocation is low at 1.00%; consider checking liquidity needs against policy."
+            ]
+        );
+
+        let context = PortfolioContext::from_portfolio_with_policy(
+            &stock_and_cash(900.0, 100.0),
+            "EUR",
+            "x",
+            Some(&policy),
+        );
+        assert_eq!(
+            context.risk_flags,
+            vec!["No simple concentration or liquidity flags triggered."]
+        );
+    }
+
+    #[test]
+    fn test_concentration_flags_use_weights_of_complete_data() {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("FAKEBIG"),
+            "Stocks",
+            9.0,
+            100.0,
+            PriceStatus::Live,
+        ));
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            100.0,
+            0.0,
+            PriceStatus::Live,
+        ));
+        let context = PortfolioContext::from_portfolio(&portfolio, "EUR", "Connected");
+        assert_eq!(
+            context.risk_flags,
+            vec![
+                "Single-position concentration: FAKEBIG is 90.00% of the portfolio (limit 25.00%, cash excluded).",
+                "Asset-class concentration: Stocks is 90.00% of the portfolio.",
+            ]
+        );
     }
 }
