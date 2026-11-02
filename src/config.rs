@@ -405,6 +405,249 @@ mod tests {
     }
 
     #[test]
+    fn test_app_mode_as_str() {
+        assert_eq!(AppMode::Simple.as_str(), "simple");
+        assert_eq!(AppMode::Workspace.as_str(), "workspace");
+    }
+
+    /// Write `cfg` to `path` without the migrations `load_from` applies.
+    fn write_raw(path: &Path, cfg: &AppConfig) {
+        store_private(path, cfg).unwrap();
+    }
+
+    #[test]
+    fn test_blank_or_placeholder_file_is_migrated_to_unset_and_saved() {
+        for file in ["", "   ", LEGACY_PLACEHOLDER_FILE] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("config.yml");
+            let stale = AppConfig {
+                version: 0,
+                portfolio_file: Some(file.to_string()),
+                ..Default::default()
+            };
+            write_raw(&path, &stale);
+            let cfg = AppConfig::load_from(&path).unwrap();
+            assert_eq!(cfg.portfolio_file, None, "{file:?}");
+            assert_eq!(cfg.version, CURRENT_CONFIG_VERSION);
+            // The migration was persisted.
+            let raw: AppConfig = confy::load_path(&path).unwrap();
+            assert_eq!(raw.portfolio_file, None, "{file:?}");
+        }
+    }
+
+    #[test]
+    fn test_workspace_drops_a_stale_portfolio_file_on_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yml");
+        let stale = AppConfig {
+            workspace_dir: Some("/tmp/fake-ws".to_string()),
+            portfolio_file: Some("/tmp/fake.json".to_string()),
+            ..Default::default()
+        };
+        write_raw(&path, &stale);
+        let cfg = AppConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.workspace_dir.as_deref(), Some("/tmp/fake-ws"));
+        assert_eq!(cfg.portfolio_file, None);
+        let raw: AppConfig = confy::load_path(&path).unwrap();
+        assert_eq!(raw.portfolio_file, None);
+    }
+
+    #[test]
+    fn test_clean_config_is_loaded_without_rewriting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yml");
+        let mut cfg = AppConfig::default();
+        cfg.set_portfolio_file("/tmp/fake.json");
+        cfg.save_to(&path).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let loaded = AppConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.portfolio_file.as_deref(), Some("/tmp/fake.json"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn test_legacy_default_placeholder_migrates_to_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yml");
+        // What confy writes for a fresh legacy config.
+        confy::store_path(&path, LegacyConfig::default()).unwrap();
+        let cfg = AppConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.currency, "EUR");
+        assert_eq!(cfg.portfolio_file, None);
+        assert_eq!(cfg.version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn test_effective_portfolio_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_str().unwrap().to_string();
+
+        // Workspace mode without a workspace dir uses the file.
+        let cfg = AppConfig {
+            last_mode: AppMode::Workspace,
+            portfolio_file: Some("/tmp/fake.json".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.effective_portfolio_file().as_deref(),
+            Some("/tmp/fake.json")
+        );
+
+        let mut cfg = AppConfig::default();
+        cfg.set_workspace(ws.clone());
+        // Workspace without positions.json and no file: nothing.
+        assert_eq!(cfg.effective_portfolio_file(), None);
+        // A file kept next to the workspace is the fallback.
+        cfg.portfolio_file = Some("/tmp/fake.json".to_string());
+        assert_eq!(
+            cfg.effective_portfolio_file().as_deref(),
+            Some("/tmp/fake.json")
+        );
+        // Workspace positions.json wins once it exists.
+        std::fs::write(tmp.path().join("positions.json"), "[]").unwrap();
+        assert_eq!(
+            cfg.effective_portfolio_file(),
+            Some(format!("{ws}/positions.json"))
+        );
+        // Simple mode ignores the workspace.
+        cfg.set_last_mode(AppMode::Simple);
+        assert_eq!(
+            cfg.effective_portfolio_file().as_deref(),
+            Some("/tmp/fake.json")
+        );
+        cfg.portfolio_file = Some("  ".to_string());
+        assert_eq!(cfg.effective_portfolio_file(), None);
+    }
+
+    #[test]
+    fn test_setters() {
+        let mut cfg = AppConfig::default();
+        cfg.set_workspace("/tmp/ws");
+        cfg.set_portfolio_file("/tmp/fake.json");
+        assert_eq!(cfg.portfolio_file.as_deref(), Some("/tmp/fake.json"));
+        assert_eq!(cfg.workspace_dir, None);
+        assert_eq!(cfg.last_mode, AppMode::Simple);
+
+        cfg.set_theme(ThemeMode::Light);
+        assert_eq!(cfg.theme, ThemeMode::Light);
+        cfg.set_last_mode(AppMode::Workspace);
+        assert_eq!(cfg.last_mode, AppMode::Workspace);
+
+        cfg.set_llm_provider_url("http://localhost:1234");
+        cfg.set_llm_api_key("fake-key-not-real");
+        cfg.set_llm_model("fake-model");
+        assert_eq!(
+            cfg.llm_provider_url.as_deref(),
+            Some("http://localhost:1234")
+        );
+        assert_eq!(cfg.llm_api_key.as_deref(), Some("fake-key-not-real"));
+        assert_eq!(cfg.llm_model.as_deref(), Some("fake-model"));
+        // Blank values clear.
+        cfg.set_llm_provider_url(" ");
+        cfg.set_llm_api_key("");
+        cfg.set_llm_model("\t");
+        assert_eq!(cfg.llm_provider_url, None);
+        assert_eq!(cfg.llm_api_key, None);
+        assert_eq!(cfg.llm_model, None);
+
+        cfg.set_workspace("/tmp/ws");
+        cfg.clear_paths();
+        assert_eq!(cfg.workspace_dir, None);
+        assert_eq!(cfg.portfolio_file, None);
+        assert_eq!(cfg.last_mode, AppMode::Simple);
+    }
+
+    #[test]
+    fn test_save_to_rejects_paths_without_parent_or_file_name() {
+        let cfg = AppConfig::default();
+        let err = cfg.save_to(Path::new("/")).unwrap_err();
+        assert_eq!(err.to_string(), "config path has no parent: /");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let err = cfg.save_to(&tmp.path().join("..")).unwrap_err();
+        assert!(
+            err.to_string().starts_with("config path has no file name"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_save_to_reports_unwritable_locations() {
+        let cfg = AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // The config dir cannot be created below a file.
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let err = cfg.save_to(&file.join("config.yml")).unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to create config dir"),
+            "{err}"
+        );
+
+        // The temp file cannot be created over a directory.
+        let dir = tmp.path().join("blocked");
+        std::fs::create_dir_all(dir.join(format!(".config.yml.tmp-{}", std::process::id())))
+            .unwrap();
+        let err = cfg.save_to(&dir.join("config.yml")).unwrap_err();
+        assert!(err.to_string().starts_with("failed to create"), "{err}");
+    }
+
+    #[test]
+    fn test_failed_replace_keeps_the_target_and_removes_the_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A non-empty directory where the config file should go.
+        let path = tmp.path().join("config.yml");
+        std::fs::create_dir_all(path.join("keep")).unwrap();
+        let err = AppConfig::default().save_to(&path).unwrap_err();
+        assert_eq!(err.to_string(), "failed to save configuration");
+        assert!(path.join("keep").is_dir());
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.yml")]);
+    }
+
+    #[test]
+    fn test_base_currency_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yml");
+        assert_eq!(base_currency_at(&path), None);
+        assert!(!path.exists(), "reading must never create the file");
+
+        let mut cfg = AppConfig::default();
+        cfg.set_currency("USD");
+        cfg.save_to(&path).unwrap();
+        assert_eq!(base_currency_at(&path).as_deref(), Some("USD"));
+
+        cfg.set_currency(" ");
+        cfg.save_to(&path).unwrap();
+        assert_eq!(base_currency_at(&path), None);
+
+        std::fs::write(&path, "currency: [EUR\n").unwrap();
+        assert_eq!(base_currency_at(&path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_to_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            path_to_utf8(Path::new("/tmp/config.yml")).unwrap(),
+            "/tmp/config.yml"
+        );
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff.yml"));
+        assert_eq!(
+            path_to_utf8(bad).unwrap_err().to_string(),
+            "configuration path contains invalid UTF-8"
+        );
+    }
+
+    #[test]
     fn test_legacy_config_is_migrated_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yml");

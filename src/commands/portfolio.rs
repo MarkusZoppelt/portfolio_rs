@@ -96,3 +96,55 @@ pub async fn prepare_tui<P: QuoteProvider>(
         tab,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::build_cli;
+    use crate::services::quotes::FixtureProvider;
+
+    const EXAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/example_data.json");
+
+    fn fixture() -> Arc<FixtureProvider> {
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/quotes_example.json"
+        ))
+        .unwrap();
+        Arc::new(FixtureProvider::from_json(&json).unwrap())
+    }
+
+    #[tokio::test]
+    async fn prepare_tui_values_and_sorts_the_portfolio() {
+        let matches = build_cli().get_matches_from(["portfolio_rs", EXAMPLE, "--tab", "balances"]);
+        let cfg = AppConfig {
+            currency: "USD".to_string(),
+            ..AppConfig::default()
+        };
+        let t = prepare_tui(&matches, &cfg, fixture(), "EUR").await.unwrap();
+
+        assert_eq!(t.filename, EXAMPLE);
+        assert_eq!(t.currency, "USD");
+        assert_eq!(t.tab, Some(Tab::Balances));
+        assert_eq!(t.positions_str, std::fs::read_to_string(EXAMPLE).unwrap());
+        let values: Vec<f64> = t
+            .portfolio
+            .positions
+            .iter()
+            .map(|p| p.get_balance())
+            .collect();
+        assert!(values.windows(2).all(|w| w[0] >= w[1]), "{values:?}");
+        // Same total as `portfolio_rs balances` with these fixture quotes.
+        assert!((t.portfolio.get_total_value() - 97208.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn prepare_tui_without_a_file_is_an_error() {
+        let matches = build_cli().get_matches_from(["portfolio_rs"]);
+        assert!(
+            prepare_tui(&matches, &AppConfig::default(), fixture(), "EUR")
+                .await
+                .is_err()
+        );
+    }
+}

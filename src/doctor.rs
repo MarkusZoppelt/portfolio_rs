@@ -290,9 +290,13 @@ mod tests {
     fn test_tracked_private_artifacts_warn() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path();
-        if !git(dir, &["init", "-q"]) {
-            return; // git not installed (e.g. sandboxed build)
+        // git may be missing (e.g. sandboxed build); the check is then a no-op.
+        if git(dir, &["init", "-q"]) {
+            assert_tracked_artifacts_warn(dir);
         }
+    }
+
+    fn assert_tracked_artifacts_warn(dir: &Path) {
         std::fs::write(dir.join(".gitignore"), PRIVATE_ARTIFACT_PATTERNS.join("\n")).unwrap();
         std::fs::write(dir.join("positions.json.bak"), "[]").unwrap();
         assert!(git(dir, &["add", "-f", "positions.json.bak"]));
@@ -317,5 +321,92 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         crate::workspace::init_workspace(tmp.path().to_str().unwrap(), false).unwrap();
         assert_eq!(private_artifacts_check(tmp.path()).0, HealthStatus::Ok);
+    }
+
+    fn statuses(health: &WorkspaceHealth) -> Vec<(&str, HealthStatus)> {
+        health
+            .checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.status))
+            .collect()
+    }
+
+    #[test]
+    fn test_empty_dir_warns_about_everything() {
+        use HealthStatus::Warning;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let health = check_workspace(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            statuses(&health),
+            [
+                ("Policy file", Warning),
+                ("Narrative policy", Warning),
+                ("Directory: portfolio/diary", Warning),
+                ("Directory: portfolio/decisions", Warning),
+                ("Directory: portfolio/theses", Warning),
+                ("Directory: portfolio/reports", Warning),
+                ("Watchlist", Warning),
+                ("Gitignore safety", Warning),
+                ("Private artifacts", Warning),
+            ]
+        );
+        assert_eq!((health.issue_count, health.warning_count), (0, 9));
+        assert_eq!(health.checks[7].message, "No .gitignore found");
+    }
+
+    #[test]
+    fn test_initialized_workspace_with_policy_is_healthy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        crate::workspace::init_workspace(dir, false).unwrap();
+        crate::commands::policy::policy_init("balanced-growth", dir, false).unwrap();
+        let health = check_workspace(dir).unwrap();
+        assert!(
+            health.checks.iter().all(|c| c.status == HealthStatus::Ok),
+            "{:?}",
+            health.checks
+        );
+        assert_eq!((health.issue_count, health.warning_count), (0, 0));
+    }
+
+    #[test]
+    fn test_invalid_policy_weak_gitignore_and_plain_positions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        crate::workspace::init_workspace(dir, false).unwrap();
+        std::fs::write(tmp.path().join("portfolio/policy.toml"), "not = [toml").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(tmp.path().join("positions.json"), "[]").unwrap();
+
+        let health = check_workspace(dir).unwrap();
+        let check = |name: &str| health.checks.iter().find(|c| c.name == name).unwrap();
+        assert_eq!(check("Policy file").status, HealthStatus::Error);
+        assert!(check("Policy file")
+            .message
+            .starts_with("Policy file is invalid: "));
+        assert_eq!(check("Gitignore safety").status, HealthStatus::Warning);
+        assert_eq!(
+            check("Gitignore safety").message,
+            ".gitignore may not protect private workspace data"
+        );
+        assert_eq!(check("Private artifacts").status, HealthStatus::Warning);
+        assert_eq!(check("Encryption").status, HealthStatus::Warning);
+        assert!(check("Encryption").message.contains("gpg -c"));
+        assert_eq!((health.issue_count, health.warning_count), (1, 3));
+    }
+
+    #[test]
+    fn test_unreadable_gitignore_is_not_judged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".gitignore")).unwrap();
+        let health = check_workspace(tmp.path().to_str().unwrap()).unwrap();
+        assert!(health.checks.iter().all(|c| c.name != "Gitignore safety"));
+        // The private-artifact check still warns: nothing is ignored.
+        let artifacts = health
+            .checks
+            .iter()
+            .find(|c| c.name == "Private artifacts")
+            .unwrap();
+        assert_eq!(artifacts.status, HealthStatus::Warning);
     }
 }

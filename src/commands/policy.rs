@@ -84,3 +84,129 @@ pub fn policy_init(strategy: &str, dir: &str, dry_run: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Command;
+
+    fn cli(args: &[&str]) -> ArgMatches {
+        let matches = crate::cli::build_cli()
+            .get_matches_from(["portfolio_rs", "policy"].iter().chain(args).copied());
+        matches.subcommand_matches("policy").unwrap().clone()
+    }
+
+    #[test]
+    fn init_then_validate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        let file = tmp.path().join("portfolio/policy.toml");
+        let file = file.to_str().unwrap();
+
+        handle_policy(&cli(&["init", "--dry-run", dir])).unwrap();
+        assert!(!tmp.path().join("portfolio").exists());
+        handle_policy(&cli(&["init", "--strategy", "custom", dir])).unwrap();
+        // Custom has no tolerance band; the default strategy has them.
+        handle_policy(&cli(&["validate", file])).unwrap();
+        std::fs::remove_file(file).unwrap();
+        handle_policy(&cli(&["init", dir])).unwrap();
+        handle_policy(&cli(&["validate", file])).unwrap();
+        assert_eq!(Policy::from_file(file).unwrap().name, "Balanced Growth");
+
+        std::fs::write(file, "not = [toml").unwrap();
+        let err = handle_policy(&cli(&["validate", file])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("policy validation failed for {file}")
+        );
+    }
+
+    #[test]
+    fn init_never_overwrites_an_existing_policy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        std::fs::create_dir_all(tmp.path().join("portfolio")).unwrap();
+        let path = tmp.path().join("portfolio/policy.toml");
+        std::fs::write(&path, "mine").unwrap();
+        for dry_run in [false, true] {
+            let err = policy_init("custom", dir, dry_run).unwrap_err();
+            assert!(
+                err.to_string()
+                    .starts_with("policy file already exists at "),
+                "{err}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unwritable_policy_file_is_an_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("portfolio")).unwrap();
+        // A dangling symlink does not "exist", but cannot be created anew.
+        let path = tmp.path().join("portfolio/policy.toml");
+        std::os::unix::fs::symlink(tmp.path().join("nowhere/policy.toml"), &path).unwrap();
+        let err = policy_init("custom", tmp.path().to_str().unwrap(), false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("failed to write policy file: {}", path.display())
+        );
+    }
+
+    #[test]
+    fn missing_subcommand_is_an_error() {
+        let matches = Command::new("policy").get_matches_from(["policy"]);
+        let err = handle_policy(&matches).unwrap_err();
+        assert_eq!(err.to_string(), "unknown policy subcommand");
+    }
+
+    #[test]
+    fn unknown_strategy_is_an_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = policy_init("yolo", tmp.path().to_str().unwrap(), false).unwrap_err();
+        assert_eq!(err.to_string(), "unknown strategy: yolo");
+        assert!(!tmp.path().join("portfolio").exists());
+    }
+
+    #[test]
+    fn every_strategy_writes_a_valid_private_policy() {
+        for (strategy, name) in [
+            ("balanced-growth", "Balanced Growth"),
+            ("capital-preservation", "Capital Preservation"),
+            ("aggressive-growth", "Aggressive Growth"),
+            ("custom", "Custom"),
+        ] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            policy_init(strategy, tmp.path().to_str().unwrap(), false).unwrap();
+            let path = tmp.path().join("portfolio/policy.toml");
+            let policy = Policy::from_file(path.to_str().unwrap()).unwrap();
+            assert_eq!(policy.name, name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{strategy}");
+            }
+        }
+    }
+
+    #[test]
+    fn dry_run_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        policy_init("custom", tmp.path().to_str().unwrap(), true).unwrap();
+        assert!(!tmp.path().join("portfolio").exists());
+    }
+
+    #[test]
+    fn unwritable_policy_dir_is_an_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // `portfolio` is a file, so the policy directory cannot be created.
+        fs::write(tmp.path().join("portfolio"), "").unwrap();
+        let err = policy_init("custom", tmp.path().to_str().unwrap(), false).unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to create directory: "),
+            "{err:#}"
+        );
+    }
+}

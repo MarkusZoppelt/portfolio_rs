@@ -383,4 +383,74 @@ target_percent = 100.0
         assert_eq!(policy.base_currency, reparsed.base_currency);
         assert_eq!(policy.allocations.len(), reparsed.allocations.len());
     }
+
+    #[test]
+    fn test_strategy_templates_are_valid_and_roundtrip() {
+        for (strategy, name, risk, horizon) in [
+            (
+                "balanced-growth",
+                "Balanced Growth",
+                RiskProfile::Moderate,
+                15,
+            ),
+            (
+                "capital-preservation",
+                "Capital Preservation",
+                RiskProfile::Conservative,
+                5,
+            ),
+            (
+                "aggressive-growth",
+                "Aggressive Growth",
+                RiskProfile::Aggressive,
+                20,
+            ),
+            ("custom", "Custom", RiskProfile::Moderate, 10),
+        ] {
+            let policy = policy_from_strategy(strategy).unwrap();
+            assert_eq!(policy.name, name);
+            assert_eq!(policy.risk_profile, risk);
+            assert_eq!(policy.time_horizon_years, horizon);
+            policy.validate().unwrap();
+            let reparsed = Policy::from_str(&policy.to_toml().unwrap()).unwrap();
+            assert_eq!(reparsed.allocations.len(), policy.allocations.len());
+        }
+        assert!(policy_from_strategy("yolo").is_none());
+    }
+
+    #[test]
+    fn test_risk_profile_display() {
+        assert_eq!(RiskProfile::Conservative.to_string(), "conservative");
+        assert_eq!(RiskProfile::Moderate.to_string(), "moderate");
+        assert_eq!(RiskProfile::Aggressive.to_string(), "aggressive");
+    }
+
+    #[test]
+    fn test_policy_validation_rejects_negative_target() {
+        let mut policy = policy_from_strategy("custom").unwrap();
+        policy.allocations[0].target_percent = 110.0;
+        policy.allocations.push(AllocationTarget {
+            asset_class: "Stocks".to_string(),
+            target_percent: -10.0,
+            tolerance_percent: None,
+        });
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "allocation target for 'Stocks' cannot be negative"
+        );
+    }
+
+    #[test]
+    fn test_policy_from_file_errors() {
+        let err = Policy::from_file("/nonexistent/policy.toml").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "failed to read policy file: /nonexistent/policy.toml"
+        );
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("policy.toml");
+        std::fs::write(&path, "not = [toml").unwrap();
+        let err = Policy::from_file(path.to_str().unwrap()).unwrap_err();
+        assert_eq!(err.to_string(), "failed to parse policy TOML");
+    }
 }

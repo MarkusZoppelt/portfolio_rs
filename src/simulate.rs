@@ -210,4 +210,120 @@ mod tests {
             .iter()
             .all(|t| t.action == "Increase"));
     }
+
+    use crate::policy::{AllocationTarget, Constraints, RiskProfile};
+    use crate::position::{PortfolioPosition, PriceStatus};
+
+    /// Stocks 50% (±10), Cash 50% (default ±5), Gold 0%.
+    fn half_half_policy() -> Policy {
+        let target = |class: &str, percent, tolerance| AllocationTarget {
+            asset_class: class.to_string(),
+            target_percent: percent,
+            tolerance_percent: tolerance,
+        };
+        Policy {
+            version: "1.0".to_string(),
+            name: "Half Half".to_string(),
+            base_currency: "EUR".to_string(),
+            time_horizon_years: 10,
+            risk_profile: RiskProfile::Moderate,
+            constraints: Constraints::default(),
+            allocations: vec![
+                target("Stocks", 50.0, Some(10.0)),
+                target("Cash", 50.0, None),
+                target("Gold", 0.0, None),
+            ],
+        }
+    }
+
+    fn portfolio(stocks: f64, cash: f64) -> Portfolio {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("FAKESTOCK"),
+            "Stocks",
+            1.0,
+            stocks,
+            PriceStatus::Live,
+        ));
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            cash,
+            0.0,
+            PriceStatus::Live,
+        ));
+        portfolio
+    }
+
+    #[test]
+    fn test_drifted_portfolio_gets_full_and_half_trades() {
+        let sim = simulate_rebalance(&portfolio(800.0, 200.0), &half_half_policy(), "EUR");
+        assert_eq!(sim.portfolio_value, 1000.0);
+        assert_eq!(sim.policy_name, "Half Half");
+
+        let full = &sim.scenarios[0];
+        let trades: Vec<_> = full
+            .trades
+            .iter()
+            .map(|t| (t.asset_class.as_str(), t.action.as_str(), t.amount))
+            .collect();
+        // Gold is on target, so it needs no trade.
+        assert_eq!(
+            trades,
+            [("Stocks", "Reduce", 300.0), ("Cash", "Increase", 300.0)]
+        );
+        assert_eq!(full.new_allocation.len(), 3);
+
+        let partial = &sim.scenarios[1];
+        let trades: Vec<_> = partial
+            .trades
+            .iter()
+            .map(|t| {
+                (
+                    t.asset_class.as_str(),
+                    t.action.as_str(),
+                    t.amount,
+                    t.percent_of_portfolio,
+                )
+            })
+            .collect();
+        assert_eq!(
+            trades,
+            [
+                ("Stocks", "Reduce", 150.0, 15.0),
+                ("Cash", "Increase", 150.0, 15.0)
+            ]
+        );
+
+        let md = sim.to_markdown();
+        assert!(md.contains("Portfolio Value: 1000.00 EUR\n"), "{md}");
+        assert!(md.contains("Policy: Half Half\n"), "{md}");
+        assert!(
+            md.contains("## Scenario 1: Full Rebalance to Targets"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| Stocks | Reduce | 300.00 EUR | 30.0% |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| Cash | Increase | 150.00 EUR | 15.0% |"),
+            "{md}"
+        );
+        assert!(!md.contains("No trades needed."), "{md}");
+        assert!(md.ends_with("No trades have been executed.\n"), "{md}");
+    }
+
+    #[test]
+    fn test_small_drift_inside_tolerance_needs_no_trades() {
+        // 54/46: drift beyond 0.5 trades in full, but stays inside tolerance.
+        let sim = simulate_rebalance(&portfolio(540.0, 460.0), &half_half_policy(), "EUR");
+        assert_eq!(sim.scenarios[0].trades.len(), 2);
+        assert!(sim.scenarios[1].trades.is_empty());
+
+        let sim = simulate_rebalance(&portfolio(500.0, 500.0), &half_half_policy(), "EUR");
+        assert!(sim.scenarios.iter().all(|s| s.trades.is_empty()));
+        let md = sim.to_markdown();
+        assert_eq!(md.matches("No trades needed.").count(), 2, "{md}");
+    }
 }
