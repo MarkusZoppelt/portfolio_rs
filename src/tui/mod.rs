@@ -16,6 +16,8 @@ mod live_io;
 mod render;
 mod runtime;
 mod terminal_io;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -238,4 +240,66 @@ pub enum NetworkStatus {
     Connected,
     Disconnected,
     Partial,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn components_round_trip_through_their_names() {
+        let all = Component::all();
+        assert_eq!(all.len(), 16);
+        for component in all {
+            assert_eq!(component.as_str().parse::<Component>(), Ok(component));
+            assert_eq!(component.to_string(), component.as_str());
+            assert!(!component.description().is_empty());
+        }
+        assert_eq!(
+            Component::Hist.description(),
+            "Historic variation % column (vs invested)"
+        );
+        assert_eq!(
+            Component::Daily.description(),
+            "Daily variation % column (vs previous close)"
+        );
+    }
+
+    #[test]
+    fn component_names_accept_aliases_and_reject_unknown() {
+        assert_eq!(" Asset_Allocation ".parse(), Ok(Component::AssetBreakdown));
+        assert_eq!("hist".parse(), Ok(Component::Hist));
+        assert_eq!("day".parse(), Ok(Component::Daily));
+        assert_eq!(
+            "bogus".parse::<Component>(),
+            Err("Unknown component: 'bogus'".to_string())
+        );
+    }
+
+    #[test]
+    fn disabled_components_collect_every_unknown_name() {
+        let mut disabled = DisabledComponents::new(vec!["help".into(), "pnl".into()]).unwrap();
+        assert!(disabled.is_disabled(Component::Help));
+        assert!(disabled.is_disabled(Component::PnL));
+        assert!(!disabled.is_disabled(Component::Name));
+        disabled.disable_component(Component::Name);
+        assert!(disabled.is_disabled(Component::Name));
+
+        let errors =
+            DisabledComponents::new(vec!["x".into(), "help".into(), "y".into()]).unwrap_err();
+        assert_eq!(
+            errors,
+            vec!["Unknown component: 'x'", "Unknown component: 'y'"]
+        );
+    }
+
+    #[test]
+    fn tabs_parse_case_insensitively_and_have_titles() {
+        assert_eq!(Tab::from_str("Overview"), Some(Tab::Overview));
+        assert_eq!(Tab::from_str("BALANCES"), Some(Tab::Balances));
+        assert_eq!(Tab::from_str("charts"), None);
+        assert_eq!(Tab::Overview.title(), "Overview & Allocation");
+        assert_eq!(Tab::Balances.title(), "Balances");
+        assert_eq!(Tab::all(), &[Tab::Overview, Tab::Balances]);
+    }
 }

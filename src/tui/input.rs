@@ -116,3 +116,232 @@ fn type_form_char(app: &mut App, c: char) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portfolio::Portfolio;
+    use crate::tui::DisabledComponents;
+    use crossterm::event::{KeyEventState, KeyModifiers};
+
+    const POSITIONS: &str = r#"[
+      {"Name": "A", "Ticker": "AAA", "AssetClass": "Stocks", "Amount": 1,
+       "Purchases": [{"Date": "2024-01-01", "Quantity": 1, "Price": 5}]},
+      {"Name": "B", "AssetClass": "Cash", "Amount": 2}]"#;
+
+    fn app(dir: &tempfile::TempDir) -> App {
+        let path = dir.path().join("positions.json");
+        std::fs::write(&path, POSITIONS).unwrap();
+        let mut app = App::new(
+            "USD".into(),
+            POSITIONS.into(),
+            path.to_string_lossy().into(),
+            DisabledComponents::default(),
+        );
+        let mut portfolio = Portfolio::new();
+        for position in crate::position::from_string(POSITIONS).unwrap() {
+            portfolio.add_position(position);
+        }
+        app.set_portfolio(portfolio);
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Action {
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn type_str(app: &mut App, text: &str) {
+        for c in text.chars() {
+            assert_eq!(press(app, KeyCode::Char(c)), Action::None);
+        }
+    }
+
+    #[test]
+    fn only_key_presses_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let release = KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(handle_key(&mut app, release), Action::None);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn normal_mode_switches_tabs_and_quits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        for (code, tab) in [
+            (KeyCode::Char('l'), Tab::Balances),
+            (KeyCode::Right, Tab::Overview),
+            (KeyCode::Tab, Tab::Balances),
+            (KeyCode::Char('h'), Tab::Overview),
+            (KeyCode::Left, Tab::Balances),
+            (KeyCode::BackTab, Tab::Overview),
+            (KeyCode::Char('2'), Tab::Balances),
+            (KeyCode::Char('1'), Tab::Overview),
+        ] {
+            assert_eq!(press(&mut app, code), Action::None);
+            assert_eq!(app.current_tab, tab, "{code:?}");
+        }
+        assert_eq!(press(&mut app, KeyCode::Char('r')), Action::Reload);
+        assert_eq!(press(&mut app, KeyCode::Char('x')), Action::None);
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit);
+        app.should_quit = false;
+        press(&mut app, KeyCode::Esc);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn selection_and_editing_only_work_on_balances() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!((app.selected_position, app.mode), (0, AppMode::Normal));
+
+        app.current_tab = Tab::Balances;
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected_position, 1);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected_position, 0);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.selected_position, 0);
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.mode, AppMode::PurchaseList);
+    }
+
+    #[test]
+    fn purchase_list_navigates_adds_and_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        app.mode = AppMode::PurchaseList;
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_purchase, 1);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.selected_purchase, 0);
+        press(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.mode, AppMode::PurchaseList);
+
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.mode, AppMode::AddPurchase);
+
+        app.mode = AppMode::PurchaseList;
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::EditPurchase);
+        assert_eq!(app.purchase_date_input, "2024-01-01");
+        assert_eq!(app.purchase_price_input, "5");
+
+        app.mode = AppMode::PurchaseList;
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::AddPurchase);
+
+        app.mode = AppMode::PurchaseList;
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn date_field_takes_digits_and_adds_dashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        app.enter_add_purchase_mode();
+        type_str(&mut app, "2025x0a3150");
+        // Digits only, dashes added, at most eight digits.
+        assert_eq!(app.purchase_date_input, "2025-03-15");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.purchase_date_input, "2025-03-1");
+    }
+
+    #[test]
+    fn number_fields_take_one_decimal_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        app.enter_add_purchase_mode();
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.edit_field, EditField::Quantity);
+        type_str(&mut app, "1.5.x2");
+        assert_eq!(app.purchase_quantity_input, "1.52");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.edit_field, EditField::Price);
+        type_str(&mut app, ".7");
+        assert_eq!(app.purchase_price_input, ".7");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.edit_field, EditField::Quantity);
+        assert_eq!(press(&mut app, KeyCode::F(1)), Action::None);
+    }
+
+    #[test]
+    fn form_escape_returns_to_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        for mode in [AppMode::AddPurchase, AppMode::EditPurchase] {
+            app.mode = mode;
+            app.purchase_quantity_input = "3".into();
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(app.mode, AppMode::PurchaseList);
+            assert!(app.purchase_quantity_input.is_empty());
+        }
+    }
+
+    #[test]
+    fn saving_a_valid_form_asks_for_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        app.enter_add_purchase_mode();
+        type_str(&mut app, "20250102");
+        press(&mut app, KeyCode::Tab);
+        type_str(&mut app, "2");
+        assert_eq!(press(&mut app, KeyCode::Enter), Action::Reload);
+        assert_eq!(app.mode, AppMode::Normal);
+        let saved = std::fs::read_to_string(&app.data_file_path).unwrap();
+        assert!(saved.contains("2025-01-02"), "{saved}");
+
+        // Edit the only purchase of the file on disk.
+        app.selected_purchase = 1;
+        app.enter_edit_purchase_mode();
+        press(&mut app, KeyCode::Tab);
+        type_str(&mut app, "0");
+        assert_eq!(press(&mut app, KeyCode::Enter), Action::Reload);
+        let saved = std::fs::read_to_string(&app.data_file_path).unwrap();
+        assert!(saved.contains("\"Quantity\": 10.0"), "{saved}");
+    }
+
+    #[test]
+    fn an_invalid_form_shows_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        app.enter_add_purchase_mode();
+        assert_eq!(press(&mut app, KeyCode::Enter), Action::None);
+        assert_eq!(app.error_message.as_deref(), Some("Date is required"));
+        assert_eq!(app.mode, AppMode::AddPurchase);
+
+        app.mode = AppMode::EditPurchase;
+        app.purchase_date_input = "2025-01-01".into();
+        assert_eq!(press(&mut app, KeyCode::Enter), Action::None);
+        assert_eq!(app.error_message.as_deref(), Some("Quantity is required"));
+    }
+
+    #[test]
+    fn legacy_edit_mode_only_cancels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        app.mode = AppMode::Edit;
+        app.edit_input = "12".into();
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.mode, AppMode::Edit);
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.edit_input.is_empty());
+    }
+}

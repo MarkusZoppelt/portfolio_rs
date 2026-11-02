@@ -67,3 +67,51 @@ pub(super) fn format_amount(amount: f64) -> String {
         format!("{amount:.8}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn currency_symbols_and_separators() {
+        assert_eq!(format_currency(1234.5, "USD"), "$1,234.50");
+        assert_eq!(format_currency(12.345, "CAD"), "$12.35");
+        assert_eq!(format_currency(1234567.0, "EUR"), "1,234,567.00 €");
+        assert_eq!(format_currency(5.0, "GBP"), "£5.00");
+        assert_eq!(format_currency(999.6, "CHF"), "999.60 CHF");
+        assert_eq!(format_currency(2500.0, "SEK"), "2,500.00 SEK");
+    }
+
+    #[test]
+    fn yen_has_no_decimals() {
+        assert_eq!(format_currency(1234567.89, "JPY"), "1,234,567 JPY");
+        assert_eq!(format_currency(999.0, "JPY"), "999 JPY");
+    }
+
+    #[test]
+    fn big_value_always_groups_thousands() {
+        assert_eq!(format_big_value(1234.5, "HKD"), "$1,234.50");
+        assert_eq!(format_big_value(1234.5, "GBP"), "£1,234.50");
+        assert_eq!(format_big_value(1234.5, "EUR"), "1,234.50 EUR");
+        assert_eq!(format_big_value(98765.4, "JPY"), "98,765 JPY");
+        assert_eq!(format_big_value(12.0, "CHF"), "12.00 CHF");
+    }
+
+    #[test]
+    fn commas_group_the_integer_part() {
+        assert_eq!(format_with_commas(0.0), "0.00");
+        assert_eq!(format_with_commas(123.456), "123.46");
+        assert_eq!(format_with_commas(1000.0), "1,000.00");
+        assert_eq!(format_with_commas(9876543.21), "9,876,543.21");
+        // Not a number has no decimal part to split off.
+        assert_eq!(format_with_commas(f64::NAN), "NaN.00");
+    }
+
+    #[test]
+    fn amounts_show_more_decimals_when_small() {
+        assert_eq!(format_amount(50.0), "50");
+        assert_eq!(format_amount(12.345), "12.35");
+        assert_eq!(format_amount(0.12345), "0.1235");
+        assert_eq!(format_amount(0.000123456), "0.00012346");
+    }
+}

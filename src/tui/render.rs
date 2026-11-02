@@ -982,3 +982,447 @@ fn render_asset_breakdown_grouped(f: &mut Frame, area: Rect, portfolio: &Portfol
 
     f.render_widget(list, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::test_support::{app_with, buffer_text, disabled, render, POSITIONS};
+    use crate::tui::DisabledComponents;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    const W: u16 = 140;
+    const H: u16 = 40;
+
+    async fn overview(disabled_names: &[&str]) -> String {
+        let mut app = app_with(POSITIONS).await;
+        app.disabled_components = disabled(disabled_names);
+        render(&app, W, H)
+    }
+
+    fn assert_shows(screen: &str, texts: &[&str]) {
+        for text in texts {
+            assert!(screen.contains(text), "missing {text:?} in\n{screen}");
+        }
+    }
+
+    fn assert_hides(screen: &str, texts: &[&str]) {
+        for text in texts {
+            assert!(!screen.contains(text), "unexpected {text:?} in\n{screen}");
+        }
+    }
+
+    #[test]
+    fn colors_follow_the_sign() {
+        assert_eq!(sign_color(0.0), Color::Green);
+        assert_eq!(sign_color(2.0), Color::Green);
+        assert_eq!(sign_color(-0.1), Color::Red);
+    }
+
+    #[tokio::test]
+    async fn overview_shows_every_component() {
+        let screen = overview(&[]).await;
+        assert_shows(
+            &screen,
+            &[
+                "Portfolio TUI",
+                "Overview & Allocation",
+                "Total Portfolio Value (USD)",
+                "📊",
+                "🟢",
+                "Day PnL $0.00",
+                "%Day +0.00%",
+                "Portfolio Growth",
+                "Weeks Since First Purchase",
+                "Detailed Allocation",
+                "Stocks        32.3%",
+                "Asset Breakdown",
+                "Commodities        6.45%",
+                "Navigation: h/l (tabs)",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn overview_layouts_drop_disabled_components() {
+        let screen = overview(&["tab_bar", "total_value", "help"]).await;
+        assert_hides(
+            &screen,
+            &["Portfolio TUI", "Total Portfolio Value", "Navigation"],
+        );
+        assert_shows(
+            &screen,
+            &["Portfolio Growth", "Detailed Allocation", "Asset Breakdown"],
+        );
+
+        let screen = overview(&["asset_breakdown"]).await;
+        assert_shows(&screen, &["Portfolio Growth", "Detailed Allocation"]);
+        assert_hides(&screen, &["Asset Breakdown"]);
+
+        let screen = overview(&["detailed_allocation"]).await;
+        assert_shows(&screen, &["Portfolio Growth", "Asset Breakdown"]);
+        assert_hides(&screen, &["Detailed Allocation"]);
+
+        let screen = overview(&["detailed_allocation", "asset_breakdown"]).await;
+        assert_shows(&screen, &["Portfolio Growth"]);
+        assert_hides(&screen, &["Detailed Allocation", "Asset Breakdown"]);
+
+        let screen = overview(&["portfolio_growth"]).await;
+        assert_shows(&screen, &["Detailed Allocation", "Asset Breakdown"]);
+        assert_hides(&screen, &["Portfolio Growth"]);
+
+        let screen = overview(&["portfolio_growth", "asset_breakdown"]).await;
+        assert_shows(&screen, &["Detailed Allocation"]);
+        assert_hides(&screen, &["Asset Breakdown"]);
+
+        let screen = overview(&["portfolio_growth", "detailed_allocation"]).await;
+        assert_shows(&screen, &["Asset Breakdown", "Navigation"]);
+        assert_hides(&screen, &["Detailed Allocation"]);
+
+        let screen =
+            overview(&["portfolio_growth", "detailed_allocation", "asset_breakdown"]).await;
+        assert_shows(&screen, &["Total Portfolio Value", "Navigation"]);
+        assert_hides(
+            &screen,
+            &["Detailed Allocation", "Asset Breakdown", "Growth"],
+        );
+    }
+
+    #[tokio::test]
+    async fn total_value_indicators_and_losses() {
+        let mut app = app_with(
+            r#"[{"Name": "Bonds", "Ticker": "TLT", "AssetClass": "Bonds", "Amount": 10}]"#,
+        )
+        .await;
+        app.flash_state = true;
+        app.network_status = NetworkStatus::Partial;
+        let screen = render(&app, W, H);
+        assert_shows(&screen, &["🔄", "🟡", "Day PnL $-10.00", "%Day -1.10%"]);
+
+        app.network_status = NetworkStatus::Disconnected;
+        assert_shows(&render(&app, W, H), &["🔴"]);
+        // Too narrow to center the big text: still drawn.
+        assert_shows(&render(&app, 30, H), &["ortfolio Value (USD)", "%Day -1.1"]);
+    }
+
+    #[tokio::test]
+    async fn loading_until_a_portfolio_arrives() {
+        let mut app = app_with("[]").await;
+        app.portfolio = None;
+        assert_shows(&render(&app, W, H), &["Loading portfolio data..."]);
+        app.current_tab = Tab::Balances;
+        assert_shows(&render(&app, W, H), &["Loading portfolio data..."]);
+    }
+
+    #[tokio::test]
+    async fn growth_chart_series_and_placeholder() {
+        let mut app = app_with(POSITIONS).await;
+        // Without a computed series, the invested amounts (from 400) up to the
+        // current 3,100 are charted, padded by 10%.
+        assert_shows(
+            &render(&app, W, H),
+            &["Portfolio Growth", "│3370│", "│130 │"],
+        );
+
+        app.historic_data = Some(vec![(0.0, 100.0), (4.0, 100.0)]);
+        assert_shows(&render(&app, W, H), &["Portfolio Growth", "105", "95"]);
+
+        app.historic_data = Some(vec![]);
+        assert_shows(&render(&app, W, H), &["No purchase history found"]);
+    }
+
+    #[test]
+    fn chart_bounds_pad_and_stay_positive() {
+        assert_eq!(y_bounds(0.0, 100.0), (0.0, 110.0));
+        assert_eq!(y_bounds(100.0, 100.0), (95.0, 105.0));
+        assert_eq!(y_bounds(1.0, 3.0), (0.8, 3.2));
+        // All values negative: a small range above zero.
+        assert_eq!(y_bounds(-5.0, -5.0), (0.0, 0.1));
+    }
+
+    #[tokio::test]
+    async fn detailed_allocation_lists_six_positions() {
+        let positions: Vec<String> = (1..=7)
+            .map(|i| {
+                format!(
+                    r#"{{"Name": "Cash account number {i}", "AssetClass": "Cash", "Amount": {i}}}"#
+                )
+            })
+            .collect();
+        let app = app_with(&format!("[{}]", positions.join(","))).await;
+        let screen = render(&app, W, H);
+        assert_shows(
+            &screen,
+            &["Cash account  25.0%", "... and 1 more positions"],
+        );
+        assert_hides(&screen, &["Cash account number"]);
+    }
+
+    #[tokio::test]
+    async fn balances_table_shows_every_column() {
+        let mut app = app_with(POSITIONS).await;
+        app.current_tab = Tab::Balances;
+        app.trends.insert("Stocks".into(), crate::tui::Trend::Up);
+        let screen = render(&app, W, H);
+        assert_shows(
+            &screen,
+            &[
+                "Portfolio Balances - Navigation: j/k (select) | e (edit)",
+                "Name                   Class      Amt      Price      Avg        Invested     Value        PnL          %Hist   %Day",
+                "● Stocks               Stocks     2        500.00     425.00     850.00       $1,000.00    150.00       17.65%  1.01%",
+                "○ Cash                 Cash       1000     -          -          -            $1,000.00    -            -       -",
+                "● Bonds                Bonds      10       90.00      100.00     1000.00      $900.00      -100.00      -10.00% -1.10%",
+                "● Gold                 Commoditie 1        200.00     -          -            $200.00      -            -       -",
+                "TOTAL                                                            1850.00      $3,100.00    50.00        2.70%   0.00%",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn balances_columns_can_be_disabled() {
+        let mut app = app_with(POSITIONS).await;
+        app.current_tab = Tab::Balances;
+        app.disabled_components = disabled(&[
+            "asset_class",
+            "amount",
+            "price",
+            "avg_cost",
+            "invested",
+            "pnl",
+            "%hist",
+            "%day",
+        ]);
+        assert_shows(
+            &render(&app, W, H),
+            &[
+                "Name                   Value",
+                "TOTAL                  $3,100.00",
+            ],
+        );
+
+        app.disabled_components = disabled(&[
+            "name",
+            "asset_class",
+            "amount",
+            "price",
+            "avg_cost",
+            "invested",
+            "pnl",
+            "%hist",
+            "%day",
+            "balance",
+        ]);
+        assert_shows(&render(&app, W, H), &["All balance columns are disabled"]);
+    }
+
+    #[tokio::test]
+    async fn balances_title_names_the_mode() {
+        let mut app = app_with(POSITIONS).await;
+        app.current_tab = Tab::Balances;
+        // These modes draw their own screens, so draw the table directly.
+        for (mode, title) in [
+            (
+                AppMode::PurchaseList,
+                "Purchase List: j/k (select) | Enter/a (add) | Esc (back)",
+            ),
+            (
+                AppMode::AddPurchase,
+                "Add Purchase: Tab (next field) | Enter (save) | Esc (cancel)",
+            ),
+            (
+                AppMode::EditPurchase,
+                "Edit Purchase: Tab (next field) | Enter (save) | Esc (cancel)",
+            ),
+        ] {
+            app.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(W, H)).unwrap();
+            terminal
+                .draw(|f| render_balances(f, f.area(), &app))
+                .unwrap();
+            assert_shows(&buffer_text(&terminal), &[title]);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_amount_editor_dialog() {
+        let mut app = app_with(POSITIONS).await;
+        app.current_tab = Tab::Balances;
+        app.mode = AppMode::Edit;
+        app.edit_input = "3".into();
+        let screen = render(&app, W, H);
+        assert_shows(
+            &screen,
+            &[
+                "Edit Mode: Enter (save) | Esc (cancel)",
+                " Edit Position Amount ",
+                "Position: Stocks (Stocks)",
+                "Current Amount: 2",
+                "Current Balance: $1,000.00",
+                "3▌",
+                "New Balance: $1,500.00",
+                "Enter: Save Changes | Esc: Cancel",
+            ],
+        );
+        app.flash_state = true;
+        assert_shows(&render(&app, W, H), &["3█"]);
+
+        // The selection is gone (the file shrank): no dialog.
+        app.selected_position = 10;
+        assert_hides(&render(&app, W, H), &["Edit Position Amount"]);
+    }
+
+    #[tokio::test]
+    async fn amount_preview_guides_the_input() {
+        let mut app = app_with(POSITIONS).await;
+        let stocks = app.portfolio.as_ref().unwrap().positions[0].clone();
+        let cash = app.portfolio.as_ref().unwrap().positions[1].clone();
+        assert_eq!(cash.get_name(), "Cash");
+        let mut preview = |input: &str, position: &PortfolioPosition| {
+            app.edit_input = input.into();
+            let (text, style) = amount_preview(&app, position);
+            (text, style.fg.unwrap())
+        };
+        assert_eq!(
+            preview("", &stocks),
+            ("Enter amount...".into(), Color::Gray)
+        );
+        assert_eq!(
+            preview("-1", &stocks),
+            ("Amount cannot be negative".into(), Color::Red)
+        );
+        assert_eq!(
+            preview("1", &stocks),
+            ("New Balance: $500.00".into(), Color::Green)
+        );
+        assert_eq!(
+            preview("5", &cash),
+            ("New Balance: $5.00".into(), Color::Green)
+        );
+        assert_eq!(
+            preview(".", &cash),
+            ("Enter digits...".into(), Color::Yellow)
+        );
+        assert_eq!(
+            preview("1..", &cash),
+            ("Enter decimal places...".into(), Color::Yellow)
+        );
+        assert_eq!(
+            preview("a.", &cash),
+            ("Invalid number format".into(), Color::Red)
+        );
+        assert_eq!(
+            preview("abc", &cash),
+            ("Invalid number format".into(), Color::Red)
+        );
+    }
+
+    const PURCHASES: &str = r#"[{"Name": "Mystery", "Ticker": "ZZZ", "AssetClass": "Stocks", "Amount": 3,
+        "Purchases": [{"Quantity": 1}, {"Date": "2025-01-01", "Quantity": 2, "Price": 7.5}]}]"#;
+
+    #[tokio::test]
+    async fn purchase_list_shows_newest_first() {
+        let mut app = app_with(PURCHASES).await;
+        app.current_tab = Tab::Balances;
+        app.mode = AppMode::PurchaseList;
+        app.selected_purchase = 1;
+        let screen = render(&app, W, H);
+        assert_shows(
+            &screen,
+            &[
+                "Purchase History - Mystery",
+                "+ Add New Purchase",
+                "2025-01-01 | Qty: 2.0000 | Price: $7.50 | Total: $15.00",
+                "No date | Qty: 1.0000 | Price: Auto-filled",
+                "j/k: Navigate | Enter/a: Add New (first) or Edit (others) | Esc: Back",
+            ],
+        );
+        let first_row = screen.find("2025-01-01").unwrap();
+        assert!(first_row < screen.find("No date").unwrap());
+
+        // The selected row is highlighted: "Add New" in green, purchases in blue.
+        let backgrounds = |app: &crate::tui::App| {
+            let mut terminal = Terminal::new(TestBackend::new(W, H)).unwrap();
+            terminal.draw(|f| ui(f, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            // Row 4 is "Add New", row 5 the newest purchase.
+            (buffer[(1, 4)].bg, buffer[(1, 5)].bg)
+        };
+        assert_eq!(backgrounds(&app), (Color::Reset, Color::Blue));
+        app.selected_purchase = 0;
+        assert_eq!(backgrounds(&app), (Color::Green, Color::Reset));
+
+        app.selected_position = 1;
+        assert_hides(&render(&app, W, H), &["Purchase History"]);
+    }
+
+    #[tokio::test]
+    async fn purchase_forms_show_the_inputs() {
+        let mut app = app_with(PURCHASES).await;
+        app.current_tab = Tab::Balances;
+        app.mode = AppMode::AddPurchase;
+        app.purchase_date_input = "2025-".into();
+        let screen = render(&app, W, H);
+        assert_shows(
+            &screen,
+            &[
+                "Add Purchase - Mystery",
+                "Date (type digits only): 2025-",
+                "Quantity: ",
+                "Price (optional):  (leave empty for auto-fill)",
+                "Tab/↓: Next Field | ↑: Previous Field | Enter: Save | Esc: Cancel",
+            ],
+        );
+
+        app.mode = AppMode::EditPurchase;
+        app.edit_field = EditField::Price;
+        app.purchase_price_input = "7.5".into();
+        let screen = render(&app, W, H);
+        assert_shows(
+            &screen,
+            &["Edit Purchase - Mystery", "Price (optional): 7.5"],
+        );
+        assert_hides(&screen, &["auto-fill"]);
+
+        app.selected_position = 3;
+        assert_hides(&render(&app, W, H), &["Edit Purchase"]);
+    }
+
+    #[test]
+    fn focused_form_field_is_highlighted() {
+        let mut app = crate::tui::App::new(
+            "USD".into(),
+            "[]".into(),
+            "p".into(),
+            DisabledComponents::default(),
+        );
+        app.edit_field = EditField::Quantity;
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(crate::position::from_string(PURCHASES).unwrap().remove(0));
+        app.portfolio = Some(portfolio);
+        app.current_tab = Tab::Balances;
+        app.mode = AppMode::AddPurchase;
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // Rows: tab bar (3), title (3), date (3), quantity (3).
+        let date = &buffer[(1, 7)];
+        let quantity = &buffer[(1, 10)];
+        assert_eq!(date.symbol(), "D");
+        assert_eq!(quantity.symbol(), "Q");
+        assert_eq!(quantity.fg, Color::Yellow);
+        assert_ne!(date.fg, Color::Yellow);
+    }
+
+    #[tokio::test]
+    async fn errors_pop_up_over_any_screen() {
+        let mut app = app_with(POSITIONS).await;
+        app.error_message = Some("Failed to save: disk full".into());
+        let screen = render(&app, W, H);
+        assert_shows(&screen, &["Error", "Failed to save: disk full"]);
+    }
+
+    #[test]
+    fn centered_rect_takes_the_middle() {
+        let area = centered_rect(50, 50, Rect::new(0, 0, 100, 40));
+        assert_eq!(area, Rect::new(25, 10, 50, 20));
+    }
+}
