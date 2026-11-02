@@ -309,6 +309,21 @@ fn is_loopback_host(host: &str) -> bool {
 
 /// Start the HTTP API server and serve until interrupted.
 pub async fn run_server(config: ServerConfig) -> Result<()> {
+    serve_until(config, AnyProvider::configured().clone(), |_| {
+        std::future::pending()
+    })
+    .await
+}
+
+/// [`run_server`] with an explicit quote provider, serving until the future
+/// `shutdown` returns (given the bound address) completes.
+///
+/// The Host allowlist uses the bound port, so port 0 (any free port) works.
+async fn serve_until<F, S>(config: ServerConfig, quotes: AnyProvider, shutdown: S) -> Result<()>
+where
+    S: FnOnce(std::net::SocketAddr) -> F,
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     let addr = format!("{}:{}", config.host, config.port);
 
     if !is_loopback_host(&config.host) {
@@ -328,24 +343,28 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         }
         None => None,
     };
-    let guard = ApiGuard::new(config.port, token);
 
-    let state = ApiState::new(
+    let state = ApiState::with_quotes(
         config.positions_json,
         config.file_path,
         config.policy_file,
         config.currency,
+        quotes,
     )
     .await?;
-    let router = create_guarded_router(state, guard);
 
     let listener = TcpListener::bind(&addr)
         .await
         .wrap_err_with(|| format!("failed to bind to {addr}"))?;
+    let local = listener
+        .local_addr()
+        .wrap_err("failed to read the bound address")?;
+    let router = create_guarded_router(state, ApiGuard::new(local.port(), token));
     println!("API server running on http://{addr}");
     println!("Endpoints: http://{addr}/api");
 
     axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown(local))
         .await
         .wrap_err("API server error")?;
     Ok(())
