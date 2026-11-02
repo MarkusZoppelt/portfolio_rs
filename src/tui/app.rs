@@ -628,4 +628,484 @@ mod tests {
                 {"Date": "2025-01-01", "Quantity": 2, "Price": 10.5}]})
         );
     }
+
+    fn error_of(result: Result<()>) -> String {
+        format!("{:#}", result.unwrap_err())
+    }
+
+    /// The app with the file content swapped for `positions_str`.
+    fn with_file(dir: &tempfile::TempDir, positions_str: &str) -> App {
+        let (mut app, _) = purchase_app(dir);
+        app.positions_str = positions_str.to_string();
+        app
+    }
+
+    #[test]
+    fn test_new_app_starts_on_overview_in_normal_mode() {
+        let app = App::new(
+            "USD".into(),
+            "[]".into(),
+            "p.json".into(),
+            DisabledComponents::default(),
+        );
+        assert_eq!(app.current_tab, Tab::Overview);
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.network_status, NetworkStatus::Connected);
+        assert!(app.portfolio.is_none() && !app.should_quit && !app.flash_state);
+    }
+
+    #[test]
+    fn test_receives_background_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = purchase_app(&dir);
+        // No channels yet.
+        assert!(!app.try_receive_portfolio_update());
+        assert!(!app.try_receive_historic_update());
+
+        let (portfolio_tx, portfolio_rx) = mpsc::unbounded_channel();
+        app.set_portfolio_receiver(portfolio_rx);
+        let (historic_tx, historic_rx) = mpsc::unbounded_channel();
+        app.set_historic_receiver(historic_rx);
+        // Channels without messages.
+        assert!(!app.try_receive_portfolio_update());
+        assert!(!app.try_receive_historic_update());
+
+        portfolio_tx
+            .send((Portfolio::new(), NetworkStatus::Partial))
+            .unwrap();
+        assert!(app.try_receive_portfolio_update());
+        assert_eq!(app.network_status, NetworkStatus::Partial);
+        assert!(app.portfolio.as_ref().unwrap().positions.is_empty());
+        assert!(app.flash_state);
+
+        historic_tx.send(vec![(0.0, 1.0)]).unwrap();
+        assert!(app.try_receive_historic_update());
+        assert_eq!(app.historic_data, Some(vec![(0.0, 1.0)]));
+        assert!(!app.flash_state);
+    }
+
+    #[test]
+    fn test_tabs_wrap_around() {
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            "p".into(),
+            DisabledComponents::default(),
+        );
+        app.next_tab();
+        assert_eq!(app.current_tab, Tab::Balances);
+        app.next_tab();
+        assert_eq!(app.current_tab, Tab::Overview);
+        app.previous_tab();
+        assert_eq!(app.current_tab, Tab::Balances);
+        app.previous_tab();
+        assert_eq!(app.current_tab, Tab::Overview);
+    }
+
+    fn priced(balance: f64) -> Portfolio {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            Some("FAKE"),
+            "Stocks",
+            1.0,
+            balance,
+            PriceStatus::Live,
+        ));
+        portfolio
+    }
+
+    #[test]
+    fn test_trends_follow_value_changes() {
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            "p".into(),
+            DisabledComponents::default(),
+        );
+        let trend = |app: &App| app.trends.get("FAKE").copied();
+        app.update_trends(&priced(10.0));
+        assert_eq!(trend(&app), Some(Trend::Neutral));
+        app.update_trends(&priced(11.0));
+        assert_eq!(trend(&app), Some(Trend::Up));
+        // A sub-cent change keeps the trend.
+        app.update_trends(&priced(11.005));
+        assert_eq!(trend(&app), Some(Trend::Up));
+        app.update_trends(&priced(5.0));
+        assert_eq!(trend(&app), Some(Trend::Down));
+        // A tiny change without a stored trend is neutral.
+        app.trends.clear();
+        app.update_trends(&priced(5.0));
+        assert_eq!(trend(&app), Some(Trend::Neutral));
+    }
+
+    #[test]
+    fn test_trend_colors_flash() {
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            "p".into(),
+            DisabledComponents::default(),
+        );
+        app.trends.insert("up".into(), Trend::Up);
+        app.trends.insert("down".into(), Trend::Down);
+        app.trends.insert("flat".into(), Trend::Neutral);
+        assert_eq!(app.get_trend_color("up", Color::White), Color::Green);
+        assert_eq!(app.get_trend_color("down", Color::White), Color::Red);
+        assert_eq!(app.get_trend_color("flat", Color::White), Color::White);
+        assert_eq!(app.get_trend_color("unknown", Color::Cyan), Color::Cyan);
+        app.flash_state = true;
+        assert_eq!(app.get_trend_color("up", Color::White), Color::LightGreen);
+        assert_eq!(app.get_trend_color("down", Color::White), Color::LightRed);
+    }
+
+    #[test]
+    fn test_position_and_purchase_selection_stay_in_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = purchase_app(&dir);
+        app.portfolio
+            .as_mut()
+            .unwrap()
+            .add_position(PortfolioPosition::for_test(
+                None,
+                "Cash",
+                5.0,
+                5.0,
+                PriceStatus::Live,
+            ));
+        app.select_previous();
+        assert_eq!(app.selected_position, 0);
+        app.select_next();
+        app.select_next();
+        assert_eq!(app.selected_position, 1);
+
+        app.selected_position = 0;
+        app.enter_edit_mode();
+        assert_eq!(app.mode, AppMode::PurchaseList);
+        for _ in 0..3 {
+            app.select_next_purchase();
+        }
+        // "Add New" plus two purchases.
+        assert_eq!(app.selected_purchase, 2);
+        app.select_previous_purchase();
+        app.select_previous_purchase();
+        app.select_previous_purchase();
+        assert_eq!(app.selected_purchase, 0);
+
+        // Out of range (the file shrank): nothing to select or edit.
+        app.mode = AppMode::Normal;
+        app.selected_position = 9;
+        app.select_next_purchase();
+        assert_eq!(app.selected_purchase, 0);
+        app.enter_edit_mode();
+        assert_eq!(app.mode, AppMode::Normal);
+
+        app.portfolio = None;
+        app.selected_position = 0;
+        app.select_next();
+        assert_eq!(app.selected_position, 0);
+    }
+
+    #[test]
+    fn test_purchase_form_modes_reset_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = purchase_app(&dir);
+        app.purchase_date_input = "x".into();
+        app.edit_field = EditField::Price;
+        app.enter_add_purchase_mode();
+        assert_eq!(app.mode, AppMode::AddPurchase);
+        assert_eq!(app.edit_field, EditField::Date);
+        assert_eq!(app.purchase_date_input, "");
+
+        // Row 0 is "Add New": there is no purchase to edit.
+        app.selected_purchase = 0;
+        app.enter_edit_purchase_mode();
+        assert_eq!(app.mode, AppMode::AddPurchase);
+
+        // Without a readable file the price is not prefilled.
+        app.positions_str = "not json".into();
+        app.selected_purchase = 1;
+        app.enter_edit_purchase_mode();
+        assert_eq!(app.purchase_quantity_input, "2");
+        assert_eq!(app.purchase_price_input, "");
+
+        app.edit_input = "1".into();
+        app.exit_edit_mode();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.edit_input.is_empty() && app.purchase_quantity_input.is_empty());
+    }
+
+    #[test]
+    fn test_edit_fields_cycle_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = purchase_app(&dir);
+        app.purchase_date_input = "d".into();
+        app.purchase_quantity_input = "q".into();
+        app.purchase_price_input = "p".into();
+        let mut seen = vec![];
+        for _ in 0..3 {
+            seen.push(app.get_current_input().to_string());
+            app.next_edit_field();
+        }
+        assert_eq!(seen, ["d", "q", "p"]);
+        assert_eq!(app.edit_field, EditField::Date);
+        app.previous_edit_field();
+        assert_eq!(app.edit_field, EditField::Price);
+        app.get_current_input_mut().push('!');
+        app.previous_edit_field();
+        assert_eq!(app.edit_field, EditField::Quantity);
+        app.get_current_input_mut().push('!');
+        app.previous_edit_field();
+        assert_eq!(app.edit_field, EditField::Date);
+        app.get_current_input_mut().push('!');
+        assert_eq!(
+            [
+                &app.purchase_date_input,
+                &app.purchase_quantity_input,
+                &app.purchase_price_input
+            ],
+            ["d!", "q!", "p!"]
+        );
+    }
+
+    #[test]
+    fn test_purchase_form_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, path) = purchase_app(&dir);
+        let before = std::fs::read_to_string(&path).unwrap();
+        let mut check = |date: &str, quantity: &str, price: &str| {
+            app.purchase_date_input = date.into();
+            app.purchase_quantity_input = quantity.into();
+            app.purchase_price_input = price.into();
+            app.save_new_purchase().unwrap_err().to_string()
+        };
+        assert_eq!(check(" ", "1", ""), "Date is required");
+        assert_eq!(check("2025-01-01", "", ""), "Quantity is required");
+        assert_eq!(check("2025-01-01", ".", ""), "Invalid quantity format: .");
+        assert_eq!(
+            check("2025-01-01", "0", ""),
+            "Quantity must be positive, got 0"
+        );
+        assert_eq!(
+            check("2025-01-01", "1", "1.2.3"),
+            "Invalid price format: 1.2.3"
+        );
+        assert_eq!(
+            check("2025-01-01", "1", "-2"),
+            "Price cannot be negative, got -2"
+        );
+        // Nothing was written.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn test_saving_the_forms_writes_and_closes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, path) = purchase_app(&dir);
+        app.mode = AppMode::AddPurchase;
+        app.purchase_date_input = "2026-02-03".into();
+        app.purchase_quantity_input = "1.5".into();
+        app.purchase_price_input = "12".into();
+        app.save_new_purchase().unwrap();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.error_message.is_none());
+        let saved = saved_purchases(&path);
+        assert_eq!(saved["Amount"], json!(4.5));
+        assert_eq!(
+            saved["Purchases"][2],
+            json!({"Date": "2026-02-03", "Quantity": 1.5, "Price": 12.0})
+        );
+
+        // Edit the newest purchase (still the 2025 one in `positions_str`).
+        app.selected_purchase = 1;
+        app.mode = AppMode::EditPurchase;
+        app.purchase_date_input = "2025-01-02".into();
+        app.purchase_quantity_input = "3".into();
+        app.purchase_price_input = String::new();
+        app.save_edited_purchase().unwrap();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(
+            saved_purchases(&path)["Purchases"][1],
+            json!({"Date": "2025-01-02", "Quantity": 3.0})
+        );
+    }
+
+    #[test]
+    fn test_write_failures_are_shown_not_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = purchase_app(&dir);
+        app.data_file_path = dir.path().join("secret.json.gpg").to_string_lossy().into();
+        app.mode = AppMode::AddPurchase;
+        app.purchase_date_input = "2026-02-03".into();
+        app.purchase_quantity_input = "1".into();
+        app.save_new_purchase().unwrap();
+        assert_eq!(app.mode, AppMode::Normal);
+        let message = app.error_message.clone().unwrap();
+        assert!(
+            message.starts_with("Failed to save: refusing to overwrite encrypted"),
+            "{message}"
+        );
+        assert!(!dir.path().join("secret.json.gpg").exists());
+    }
+
+    #[test]
+    fn test_file_update_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = purchase_app(&dir);
+
+        app.data_file_path = dir
+            .path()
+            .join("missing/dir/p.json")
+            .to_string_lossy()
+            .into();
+        let message = error_of(app.save_purchase_to_file("2026-01-01", 1.0, 0.0));
+        assert!(
+            message.starts_with("failed to write to file: "),
+            "{message}"
+        );
+
+        app.positions_str = "{".into();
+        assert!(error_of(app.save_purchase_to_file("2026-01-01", 1.0, 0.0))
+            .starts_with("failed to parse original portfolio data"));
+
+        app.positions_str = r#"[{"Name": "Other", "AssetClass": "Cash"}, 3]"#.into();
+        assert_eq!(
+            error_of(app.save_purchase_to_file("2026-01-01", 1.0, 0.0)),
+            "Could not find position 'Fake' in original data"
+        );
+
+        app.selected_position = 5;
+        assert_eq!(
+            error_of(app.save_purchase_to_file("2026-01-01", 1.0, 0.0)),
+            "Invalid sorted position index: 5"
+        );
+
+        app.portfolio = None;
+        assert_eq!(
+            error_of(app.save_purchase_to_file("2026-01-01", 1.0, 0.0)),
+            "No portfolio available"
+        );
+    }
+
+    const FAKE: &str = r#""Name": "Fake", "Ticker": "FAKE", "AssetClass": "Stocks""#;
+
+    #[test]
+    fn test_add_purchase_to_a_position_without_purchases() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = with_file(&dir, &format!("[{{{FAKE}, \"Amount\": 3}}]"));
+        app.save_purchase_to_file("2026-01-01", 2.0, f64::INFINITY)
+            .unwrap();
+        // A non-finite price is not saved; the amount is the purchase total.
+        assert_eq!(
+            saved_purchases(&dir.path().join("positions.json")),
+            json!({"Amount": 2.0, "Purchases": [{"Date": "2026-01-01", "Quantity": 2.0}]})
+        );
+
+        let app = with_file(&dir, &format!("[{{{FAKE}, \"Purchases\": 5}}]"));
+        assert_eq!(
+            error_of(app.save_purchase_to_file("2026-01-01", 2.0, 0.0)),
+            "Purchases field is not an array"
+        );
+    }
+
+    #[test]
+    fn test_edit_purchase_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let edit = |positions: &str, selected: usize| {
+            let mut app = with_file(&dir, positions);
+            app.selected_purchase = selected;
+            error_of(app.save_purchase_edit_to_file("2026-01-01", 1.0, 1.0))
+        };
+        assert_eq!(
+            edit(&format!("[{{{FAKE}}}]"), 1),
+            "No purchases found for this position"
+        );
+        assert_eq!(
+            edit(&format!("[{{{FAKE}, \"Purchases\": {{}}}}]"), 1),
+            "Purchases field is not an array"
+        );
+        assert_eq!(
+            edit(&format!("[{{{FAKE}, \"Purchases\": []}}]"), 1),
+            "Could not find purchase to edit"
+        );
+        assert_eq!(
+            edit(&format!("[{{{FAKE}, \"Purchases\": [1, 2]}}]"), 0),
+            "Could not find purchase to edit"
+        );
+        assert_eq!(
+            edit(&format!("[{{{FAKE}, \"Purchases\": [1, 2]}}]"), 1),
+            "Invalid purchase data - not an object"
+        );
+    }
+
+    #[test]
+    fn test_json_helpers() {
+        assert_eq!(json_number(f64::NAN), json!(0.0));
+        assert_eq!(json_number(1.5), json!(1.5));
+
+        let mut purchase = Map::new();
+        set_purchase_price(&mut purchase, 2.5);
+        assert_eq!(purchase["Price"], json!(2.5));
+        // Not finite: the old price stays.
+        set_purchase_price(&mut purchase, f64::INFINITY);
+        assert_eq!(purchase["Price"], json!(2.5));
+        set_purchase_price(&mut purchase, 0.0);
+        assert!(!purchase.contains_key("Price"));
+
+        let mut position = Map::new();
+        update_amount_from_purchases(&mut position);
+        assert_eq!(position["Amount"], json!(0.0));
+    }
+
+    #[test]
+    fn test_json_matches_position_by_name_and_ticker() {
+        let positions = crate::position::from_string(
+            r#"[{"Name": "N", "Ticker": "T", "AssetClass": "Stocks", "Amount": 1},
+                {"AssetClass": "Cash", "Amount": 1}]"#,
+        )
+        .unwrap();
+        let (named, bare) = (&positions[0], &positions[1]);
+        let obj = |v: Value| v.as_object().unwrap().clone();
+        assert!(json_matches_position(
+            &obj(json!({"Name": "N", "Ticker": "T", "AssetClass": "Stocks"})),
+            named
+        ));
+        assert!(!json_matches_position(
+            &obj(json!({"Name": "X", "Ticker": "T", "AssetClass": "Stocks"})),
+            named
+        ));
+        assert!(!json_matches_position(
+            &obj(json!({"Name": "N", "Ticker": "X", "AssetClass": "Stocks"})),
+            named
+        ));
+        assert!(!json_matches_position(
+            &obj(json!({"Ticker": "T", "AssetClass": "Stocks"})),
+            named
+        ));
+        assert!(json_matches_position(
+            &obj(json!({"AssetClass": "Cash"})),
+            bare
+        ));
+        assert!(!json_matches_position(
+            &obj(json!({"Name": "N", "AssetClass": "Cash"})),
+            bare
+        ));
+        assert!(!json_matches_position(
+            &obj(json!({"Ticker": "T", "AssetClass": "Cash"})),
+            bare
+        ));
+    }
+
+    #[test]
+    fn test_purchases_newest_first_puts_undated_last() {
+        let purchases: Vec<Purchase> = serde_json::from_str(
+            r#"[{"Quantity": 1}, {"Date": "2024-01-01", "Quantity": 2},
+                {"Date": "2025-01-01", "Quantity": 3}]"#,
+        )
+        .unwrap();
+        let order: Vec<usize> = purchases_newest_first(&purchases)
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(order, [2, 1, 0]);
+    }
 }

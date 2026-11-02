@@ -179,6 +179,109 @@ pub(super) fn fetches_yahoo_history(quotes: &AnyProvider) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::test_support::{now, portfolio, FixtureLive, POSITIONS};
+    use chrono::TimeZone;
+
+    /// `positions` parsed without quotes: tickers stay unvalued.
+    fn unvalued(positions: &str) -> Portfolio {
+        let mut portfolio = Portfolio::new();
+        for position in crate::position::from_string(positions).unwrap() {
+            portfolio.add_position(position);
+        }
+        portfolio
+    }
+
+    #[tokio::test]
+    async fn invested_series_accumulates_purchases_weekly() {
+        let data = get_historic_portfolio_data(&portfolio(POSITIONS).await, now());
+        // 2025-01-06 to 2025-06-02 is 21 weeks: 22 weekly points plus the current value.
+        assert_eq!(data.len(), 23);
+        assert_eq!(data[0], (0.0, 400.0)); // first SPY at its estimated close
+        assert_eq!(data[3], (3.0, 400.0));
+        assert_eq!(data[4], (4.0, 1400.0)); // + 10 TLT at 100
+        assert_eq!(data[8], (8.0, 1850.0)); // + 1 SPY at 450
+        assert_eq!(data[21], (21.0, 1850.0));
+        assert_eq!(data[22], (22.0, 3100.0)); // current total
+    }
+
+    #[test]
+    fn invested_series_needs_dated_priced_purchases() {
+        let undated = unvalued(
+            r#"[{"Ticker": "SPY", "AssetClass": "Stocks", "Amount": 1,
+                 "Purchases": [{"Quantity": 1, "Price": 10}, {"Date": "2025-01-01", "Quantity": 1}]}]"#,
+        );
+        assert!(get_historic_portfolio_data(&undated, now()).is_empty());
+    }
+
+    #[test]
+    fn invested_series_skips_the_current_value_when_unvalued() {
+        let unpriced = unvalued(
+            r#"[{"Ticker": "SPY", "AssetClass": "Stocks", "Amount": 1,
+                 "Purchases": [{"Date": "2025-05-26", "Quantity": 1, "Price": 10}]}]"#,
+        );
+        assert_eq!(
+            get_historic_portfolio_data(&unpriced, now()),
+            vec![(0.0, 10.0), (1.0, 10.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn weekly_series_without_history_uses_spot_prices() {
+        let series =
+            compute_weekly_series_batch(&portfolio(POSITIONS).await, &FixtureLive::new(), now())
+                .await;
+        assert_eq!(series.len(), 22);
+        assert!(series.iter().all(|&(_, total)| total == 3100.0));
+        assert_eq!(series[21].0, 21.0);
+    }
+
+    #[tokio::test]
+    async fn weekly_series_samples_fetched_history() {
+        let mut live = FixtureLive::new();
+        live.fetch_history = true;
+        live.histories.insert("SPY".to_string(), vec![400.0, 500.0]);
+        let series = compute_weekly_series_batch(&portfolio(POSITIONS).await, &live, now()).await;
+        // Week 0: SPY at 400 (2 units), the others at spot, plus 1000 cash.
+        assert_eq!(series[0], (0.0, 2900.0));
+        // The last point is the live total.
+        assert_eq!(series[21], (21.0, 3100.0));
+    }
+
+    #[tokio::test]
+    async fn weekly_series_is_capped_and_handles_future_dates() {
+        let live = FixtureLive::new();
+        let portfolio = portfolio(POSITIONS).await;
+        let later = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            compute_weekly_series_batch(&portfolio, &live, later)
+                .await
+                .len(),
+            MAX_CHART_WEEKS
+        );
+        let before = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            compute_weekly_series_batch(&portfolio, &live, before).await,
+            vec![(0.0, 3100.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn weekly_series_needs_a_dated_purchase_and_keeps_zero_totals() {
+        let live = FixtureLive::new();
+        let undated = unvalued(r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 5}]"#);
+        assert!(compute_weekly_series_batch(&undated, &live, now())
+            .await
+            .is_empty());
+
+        let unpriced = unvalued(
+            r#"[{"Ticker": "SPY", "AssetClass": "Stocks", "Amount": 1,
+                 "Purchases": [{"Date": "2025-05-26", "Quantity": 1}]}]"#,
+        );
+        assert_eq!(
+            compute_weekly_series_batch(&unpriced, &live, now()).await,
+            vec![(0.0, 0.0), (1.0, 0.0)]
+        );
+    }
 
     #[test]
     fn test_sample_weekly_spreads_over_history() {

@@ -156,6 +156,11 @@ pub(super) fn spawn_background<L: LiveData>(
     (portfolio_task, history_task)
 }
 
+/// The error for a frame the terminal failed to draw.
+fn draw_error(error: impl std::fmt::Debug) -> eyre::Report {
+    eyre!("failed to draw terminal frame: {error:?}")
+}
+
 /// Draw, apply background updates and handle one event per iteration until
 /// the user quits. `next_event` returns `None` when no event is pending.
 pub(super) async fn run_app<B: Backend, L: LiveData>(
@@ -165,9 +170,7 @@ pub(super) async fn run_app<B: Backend, L: LiveData>(
     mut next_event: impl FnMut() -> io::Result<Option<Event>>,
 ) -> Result<()> {
     loop {
-        terminal
-            .draw(|f| ui(f, app))
-            .map_err(|e| eyre!("failed to draw terminal frame: {e:?}"))?;
+        terminal.draw(|f| ui(f, app)).map_err(draw_error)?;
 
         // Check for updates from the background tasks (non-blocking)
         app.try_receive_portfolio_update();
@@ -182,5 +185,282 @@ pub(super) async fn run_app<B: Backend, L: LiveData>(
         if app.should_quit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::test_support::{buffer_text, now, portfolio, FixtureLive, POSITIONS};
+    use crate::tui::AppMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+
+    fn launch(positions_str: &str, path: &Path, disabled: &[&str]) -> Launch {
+        Launch {
+            portfolio: Portfolio::new(),
+            currency: "USD".into(),
+            positions_str: positions_str.into(),
+            data_file_path: path.to_string_lossy().into(),
+            tab: None,
+            disabled_components: disabled.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn key(c: char) -> io::Result<Option<Event>> {
+        Ok(Some(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+        ))))
+    }
+
+    /// Events served in order; quits once the script runs out.
+    fn script(events: Vec<io::Result<Option<Event>>>) -> impl FnMut() -> io::Result<Option<Event>> {
+        let mut events = events.into_iter();
+        move || events.next().unwrap_or_else(|| key('q'))
+    }
+
+    #[tokio::test]
+    async fn prepare_app_rejects_unknown_components() {
+        let path = Path::new("/nonexistent/p.json");
+        let err = prepare_app(
+            &FixtureLive::new(),
+            launch("[]", path, &["help", "nope"]),
+            now(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Invalid disabled components: Unknown component: 'nope'"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_app_sets_tab_components_and_chart() {
+        let path = Path::new("/nonexistent/p.json");
+        let mut start = launch(POSITIONS, path, &["help"]);
+        start.portfolio = portfolio(POSITIONS).await;
+        start.tab = Some(Tab::Balances);
+        let app = prepare_app(&FixtureLive::new(), start, now())
+            .await
+            .unwrap();
+        assert_eq!(app.current_tab, Tab::Balances);
+        assert!(app
+            .disabled_components
+            .is_disabled(crate::tui::Component::Help));
+        assert_eq!(app.historic_data.as_ref().map(Vec::len), Some(22));
+        assert_eq!(app.portfolio.as_ref().unwrap().positions.len(), 4);
+        assert_eq!(app.positions_str, POSITIONS);
+
+        // No purchases, no chart; the default tab.
+        let app = prepare_app(&FixtureLive::new(), launch("[]", path, &[]), now())
+            .await
+            .unwrap();
+        assert_eq!(app.current_tab, Tab::Overview);
+        assert_eq!(app.historic_data, None);
+    }
+
+    #[tokio::test]
+    async fn polling_prefers_the_file_and_falls_back() {
+        let live = FixtureLive::new();
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.json");
+        let (fallback, status) = poll_portfolio(&live, &missing, POSITIONS).await;
+        assert_eq!(status, NetworkStatus::Connected);
+        // Sorted by value: Stocks 1000, Cash 1000, Bonds 900, Gold 200.
+        let names: Vec<&str> = fallback.positions.iter().map(|p| p.get_name()).collect();
+        assert_eq!(names.last(), Some(&"Gold"));
+        assert_eq!(names.len(), 4);
+        assert_eq!(poll_history(&live, &missing, now()).await, None);
+
+        let file = dir.path().join("p.json");
+        std::fs::write(
+            &file,
+            r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 7}]"#,
+        )
+        .unwrap();
+        let (from_file, _) = poll_portfolio(&live, &file, POSITIONS).await;
+        assert_eq!(from_file.get_total_value(), 7.0);
+        // Without dated purchases the chart is empty, but still an update.
+        assert_eq!(poll_history(&live, &file, now()).await, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn reload_reads_the_file_and_refreshes_everything() {
+        let live = FixtureLive::new();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("p.json");
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            file.to_string_lossy().into(),
+            DisabledComponents::default(),
+        );
+        // Unreadable file: the known content is revalued.
+        reload(&mut app, &live, now()).await;
+        assert_eq!(app.positions_str, "[]");
+        assert_eq!(app.historic_data, Some(vec![]));
+        assert!(app.flash_state);
+
+        std::fs::write(&file, POSITIONS).unwrap();
+        reload(&mut app, &live, now()).await;
+        assert_eq!(app.positions_str, POSITIONS);
+        assert_eq!(app.portfolio.as_ref().unwrap().get_total_value(), 3100.0);
+        assert_eq!(app.historic_data.as_ref().map(Vec::len), Some(22));
+        assert_eq!(app.trends.len(), 4);
+        assert!(!app.flash_state);
+    }
+
+    #[tokio::test]
+    async fn background_tasks_send_updates_until_the_app_hangs_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("p.json");
+        std::fs::write(&file, POSITIONS).unwrap();
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            file.to_string_lossy().into(),
+            DisabledComponents::default(),
+        );
+        let every = Duration::from_millis(1);
+        let (portfolio_task, history_task) =
+            spawn_background(&mut app, Arc::new(FixtureLive::new()), every, every);
+
+        let (portfolio, status) = app
+            .portfolio_receiver
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(portfolio.get_total_value(), 3100.0);
+        assert_eq!(status, NetworkStatus::Connected);
+        let series = app
+            .historic_receiver
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert!(!series.is_empty());
+
+        // Dropping the receivers stops both tasks.
+        drop(app);
+        let limit = Duration::from_secs(30);
+        tokio::time::timeout(limit, portfolio_task)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(limit, history_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_app_draws_handles_keys_and_quits() {
+        let live = FixtureLive::new();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("p.json");
+        std::fs::write(&file, POSITIONS).unwrap();
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            file.to_string_lossy().into(),
+            DisabledComponents::default(),
+        );
+        // A pending background update is applied on the first iteration.
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(vec![(0.0, 1.0)]).unwrap();
+        app.set_historic_receiver(rx);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let events = script(vec![
+            Ok(None),
+            Ok(Some(Event::Resize(120, 30))),
+            key('r'),
+            key('2'),
+        ]);
+        run_app(&mut terminal, &mut app, &live, events)
+            .await
+            .unwrap();
+
+        assert!(app.should_quit);
+        assert_eq!(app.current_tab, Tab::Balances);
+        assert_eq!(app.positions_str, POSITIONS);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("Portfolio Balances"), "{screen}");
+        assert!(screen.contains("Bonds"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn run_app_reports_event_errors() {
+        let mut app = App::new(
+            "USD".into(),
+            "[]".into(),
+            "/nonexistent/p.json".into(),
+            DisabledComponents::default(),
+        );
+        app.mode = AppMode::Normal;
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let events = script(vec![Err(io::Error::other("tty gone"))]);
+        let err = run_app(&mut terminal, &mut app, &FixtureLive::new(), events)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "tty gone");
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn draw_errors_name_the_frame() {
+        let err = draw_error(io::Error::other("screen gone"));
+        assert_eq!(
+            err.to_string(),
+            r#"failed to draw terminal frame: Custom { kind: Other, error: "screen gone" }"#
+        );
+    }
+
+    #[tokio::test]
+    async fn history_task_waits_for_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("p.json");
+        let mut app = App::new(
+            "USD".into(),
+            POSITIONS.into(),
+            file.to_string_lossy().into(),
+            DisabledComponents::default(),
+        );
+        let every = Duration::from_millis(1);
+        let (_, history_task) =
+            spawn_background(&mut app, Arc::new(FixtureLive::new()), every, every);
+        // The single-threaded test runtime runs the first, fileless rebuild now.
+        tokio::task::yield_now().await;
+        assert!(app.historic_receiver.as_mut().unwrap().try_recv().is_err());
+        // The revaluation falls back to the known content meanwhile.
+        let (portfolio, _) = app
+            .portfolio_receiver
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(portfolio.get_total_value(), 3100.0);
+
+        std::fs::write(&file, POSITIONS).unwrap();
+        let series = app
+            .historic_receiver
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(series.last().map(|p| p.1), Some(3100.0));
+        drop(app);
+        tokio::time::timeout(Duration::from_secs(30), history_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
