@@ -90,6 +90,7 @@
               clippy
               cargo-watch
               cargo-audit
+              cargo-llvm-cov
 
               # Formatters
               alejandra # Nix formatter
@@ -101,6 +102,11 @@
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               libiconv
             ];
+
+          # `cargo coverage` (see .cargo/config.toml) needs llvm-cov and
+          # llvm-profdata from the same LLVM that rustc was built with.
+          LLVM_COV = "${pkgs.rustc.llvm}/bin/llvm-cov";
+          LLVM_PROFDATA = "${pkgs.rustc.llvm}/bin/llvm-profdata";
         };
 
         # Checks for `nix flake check`
