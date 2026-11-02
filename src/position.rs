@@ -12,6 +12,11 @@ use yahoo_finance_api as yahoo;
 use crate::money::{dec, div, percent_change, to_f64, Decimal};
 use crate::services::quotes::{DailyBar, Quote, QuoteError, QuoteProvider};
 
+#[path = "position_io.rs"]
+mod io;
+pub use io::get_historic_price;
+pub(crate) use io::{yahoo_daily_bars, yahoo_latest, yahoo_name, yahoo_previous_close};
+
 // Caches for Yahoo API requests: the last successful response, used when a fetch fails.
 type Cache<K, V> = LazyLock<Mutex<HashMap<K, V>>>;
 static QUOTE_CACHE: Cache<String, Arc<yahoo::YResponse>> = LazyLock::new(Default::default);
@@ -702,39 +707,6 @@ pub fn from_string(data: &str) -> Result<Vec<PortfolioPosition>> {
         .wrap_err("failed to parse portfolio JSON - data is not well-formatted")
 }
 
-// Get the latest price for a ticker, cache on success, fallback to cache on failure
-async fn get_quote_price(ticker: &str) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
-    match yahoo::YahooConnector::new()?
-        .get_latest_quotes(ticker, "1d")
-        .await
-    {
-        Ok(resp) => {
-            let response = Arc::new(resp);
-            remember(&QUOTE_CACHE, ticker.to_string(), Arc::clone(&response));
-            Ok(response)
-        }
-        Err(e) => recall(&QUOTE_CACHE, ticker, e),
-    }
-}
-
-// Try to get the previous close price for daily variation calculations, cache on success, fallback to cache on failure
-async fn get_previous_close(ticker: &str) -> Result<f64, yahoo::YahooError> {
-    let end = OffsetDateTime::now_utc();
-    let start = end - time::Duration::days(7);
-    match yahoo::YahooConnector::new()?
-        .get_quote_history(ticker, start, end)
-        .await
-    {
-        Ok(resp) => {
-            let prev_close =
-                previous_close_at(&resp, Utc::now()).ok_or(yahoo::YahooError::NoResult)?;
-            remember(&PREV_CLOSE_CACHE, ticker.to_string(), prev_close);
-            Ok(prev_close)
-        }
-        Err(e) => recall(&PREV_CLOSE_CACHE, ticker, e),
-    }
-}
-
 /// Calendar date of a bar timestamp in the exchange's time zone.
 fn exchange_date(response: &yahoo::YResponse, timestamp: i64) -> Option<NaiveDate> {
     let offset = response.metadata().map_or(0, |m| i64::from(m.gmtoffset));
@@ -769,42 +741,14 @@ pub fn parse_purchase_date(date_str: &str) -> Option<DateTime<Utc>> {
         .single()
 }
 
-// Daily history between two instants, cache on success, fallback to cache on failure
-pub async fn get_historic_price(
-    ticker: &str,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
-    // SAFETY: Valid chrono timestamps are always valid OffsetDateTime timestamps
-    let start = OffsetDateTime::from_unix_timestamp(from.timestamp())
-        .expect("valid chrono timestamp should convert to OffsetDateTime");
-    let end = OffsetDateTime::from_unix_timestamp(to.timestamp())
-        .expect("valid chrono timestamp should convert to OffsetDateTime");
-    let cache_key = (ticker.to_string(), from.timestamp(), to.timestamp());
-
-    match yahoo::YahooConnector::new()?
-        .get_quote_history(ticker, start, end)
-        .await
-    {
-        Ok(resp) => {
-            let response = Arc::new(resp);
-            remember(&HISTORIC_CACHE, cache_key, Arc::clone(&response));
-            Ok(response)
-        }
-        Err(e) => recall(&HISTORIC_CACHE, &cache_key, e),
-    }
-}
-
-// Try to get the short name for a ticker from Yahoo Finance, cache on success, fallback to cache on failure
-async fn get_quote_name(ticker: &str) -> Result<String, yahoo::YahooError> {
-    match yahoo::YahooConnector::new()?.search_ticker(ticker).await {
-        Ok(resp) => {
-            let item = resp.quotes.first().ok_or(yahoo::YahooError::NoResult)?;
-            remember(&NAME_CACHE, ticker.to_string(), item.short_name.clone());
-            Ok(item.short_name.clone())
-        }
-        Err(e) => recall(&NAME_CACHE, ticker, e),
-    }
+/// `[from, to]` as `time` timestamps for the Yahoo client.
+fn offset_range(from: DateTime<Utc>, to: DateTime<Utc>) -> (OffsetDateTime, OffsetDateTime) {
+    // Valid chrono timestamps are always valid OffsetDateTime timestamps.
+    let convert = |t: DateTime<Utc>| {
+        OffsetDateTime::from_unix_timestamp(t.timestamp())
+            .expect("valid chrono timestamp should convert to OffsetDateTime")
+    };
+    (convert(from), convert(to))
 }
 
 fn positive_finite(price: f64) -> bool {
@@ -856,29 +800,70 @@ fn quote_from_response(symbol: &str, response: &yahoo::YResponse) -> Result<Quot
     })
 }
 
-/// Yahoo-backed lookups for [`crate::services::quotes::YahooProvider`].
-pub(crate) async fn yahoo_latest(symbol: &str) -> Result<Quote, QuoteError> {
-    let response = get_quote_price(symbol)
-        .await
+/// Remember a successful fetch under `key`, or fall back to the value
+/// remembered for it when the fetch failed.
+fn remember_or_recall<K, V, E>(
+    cache: &Mutex<HashMap<K, V>>,
+    key: K,
+    fetched: Result<V, E>,
+) -> Result<V, E>
+where
+    K: Eq + Hash,
+    V: Clone,
+{
+    match fetched {
+        Ok(value) => {
+            remember(cache, key, value.clone());
+            Ok(value)
+        }
+        Err(e) => recall(cache, &key, e),
+    }
+}
+
+/// [`Quote`] from a latest-quotes fetch (or the last good response).
+fn latest_from(
+    symbol: &str,
+    fetched: Result<yahoo::YResponse, yahoo::YahooError>,
+) -> Result<Quote, QuoteError> {
+    let response = remember_or_recall(&QUOTE_CACHE, symbol.to_string(), fetched.map(Arc::new))
         .map_err(|e| QuoteError::Provider(e.to_string()))?;
     quote_from_response(symbol, &response)
 }
 
-pub(crate) async fn yahoo_previous_close(symbol: &str) -> Result<f64, QuoteError> {
-    get_previous_close(symbol)
-        .await
-        .map_err(|e| QuoteError::Provider(e.to_string()))
+/// Previous close (as seen at `now`) from a 7-day history fetch, or the
+/// last good one when the fetch failed. A fetched chart without a previous
+/// close is an error, not a cache fallback.
+fn previous_close_from(
+    symbol: &str,
+    fetched: Result<yahoo::YResponse, yahoo::YahooError>,
+    now: DateTime<Utc>,
+) -> Result<f64, QuoteError> {
+    let prev_close = match fetched {
+        Ok(resp) => previous_close_at(&resp, now)
+            .ok_or(yahoo::YahooError::NoResult)
+            .inspect(|close| remember(&PREV_CLOSE_CACHE, symbol.to_string(), *close)),
+        Err(e) => recall(&PREV_CLOSE_CACHE, symbol, e),
+    };
+    prev_close.map_err(|e| QuoteError::Provider(e.to_string()))
 }
 
-/// Daily bars in `[from, to]`, dated in the exchange's local time zone.
-pub(crate) async fn yahoo_daily_bars(
-    symbol: &str,
+/// A `[from, to]` history fetch, or the last good one for the same range.
+fn history_from(
+    ticker: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    fetched: Result<yahoo::YResponse, yahoo::YahooError>,
+) -> Result<Arc<yahoo::YResponse>, yahoo::YahooError> {
+    let key = (ticker.to_string(), from.timestamp(), to.timestamp());
+    remember_or_recall(&HISTORIC_CACHE, key, fetched.map(Arc::new))
+}
+
+/// Daily bars of a history, dated in the exchange's local time zone.
+fn daily_bars_from(
+    symbol: &str,
+    history: Result<Arc<yahoo::YResponse>, yahoo::YahooError>,
 ) -> Result<Vec<DailyBar>, QuoteError> {
-    let resp = get_historic_price(symbol, from, to)
-        .await
-        .map_err(|e| QuoteError::Provider(e.to_string()))?;
+    let resp = history.map_err(|e| QuoteError::Provider(e.to_string()))?;
     let quotes = resp
         .quotes()
         .map_err(|_| QuoteError::Unavailable(symbol.to_string()))?;
@@ -894,8 +879,22 @@ pub(crate) async fn yahoo_daily_bars(
         .collect())
 }
 
-pub(crate) async fn yahoo_name(symbol: &str) -> Option<String> {
-    get_quote_name(symbol).await.ok()
+/// Short name of the first search hit, or the last good one when the search
+/// failed. A search without hits is `None`, not a cache fallback.
+fn name_from(
+    symbol: &str,
+    fetched: Result<yahoo::YSearchResult, yahoo::YahooError>,
+) -> Option<String> {
+    let name = match fetched {
+        Ok(resp) => resp
+            .quotes
+            .first()
+            .map(|item| item.short_name.clone())
+            .ok_or(yahoo::YahooError::NoResult)
+            .inspect(|name| remember(&NAME_CACHE, symbol.to_string(), name.clone())),
+        Err(e) => recall(&NAME_CACHE, symbol, e),
+    };
+    name.ok()
 }
 
 /// Apply a quote lookup to `position` without dropping it.
@@ -1111,69 +1110,6 @@ mod tests {
     }
 
     use std::fs;
-
-    #[tokio::test]
-    #[ignore = "requires network access to Yahoo Finance"]
-    async fn test_get_quote_name() {
-        let name = get_quote_name("AAPL").await.unwrap();
-        assert_eq!(name, "Apple Inc.");
-
-        let name = get_quote_name("BTC-EUR").await.unwrap();
-        assert_eq!(name, "Bitcoin EUR");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires network access to Yahoo Finance"]
-    async fn test_get_quote_price() {
-        let quote = get_quote_price("AAPL").await.unwrap();
-        assert!(quote.last_quote().unwrap().close > 0.0);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires network access to Yahoo Finance"]
-    async fn test_get_historic_price() {
-        let date = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
-        let quote = get_historic_price("AAPL", date, date + chrono::Duration::days(3))
-            .await
-            .unwrap();
-        assert_eq!(
-            quote.quotes().unwrap().last().unwrap().close,
-            74.35749816894531
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires network access to Yahoo Finance"]
-    async fn test_handle_position() {
-        let mut position = PortfolioPosition {
-            id: None,
-            name: None,
-            ticker: Some("AAPL".to_string()),
-            asset_class: "Stock".to_string(),
-            amount: dec(1.0),
-            last_spot: Decimal::ZERO,
-            price_status: PriceStatus::Live,
-            price_currency: None,
-            price_as_of: None,
-            price_source: None,
-            fx_from_cache: false,
-            excluded_estimate: None,
-            currency: None,
-            runtime: Default::default(),
-            fx_rate: None,
-            purchases: vec![],
-            previous_close: None,
-        };
-
-        let updated_position = handle_position(&mut position)
-            .await
-            .expect("Error handling position");
-        assert_eq!(updated_position.get_name(), "Apple Inc.");
-        assert_eq!(
-            updated_position.get_balance(),
-            updated_position.get_amount() * updated_position.market_price()
-        );
-    }
 
     #[tokio::test]
     async fn test_from_file() {
@@ -1666,5 +1602,225 @@ mod tests {
         let later = evening + chrono::Duration::days(DEFAULT_STALE_AFTER_DAYS + 1);
         mark_stale_at(&mut portfolio, DEFAULT_STALE_AFTER_DAYS, later);
         assert!(portfolio.positions[0].is_stale());
+    }
+
+    fn down(msg: &str) -> yahoo::YahooError {
+        yahoo::YahooError::ServerError(msg.to_string())
+    }
+
+    #[test]
+    fn test_remember_or_recall_falls_back_to_last_good_value() {
+        let cache: Mutex<HashMap<String, f64>> = Mutex::default();
+        let key = || "FAKE".to_string();
+        assert_eq!(
+            remember_or_recall(&cache, key(), Ok::<_, &str>(1.5)),
+            Ok(1.5)
+        );
+        assert_eq!(remember_or_recall(&cache, key(), Err("down")), Ok(1.5));
+        assert_eq!(
+            remember_or_recall(&cache, key(), Ok::<_, &str>(2.0)),
+            Ok(2.0)
+        );
+        assert_eq!(
+            remember_or_recall(&cache, "OTHER".to_string(), Err::<f64, _>("down")),
+            Err("down")
+        );
+    }
+
+    #[test]
+    fn test_latest_from_caches_and_reports_provider_errors() {
+        let days = thin_venue_days();
+        let response = chart(&days, &[Some(10.0), Some(11.0), Some(12.0)], None, None);
+        let quote = latest_from("FAKE.LATEST", Ok(response)).unwrap();
+        assert_eq!(quote.price, 12.0);
+        assert_eq!(quote.currency.as_deref(), Some("EUR"));
+        assert_eq!(quote.as_of.as_deref(), Some("2026-10-26T07:00:00Z"));
+
+        let recalled = latest_from("FAKE.LATEST", Err(down("x"))).unwrap();
+        assert_eq!(recalled.price, 12.0, "last good response is reused");
+
+        let err = latest_from("FAKE.LATEST.NONE", Err(down("boom"))).unwrap_err();
+        assert!(
+            matches!(err, QuoteError::Provider(ref m) if m.contains("boom")),
+            "{err}"
+        );
+
+        // A fetched chart without any price is unavailable, not a provider error.
+        let empty = chart(&days, &[None, None, None], None, None);
+        let err = latest_from("FAKE.LATEST.EMPTY", Ok(empty)).unwrap_err();
+        assert!(matches!(err, QuoteError::Unavailable(ref s) if s == "FAKE.LATEST.EMPTY"));
+    }
+
+    #[test]
+    fn test_previous_close_from_caches_only_found_closes() {
+        let now = DateTime::from_timestamp(meta_time(), 0).unwrap();
+        let symbol = "FAKE.PREV";
+        assert_eq!(
+            previous_close_from(symbol, Ok(five_days(None)), now).unwrap(),
+            100.0
+        );
+        assert_eq!(
+            previous_close_from(symbol, Err(down("x")), now).unwrap(),
+            100.0
+        );
+
+        // A chart without a bar before today is an error, even with a cached value.
+        let day = utc_unix(2026, 10, 22, 7);
+        let only_today = chart(&[day], &[Some(1.0)], None, None);
+        let at_day = DateTime::from_timestamp(day, 0).unwrap();
+        let err = previous_close_from(symbol, Ok(only_today), at_day).unwrap_err();
+        assert!(matches!(err, QuoteError::Provider(_)), "{err}");
+
+        let err = previous_close_from("FAKE.PREV.NONE", Err(down("boom")), now).unwrap_err();
+        assert!(
+            matches!(err, QuoteError::Provider(ref m) if m.contains("boom")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_history_and_daily_bars() {
+        let from = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+        let to = from + chrono::Duration::days(7);
+        let days = thin_venue_days();
+        let response = chart(&days, &[Some(10.0), Some(11.0), Some(12.0)], None, None);
+
+        let history = history_from("FAKE.HIST", from, to, Ok(response));
+        let bars = daily_bars_from("FAKE.HIST", history).unwrap();
+        let dates: Vec<String> = bars.iter().map(|b| b.date.to_string()).collect();
+        assert_eq!(dates, ["2026-10-22", "2026-10-23", "2026-10-26"]);
+        assert_eq!(bars[2].close, 12.0);
+
+        // Same range: the cached history; another range: no fallback.
+        let cached = history_from("FAKE.HIST", from, to, Err(down("x")));
+        assert_eq!(daily_bars_from("FAKE.HIST", cached).unwrap(), bars);
+        let other = history_from(
+            "FAKE.HIST",
+            from,
+            to + chrono::Duration::days(1),
+            Err(down("x")),
+        );
+        let err = daily_bars_from("FAKE.HIST", other).unwrap_err();
+        assert!(matches!(err, QuoteError::Provider(_)), "{err}");
+
+        // A chart without the close array has no bars.
+        let no_close = chart(
+            &days,
+            &[Some(1.0), Some(1.0), Some(1.0)],
+            None,
+            Some("close"),
+        );
+        let err = daily_bars_from("FAKE.HIST", Ok(Arc::new(no_close))).unwrap_err();
+        assert!(matches!(err, QuoteError::Unavailable(ref s) if s == "FAKE.HIST"));
+    }
+
+    fn search(names: &[&str]) -> yahoo::YSearchResult {
+        let quotes = names
+            .iter()
+            .map(|name| {
+                serde_json::from_value(serde_json::json!({
+                    "exchange": "FRA", "shortname": name, "quoteType": "EQUITY",
+                    "symbol": "FAKE", "index": "quotes", "score": 1.0, "typeDisp": "Equity",
+                    "longname": name, "isYahooFinance": true,
+                }))
+                .unwrap()
+            })
+            .collect();
+        yahoo::YSearchResult {
+            count: names.len() as u32,
+            quotes,
+            news: vec![],
+        }
+    }
+
+    #[test]
+    fn test_name_from_first_hit_with_cache_fallback() {
+        let symbol = "FAKE.NAME";
+        assert_eq!(
+            name_from(symbol, Ok(search(&["Fake One", "Fake Two"]))).as_deref(),
+            Some("Fake One")
+        );
+        assert_eq!(
+            name_from(symbol, Err(down("x"))).as_deref(),
+            Some("Fake One")
+        );
+        // No hits is no name, even with a cached one.
+        assert_eq!(name_from(symbol, Ok(search(&[]))), None);
+        assert_eq!(name_from("FAKE.NAME.NONE", Err(down("x"))), None);
+    }
+
+    #[test]
+    fn test_offset_range_keeps_timestamps() {
+        let from = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let to = from + chrono::Duration::days(3);
+        let (start, end) = offset_range(from, to);
+        assert_eq!(start.unix_timestamp(), from.timestamp());
+        assert_eq!(end.unix_timestamp(), to.timestamp());
+    }
+
+    #[tokio::test]
+    async fn test_handle_position_with_fixture_fills_what_it_can() {
+        let provider = crate::services::quotes::FixtureProvider::from_json(
+            r#"{"latest": {"FAKE": {"price": 10.0, "currency": "EUR"},
+                           "FAKEBARE": {"price": 5.0}},
+                "previous_close": {"FAKE": 9.0},
+                "names": {"FAKE": "Fake Fund"},
+                "history": {"FAKE": [{"date": "2025-01-02", "close": 8.0}]}}"#,
+        )
+        .unwrap();
+        let purchase = |date: &str, quantity: f64, price: Option<f64>| Purchase {
+            date: Some(date.to_string()),
+            quantity: dec(quantity),
+            price: price.map(dec),
+            ..Default::default()
+        };
+        let mut fake =
+            PortfolioPosition::for_test(Some("FAKE"), "Stocks", 1.0, 0.0, PriceStatus::Live);
+        fake.purchases = vec![
+            purchase("2025-01-02", 1.0, None),
+            purchase("2030-01-02", 1.0, None),
+            purchase("not a date", 1.0, None),
+            purchase("2025-01-02", 0.0, None),
+            purchase("2025-01-02", 1.0, Some(7.0)),
+        ];
+        let updated = handle_position_with(&provider, &mut fake).await;
+        assert_eq!(updated.price_status(), PriceStatus::Live);
+        assert_eq!(updated.market_price(), 10.0);
+        assert_eq!(updated.price_currency(), Some("EUR"));
+        assert_eq!(updated.previous_close, Some(dec(9.0)));
+        assert_eq!(updated.get_name(), "Fake Fund");
+        let estimates: Vec<Option<Decimal>> = updated
+            .purchases
+            .iter()
+            .map(|p| p.estimated_price)
+            .collect();
+        // Only the unpriced buy with a close on or after its date gets one.
+        assert_eq!(estimates, vec![Some(dec(8.0)), None, None, None, None]);
+
+        // A recorded name is kept; no previous close or name in the fixture.
+        let mut bare =
+            PortfolioPosition::for_test(Some("FAKEBARE"), "Stocks", 1.0, 0.0, PriceStatus::Live);
+        bare.name = Some("Mine".to_string());
+        let updated = handle_position_with(&provider, &mut bare).await;
+        assert_eq!(updated.get_name(), "Mine");
+        assert_eq!(updated.previous_close, None);
+        let mut unnamed =
+            PortfolioPosition::for_test(Some("FAKEBARE"), "Stocks", 1.0, 0.0, PriceStatus::Live);
+        assert_eq!(
+            handle_position_with(&provider, &mut unnamed).await.name,
+            None
+        );
+
+        // No quote: unavailable, nothing else looked up.
+        let mut gone =
+            PortfolioPosition::for_test(Some("FAKEGONE"), "Stocks", 1.0, 3.0, PriceStatus::Live);
+        let updated = handle_position_with(&provider, &mut gone).await;
+        assert_eq!(updated.price_status(), PriceStatus::Unavailable);
+        assert_eq!(updated.price_currency(), None);
+
+        // No ticker: unchanged.
+        let mut cash = PortfolioPosition::for_test(None, "Cash", 5.0, 0.0, PriceStatus::Live);
+        let updated = handle_position_with(&provider, &mut cash).await;
+        assert_eq!(updated.get_balance(), 5.0);
     }
 }
