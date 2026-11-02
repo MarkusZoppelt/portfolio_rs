@@ -411,7 +411,6 @@ impl QuoteProvider for AnyProvider {
 
 /// A non-cached provider: what an [`AnyProvider`] resolves to below the
 /// quote cache. `Y` is the Yahoo backend ([`YahooProvider`] outside tests).
-#[derive(Debug)]
 enum Base<'a, Y> {
     Yahoo(&'a Y),
     Offline,
@@ -602,11 +601,272 @@ mod tests {
             r#"{"latest": {"FAKE": {"price": 2.5, "currency": "EUR"}}}"#,
         )
         .unwrap();
-        match AnyProvider::from_spec(&format!("fixture:{}", path.display())) {
-            Ok(AnyProvider::Fixture(f)) => assert_eq!(f.latest["FAKE"].price, 2.5),
-            other => panic!("unexpected {other:?}"),
-        }
+        let parsed = AnyProvider::from_spec(&format!("fixture:{}", path.display())).unwrap();
+        assert!(matches!(&parsed, AnyProvider::Fixture(f) if f.latest["FAKE"].price == 2.5));
         std::fs::write(&path, "not json").unwrap();
         assert!(AnyProvider::from_spec(&format!("fixture:{}", path.display())).is_err());
+    }
+
+    #[test]
+    fn test_price_source_names() {
+        assert_eq!(PriceSource::Live.as_str(), "live");
+        assert_eq!(PriceSource::Cache.as_str(), "cache");
+        assert_eq!(PriceSource::Fixture.as_str(), "fixture");
+        assert_eq!(PriceSource::default(), PriceSource::Live);
+    }
+
+    fn at(y: i32, m: u32, day: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, day, 0, 0, 0).unwrap()
+    }
+
+    /// Serves fixed bars (or fails) and records every requested window.
+    struct Bars {
+        bars: Option<Vec<DailyBar>>,
+        windows: std::sync::Mutex<Vec<(DateTime<Utc>, DateTime<Utc>)>>,
+    }
+
+    impl Bars {
+        fn new(bars: Option<Vec<DailyBar>>) -> Self {
+            Self {
+                bars,
+                windows: Default::default(),
+            }
+        }
+
+        fn windows(&self) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+            self.windows.lock().unwrap().clone()
+        }
+    }
+
+    impl DailyBarSource for Bars {
+        async fn daily_bars(
+            &self,
+            _symbol: &str,
+            from: DateTime<Utc>,
+            to: DateTime<Utc>,
+        ) -> Result<Vec<DailyBar>, QuoteError> {
+            self.windows.lock().unwrap().push((from, to));
+            self.bars
+                .clone()
+                .ok_or_else(|| QuoteError::Provider("down".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bars_close_on_or_after_fetches_a_week_from_the_date() {
+        let source = Bars::new(Some(bars()));
+        let sat = at(2025, 1, 4);
+        assert_eq!(
+            bars_close_on_or_after(&source, "FAKE", sat).await.unwrap(),
+            11.0
+        );
+        assert_eq!(source.windows(), vec![(sat, at(2025, 1, 11))]);
+
+        let late = bars_close_on_or_after(&source, "FAKE", at(2025, 1, 8)).await;
+        assert!(matches!(late, Err(QuoteError::Unavailable(s)) if s == "FAKE"));
+
+        let down = Bars::new(None);
+        let err = bars_close_on_or_after(&down, "FAKE", sat).await;
+        assert!(matches!(err, Err(QuoteError::Provider(m)) if m == "down"));
+    }
+
+    #[tokio::test]
+    async fn test_bars_close_before_fetches_ten_days_back() {
+        let source = Bars::new(Some(bars()));
+        let mon = at(2025, 1, 6);
+        assert_eq!(bars_close_before(&source, "FAKE", mon).await.unwrap(), 10.0);
+        assert_eq!(source.windows(), vec![(at(2024, 12, 27), at(2025, 1, 7))]);
+
+        let early = bars_close_before(&source, "FAKE", at(2025, 1, 3)).await;
+        assert!(matches!(early, Err(QuoteError::Unavailable(s)) if s == "FAKE"));
+
+        let down = Bars::new(None);
+        assert!(matches!(
+            bars_close_before(&down, "FAKE", mon).await,
+            Err(QuoteError::Provider(_))
+        ));
+    }
+
+    /// Stand-in for the Yahoo backend with distinct values per lookup.
+    struct StubYahoo;
+
+    impl QuoteProvider for StubYahoo {
+        async fn latest(&self, _symbol: &str) -> Result<Quote, QuoteError> {
+            Ok(Quote {
+                price: 7.0,
+                currency: Some("USD".to_string()),
+                as_of: None,
+                source: PriceSource::Live,
+            })
+        }
+        async fn previous_close(&self, _symbol: &str) -> Result<f64, QuoteError> {
+            Ok(6.0)
+        }
+        async fn close_on(&self, _symbol: &str, _date: DateTime<Utc>) -> Result<f64, QuoteError> {
+            Ok(5.0)
+        }
+        async fn close_before(
+            &self,
+            _symbol: &str,
+            _date: DateTime<Utc>,
+        ) -> Result<f64, QuoteError> {
+            Ok(4.0)
+        }
+        async fn name(&self, symbol: &str) -> Option<String> {
+            Some(format!("Stub {symbol}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_yahoo_resolves_to_the_yahoo_backend() {
+        let any = AnyProvider::Yahoo;
+        let base = any.base(&StubYahoo);
+        let date = at(2025, 1, 6);
+        assert_eq!(base.latest("X").await.unwrap().price, 7.0);
+        assert_eq!(base.previous_close("X").await.unwrap(), 6.0);
+        assert_eq!(base.close_on("X", date).await.unwrap(), 5.0);
+        assert_eq!(base.close_before("X", date).await.unwrap(), 4.0);
+        assert_eq!(base.name("X").await.as_deref(), Some("Stub X"));
+    }
+
+    fn cached(inner: AnyProvider, path: Option<std::path::PathBuf>) -> AnyProvider {
+        AnyProvider::Cached(std::sync::Arc::new(
+            crate::services::quote_cache::CachedProvider::new(inner, path, 7, true),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_fixture_resolves_to_itself_not_the_backend() {
+        let any = fixture();
+        let base = any.base(&StubYahoo);
+        let sat = at(2025, 1, 4);
+        assert_eq!(base.latest("FAKE").await.unwrap().price, 2.5);
+        assert_eq!(base.previous_close("FAKE").await.unwrap(), 2.0);
+        assert_eq!(base.close_on("HIST", sat).await.unwrap(), 11.0);
+        assert_eq!(base.close_before("HIST", sat).await.unwrap(), 10.0);
+        assert_eq!(base.name("FAKE").await.as_deref(), Some("Fake Co"));
+    }
+
+    #[tokio::test]
+    async fn test_offline_and_nested_cache_never_reach_the_backend() {
+        let date = at(2025, 1, 6);
+        let nested = cached(AnyProvider::Offline, None);
+        for any in [AnyProvider::Offline, nested] {
+            let base = any.base(&StubYahoo);
+            assert!(matches!(
+                base.latest("X").await,
+                Err(QuoteError::Unavailable(_))
+            ));
+            assert!(base.previous_close("X").await.is_err());
+            assert!(base.close_on("X", date).await.is_err());
+            assert!(base.close_before("X", date).await.is_err());
+            assert_eq!(base.name("X").await, None);
+        }
+    }
+
+    const FIXTURE: &str = r#"{
+        "latest": {"FAKE": {"price": 2.5, "currency": "EUR", "asOf": "2025-01-06T17:00:00Z"},
+                   "ZERO": {"price": 0.0, "currency": "EUR"}},
+        "previous_close": {"FAKE": 2.0, "NEG": -1.0},
+        "close_on": {"FAKE": 1.5},
+        "names": {"FAKE": "Fake Co"},
+        "history": {"HIST": [{"date": "2025-01-03", "close": 10.0},
+                             {"date": "2025-01-06", "close": 11.0}]}
+    }"#;
+
+    fn fixture() -> AnyProvider {
+        AnyProvider::Fixture(Box::new(FixtureProvider::from_json(FIXTURE).unwrap()))
+    }
+
+    #[tokio::test]
+    async fn test_fixture_lookups_through_any_provider() {
+        let any = fixture();
+        let sat = at(2025, 1, 4);
+        let q = any.latest("FAKE").await.unwrap();
+        assert_eq!(q.price, 2.5);
+        assert_eq!(q.currency.as_deref(), Some("EUR"));
+        assert_eq!(q.as_of.as_deref(), Some("2025-01-06T17:00:00Z"));
+        assert_eq!(q.source, PriceSource::Fixture);
+        assert!(any.latest("ZERO").await.is_err(), "non-positive price");
+        assert_eq!(any.previous_close("FAKE").await.unwrap(), 2.0);
+        assert!(any.previous_close("NEG").await.is_err());
+        // Without history, close_on ignores the date.
+        assert_eq!(any.close_on("FAKE", sat).await.unwrap(), 1.5);
+        assert_eq!(any.close_before("FAKE", sat).await.unwrap(), 1.5);
+        assert_eq!(any.close_on_or_after("HIST", sat).await.unwrap(), 11.0);
+        assert_eq!(any.close_before("HIST", sat).await.unwrap(), 10.0);
+        assert!(any.close_on("HIST", at(2025, 1, 7)).await.is_err());
+        assert!(any.close_before("HIST", at(2025, 1, 3)).await.is_err());
+        assert_eq!(any.name("FAKE").await.as_deref(), Some("Fake Co"));
+        assert_eq!(any.name("OTHER").await, None);
+        assert!(any.is_fixture());
+        assert_eq!(any.last_known("FAKE"), None);
+        assert_eq!(any.last_known_as_of("FAKE"), None);
+    }
+
+    #[tokio::test]
+    async fn test_offline_any_provider_fails_every_lookup() {
+        let any = AnyProvider::Offline;
+        let date = at(2025, 1, 6);
+        assert!(matches!(any.latest("X").await, Err(QuoteError::Unavailable(s)) if s == "X"));
+        assert!(any.previous_close("X").await.is_err());
+        assert!(any.close_on("X", date).await.is_err());
+        assert!(any.close_on_or_after("X", date).await.is_err());
+        assert!(any.close_before("X", date).await.is_err());
+        assert_eq!(any.name("X").await, None);
+        assert!(!any.is_fixture());
+        assert_eq!(any.last_known("X"), None);
+        assert_eq!(any.last_known_as_of("X"), None);
+    }
+
+    #[tokio::test]
+    async fn test_cached_any_provider_dispatches_to_the_cache() {
+        let any = cached(fixture(), None);
+        let sat = at(2025, 1, 4);
+        assert_eq!(any.latest("FAKE").await.unwrap().price, 2.5);
+        assert_eq!(any.previous_close("FAKE").await.unwrap(), 2.0);
+        assert_eq!(any.close_on("HIST", sat).await.unwrap(), 11.0);
+        assert_eq!(any.close_on_or_after("HIST", sat).await.unwrap(), 11.0);
+        assert_eq!(any.close_before("HIST", sat).await.unwrap(), 10.0);
+        assert_eq!(any.name("FAKE").await.as_deref(), Some("Fake Co"));
+        assert!(any.is_fixture());
+        // The successful fetch above is now the last known price.
+        assert_eq!(any.last_known("FAKE"), Some((2.5, Some("EUR".to_string()))));
+        assert_eq!(
+            any.last_known_as_of("FAKE").as_deref(),
+            Some("2025-01-06T17:00:00Z")
+        );
+        assert!(!cached(AnyProvider::Offline, None).is_fixture());
+    }
+
+    #[test]
+    fn test_source_names() {
+        assert_eq!(AnyProvider::Yahoo.source_name(), "yahoo");
+        assert_eq!(AnyProvider::Offline.source_name(), "offline");
+        assert_eq!(fixture().source_name(), "fixture");
+        assert_eq!(cached(AnyProvider::Yahoo, None).source_name(), "yahoo");
+        assert_eq!(cached(fixture(), None).source_name(), "fixture");
+    }
+
+    #[tokio::test]
+    async fn test_flush_cache_writes_and_survives_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".p.json.quotes-cache.json");
+        let ok = cached(fixture(), Some(path.clone()));
+        ok.latest("FAKE").await.unwrap();
+        ok.flush_cache();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("\"FAKE\""), "{written}");
+
+        // An unwritable cache only warns.
+        let missing = tmp.path().join("missing").join(".p.json.quotes-cache.json");
+        let bad = cached(fixture(), Some(missing.clone()));
+        bad.latest("FAKE").await.unwrap();
+        bad.flush_cache();
+        assert!(!missing.exists());
+
+        // Providers without a cache have nothing to write.
+        fixture().flush_cache();
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 }

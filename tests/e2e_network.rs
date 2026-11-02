@@ -266,3 +266,12 @@ fn test_sort_output() {
         .success()
         .stdout(str::contains("sorted by current value"));
 }
+
+#[tokio::test]
+#[ignore = "requires network access to Yahoo Finance"]
+async fn test_create_live_portfolio() {
+    let positions_str = std::fs::read_to_string(example_data()).unwrap();
+    let (portfolio, _network_status) =
+        portfolio_rs::services::portfolio_loader::create_live_portfolio(positions_str).await;
+    assert!(!portfolio.positions.is_empty());
+}
