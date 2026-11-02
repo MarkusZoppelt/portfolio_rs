@@ -36,6 +36,9 @@ use crate::{
     validate::{validate_portfolio_file, ValidationReport},
     AppConfig, NetworkStatus, Portfolio, PortfolioPosition, PositionsParseError, Purchase,
 };
+#[path = "state_io.rs"]
+mod io;
+
 /// How long a fetched portfolio (with live quotes) stays fresh before the
 /// next [`AppState::portfolio`] call re-fetches quotes.
 const PORTFOLIO_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -114,8 +117,13 @@ impl AppState {
         Ok(())
     }
 
-    /// Load a workspace directory, reading `positions.json` and `portfolio/policy.toml`.
-    pub async fn load_workspace(&self, dir: &str, cfg: &mut AppConfig) -> Result<()> {
+    /// [`Self::load_workspace`] with an explicit config writer.
+    async fn load_workspace_with(
+        &self,
+        dir: &str,
+        cfg: &mut AppConfig,
+        save: impl FnOnce(&AppConfig) -> Result<()>,
+    ) -> Result<()> {
         let positions_path = PathBuf::from(dir).join("positions.json");
         if !positions_path.exists() {
             bail!(
@@ -140,16 +148,19 @@ impl AppState {
         }
 
         cfg.set_workspace(dir);
-        cfg.save()?;
-        Ok(())
+        save(cfg)
     }
 
-    /// Remember a standalone positions file and clear any workspace.
-    pub async fn load_simple_file(&self, path: &str, cfg: &mut AppConfig) -> Result<()> {
+    /// [`Self::load_simple_file`] with an explicit config writer.
+    async fn load_simple_file_with(
+        &self,
+        path: &str,
+        cfg: &mut AppConfig,
+        save: impl FnOnce(&AppConfig) -> Result<()>,
+    ) -> Result<()> {
         self.load_file(path).await?;
         cfg.set_portfolio_file(path);
-        cfg.save()?;
-        Ok(())
+        save(cfg)
     }
 
     /// Load or reload policy from the default workspace location or an explicit path.
@@ -216,10 +227,10 @@ impl AppState {
         }
         let portfolio = self.fetch_portfolio().await;
         // Cache the enriched JSON (with names filled in from Yahoo) for saving.
-        if let Ok(enriched) = positions_to_string(&portfolio.positions) {
-            let mut positions_json = self.positions_json.write().await;
-            *positions_json = enriched;
-        }
+        // Positions always serialize; were it ever to fail, keep the text.
+        let mut positions_json = self.positions_json.write().await;
+        let loaded = positions_json.clone();
+        *positions_json = positions_to_string(&portfolio.positions).unwrap_or(loaded);
     }
 
     /// Why the loaded positions JSON does not parse, or `None` when it does.
@@ -1025,10 +1036,10 @@ impl PositionKey {
 fn with_position_ids(json: String) -> String {
     // Leave text that does not parse as positions exactly as written, so a
     // parse error's line and column still point into the user's file.
-    if check_positions("", &json).is_err() {
-        return json;
-    }
-    let Ok(mut values) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else {
+    let parsed = check_positions("", &json)
+        .ok()
+        .and_then(|()| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok());
+    let Some(mut values) = parsed else {
         return json;
     };
     if !crate::position::ensure_json_position_ids(&mut values) {
@@ -1438,5 +1449,453 @@ mod tests {
         let perf = state.get_performance().await;
         assert_eq!(perf.invested, summary.total_invested);
         assert_eq!(perf.unrealized_pnl, summary.total_pnl);
+    }
+
+    fn offline_state() -> AppState {
+        AppState::with_quotes("EUR".to_string(), AnyProvider::Offline)
+    }
+
+    /// A config writer into `path` (never the user's real config).
+    fn saver(path: PathBuf) -> impl FnOnce(&AppConfig) -> Result<()> {
+        move |cfg| cfg.save_to(&path)
+    }
+
+    const TWO_MANUAL: &str = r#"[{"Id": "pos_cash", "Name": "Cash", "AssetClass": "Cash", "Amount": 300},
+        {"Id": "pos_house", "Name": "House", "AssetClass": "RealEstate", "Amount": 700}]"#;
+
+    fn workspace(policy: Option<&str>) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("positions.json"), TWO_MANUAL).unwrap();
+        if let Some(policy) = policy {
+            std::fs::create_dir_all(tmp.path().join("portfolio")).unwrap();
+            std::fs::write(tmp.path().join("portfolio/policy.toml"), policy).unwrap();
+        }
+        tmp
+    }
+
+    fn policy_toml() -> String {
+        default_balanced_growth_policy().to_toml().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_load_workspace_reads_positions_and_policy_and_saves_config() {
+        let ws = workspace(Some(&policy_toml()));
+        let dir = ws.path().to_str().unwrap();
+        let cfg_path = ws.path().join("cfg/config.yml");
+        let state = offline_state();
+        let mut cfg = AppConfig::default();
+        state
+            .load_workspace_with(dir, &mut cfg, saver(cfg_path.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(state.workspace_dir().await.as_deref(), Some(dir));
+        let positions_path = ws.path().join("positions.json");
+        assert_eq!(state.file_path().await.as_deref(), positions_path.to_str());
+        let expected_policy = ws.path().join("portfolio/policy.toml");
+        assert_eq!(
+            state.policy_path().await.as_deref(),
+            expected_policy.to_str()
+        );
+        assert_eq!(
+            state.policy().await.unwrap().name,
+            default_balanced_growth_policy().name
+        );
+        assert_eq!(state.get_positions().await.len(), 2);
+        assert_eq!(cfg.workspace_dir.as_deref(), Some(dir));
+        assert_eq!(cfg.portfolio_file, None);
+        let saved = AppConfig::load_from(&cfg_path).unwrap();
+        assert_eq!(saved.workspace_dir.as_deref(), Some(dir));
+    }
+
+    #[tokio::test]
+    async fn test_load_workspace_without_policy_keeps_none() {
+        let ws = workspace(None);
+        let state = offline_state();
+        let mut cfg = AppConfig::default();
+        let cfg_path = ws.path().join("config.yml");
+        state
+            .load_workspace_with(ws.path().to_str().unwrap(), &mut cfg, saver(cfg_path))
+            .await
+            .unwrap();
+        assert!(state.policy().await.is_none());
+        assert!(state.workspace_dir().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_load_workspace_errors_leave_config_unsaved() {
+        let state = offline_state();
+        let mut cfg = AppConfig::default();
+
+        let empty = tempfile::TempDir::new().unwrap();
+        let cfg_path = empty.path().join("config.yml");
+        let err = state
+            .load_workspace_with(
+                empty.path().to_str().unwrap(),
+                &mut cfg,
+                saver(cfg_path.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("workspace does not contain positions.json"),
+            "{err}"
+        );
+        assert!(!cfg_path.exists());
+        assert_eq!(cfg.workspace_dir, None);
+
+        let ws = workspace(Some("not = [valid"));
+        let err = state
+            .load_workspace_with(
+                ws.path().to_str().unwrap(),
+                &mut cfg,
+                saver(cfg_path.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to load policy"),
+            "{err}"
+        );
+        assert!(!cfg_path.exists());
+        assert_eq!(cfg.workspace_dir, None);
+    }
+
+    #[tokio::test]
+    async fn test_load_workspace_reports_config_write_failure() {
+        let ws = workspace(None);
+        // The config's parent directory is a regular file.
+        let blocker = ws.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let mut cfg = AppConfig::default();
+        let err = offline_state()
+            .load_workspace_with(
+                ws.path().to_str().unwrap(),
+                &mut cfg,
+                saver(blocker.join("config.yml")),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("config dir"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_load_simple_file_remembers_file_and_clears_workspace() {
+        let ws = workspace(None);
+        let path = ws.path().join("positions.json");
+        let path = path.to_str().unwrap();
+        let cfg_path = ws.path().join("config.yml");
+        let state = offline_state();
+        *state.workspace_dir.write().await = Some("old".to_string());
+        let mut cfg = AppConfig::default();
+        cfg.set_workspace("old");
+
+        state
+            .load_simple_file_with(path, &mut cfg, saver(cfg_path.clone()))
+            .await
+            .unwrap();
+        assert_eq!(state.file_path().await.as_deref(), Some(path));
+        assert_eq!(state.workspace_dir().await, None);
+        assert_eq!(cfg.portfolio_file.as_deref(), Some(path));
+        assert_eq!(cfg.workspace_dir, None);
+        assert_eq!(
+            AppConfig::load_from(&cfg_path)
+                .unwrap()
+                .portfolio_file
+                .as_deref(),
+            Some(path)
+        );
+
+        let missing = ws.path().join("missing.json");
+        let other_cfg = ws.path().join("other.yml");
+        let err = state
+            .load_simple_file_with(
+                missing.to_str().unwrap(),
+                &mut cfg,
+                saver(other_cfg.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to load portfolio file"),
+            "{err}"
+        );
+        assert!(!other_cfg.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_policy_from_path_or_workspace() {
+        let state = offline_state();
+        let err = state.load_policy(None).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no workspace loaded and no policy path provided"
+        );
+        assert_eq!(state.policy_path().await, None);
+
+        let ws = workspace(Some(&policy_toml()));
+        let explicit = ws.path().join("portfolio/policy.toml");
+        state
+            .load_policy(Some(explicit.to_str().unwrap().to_string()))
+            .await
+            .unwrap();
+        assert!(state.policy().await.is_some());
+
+        *state.policy.write().await = None;
+        *state.workspace_dir.write().await = Some(ws.path().to_str().unwrap().to_string());
+        state.load_policy(None).await.unwrap();
+        assert!(state.policy().await.is_some());
+
+        let missing = ws.path().join("nope.toml");
+        let err = state
+            .load_policy(Some(missing.to_str().unwrap().to_string()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to load policy: "),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_policy_from_toml() {
+        let state = offline_state();
+        state.set_policy_from_toml(&policy_toml()).await.unwrap();
+        let name = state.policy().await.unwrap().name;
+        assert_eq!(name, default_balanced_growth_policy().name);
+
+        let err = state.set_policy_from_toml("not toml [").await.unwrap_err();
+        assert_eq!(err.to_string(), "failed to parse policy TOML");
+        assert_eq!(state.policy().await.unwrap().name, name, "policy unchanged");
+    }
+
+    fn cached(portfolio: Portfolio, age: Duration) -> Option<CachedPortfolio> {
+        Some(CachedPortfolio {
+            portfolio,
+            fetched_at: Instant::now().checked_sub(age).unwrap(),
+        })
+    }
+
+    fn one_cash_position() -> Portfolio {
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(PortfolioPosition::for_test(
+            None,
+            "Cash",
+            42.0,
+            0.0,
+            crate::position::PriceStatus::Live,
+        ));
+        portfolio
+    }
+
+    #[tokio::test]
+    async fn test_expired_portfolio_cache_is_refetched() {
+        let state = offline_state().with_stale_after(7);
+        assert_eq!(state.stale_after_days(), 7);
+        *state.portfolio_cache.write().await = cached(one_cash_position(), Duration::from_secs(1));
+        assert_eq!(state.portfolio().await.positions.len(), 1, "fresh cache");
+
+        *state.portfolio_cache.write().await = cached(
+            one_cash_position(),
+            PORTFOLIO_CACHE_TTL + Duration::from_secs(1),
+        );
+        assert!(
+            state.portfolio().await.positions.is_empty(),
+            "expired cache is replaced by the loaded (empty) positions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_currency_invalidates_cache() {
+        let state = offline_state();
+        *state.portfolio_cache.write().await = cached(one_cash_position(), Duration::from_secs(0));
+        state.set_currency("USD".to_string()).await;
+        assert_eq!(state.currency().await, "USD");
+        assert!(state.portfolio_cache.read().await.is_none());
+        assert!(state.portfolio().await.positions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_position_and_allocation() {
+        let state = offline_state();
+        state.set_positions_json(TWO_MANUAL.to_string()).await;
+
+        let house = state.get_position(1).await.unwrap();
+        assert_eq!(house.name.as_deref(), Some("House"));
+        assert_eq!(house.position_id.as_deref(), Some("pos_house"));
+        let by_id = state
+            .get_position_by_key(&PositionKey::Id("pos_cash".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(by_id.id, 0);
+        let err = state.get_position(2).await.unwrap_err();
+        assert_eq!(err.to_string(), "position not found");
+
+        let allocation = state.get_allocation().await;
+        let rows: Vec<(String, f64, f64)> = allocation
+            .into_iter()
+            .map(|a| (a.asset_class, a.percent, a.value))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("RealEstate".to_string(), 70.0, 700.0),
+                ("Cash".to_string(), 30.0, 300.0)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_and_update_position_with_purchases() {
+        let state = offline_state();
+        let purchase = |quantity: f64| CreatePurchaseRequest {
+            date: Some("2025-01-02".to_string()),
+            quantity,
+            price: Some(10.0),
+            fees: Some(1.0),
+        };
+        let added = state
+            .add_position(CreatePositionRequest {
+                name: None,
+                ticker: Some("FAKE".to_string()),
+                asset_class: "Stocks".to_string(),
+                amount: 2.0,
+                purchases: vec![purchase(2.0)],
+            })
+            .await
+            .unwrap();
+        assert_eq!(added.purchases.len(), 1);
+        assert_eq!(added.purchases[0].price, Some(10.0));
+        assert_eq!(added.purchases[0].fees, Some(1.0));
+        let id = added.position_id.clone().unwrap();
+
+        let updated = state
+            .update_position_by_key(
+                &PositionKey::Id(id.clone()),
+                UpdatePositionRequest {
+                    name: Some("Fake Fund".to_string()),
+                    ticker: Some("FAKE2".to_string()),
+                    asset_class: Some("Bonds".to_string()),
+                    amount: Some(3.0),
+                    purchases: Some(vec![purchase(1.0), purchase(2.0)]),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name.as_deref(), Some("Fake Fund"));
+        assert_eq!(updated.ticker.as_deref(), Some("FAKE2"));
+        assert_eq!(updated.asset_class, "Bonds");
+        assert_eq!(updated.amount, 3.0);
+        let quantities: Vec<f64> = updated.purchases.iter().map(|p| p.quantity).collect();
+        assert_eq!(quantities, vec![1.0, 2.0]);
+        assert_eq!(updated.position_id.as_deref(), Some(id.as_str()));
+
+        let err = state
+            .update_position_by_key(
+                &PositionKey::Id("pos_missing".to_string()),
+                UpdatePositionRequest::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "position not found");
+    }
+
+    #[tokio::test]
+    async fn test_run_doctor_uses_given_or_loaded_workspace() {
+        let state = offline_state();
+        let err = state.run_doctor(None).await.unwrap_err();
+        assert_eq!(err.to_string(), "no workspace directory provided or loaded");
+
+        let ws = workspace(Some(&policy_toml()));
+        let dir = ws.path().to_str().unwrap().to_string();
+        let health = state.run_doctor(Some(dir.clone())).await.unwrap();
+        assert_eq!(health.dir, dir);
+
+        *state.workspace_dir.write().await = Some(dir.clone());
+        let health = state.run_doctor(None).await.unwrap();
+        assert_eq!(health.dir, dir);
+    }
+
+    #[test]
+    fn test_path_to_string_rejects_non_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"bad\xff.json"));
+        let err = path_to_string(path).unwrap_err();
+        assert!(
+            err.to_string().starts_with("path is not valid UTF-8: bad"),
+            "{err}"
+        );
+        assert_eq!(path_to_string(Path::new("ok.json")).unwrap(), "ok.json");
+    }
+
+    #[tokio::test]
+    async fn test_save_errors_without_file_or_directory() {
+        let state = offline_state();
+        let err = state.save().await.unwrap_err();
+        assert_eq!(err.to_string(), "no portfolio file is loaded");
+        assert!(!state.can_save().await);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("missing-dir/positions.json");
+        *state.file_path.write().await = Some(path.to_str().unwrap().to_string());
+        assert!(state.can_save().await);
+        let err = state.save().await.unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("failed to write portfolio file: "),
+            "{err}"
+        );
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_performance_lists_top_movers() {
+        use crate::position::PriceStatus;
+        let mut up =
+            PortfolioPosition::for_test(Some("FAKEUP"), "Stocks", 1.0, 110.0, PriceStatus::Live);
+        up.previous_close = Some(dec(100.0));
+        let mut down =
+            PortfolioPosition::for_test(Some("FAKEDN"), "Stocks", 2.0, 45.0, PriceStatus::Live);
+        down.previous_close = Some(dec(50.0));
+        let mut portfolio = Portfolio::new();
+        portfolio.add_position(up);
+        portfolio.add_position(down);
+        let state = offline_state();
+        *state.portfolio_cache.write().await = cached(portfolio, Duration::from_secs(0));
+
+        let perf = state.get_performance().await;
+        let gainers: Vec<(&str, f64, f64)> = perf
+            .top_gainers
+            .iter()
+            .map(|m| (m.name.as_str(), m.percent, m.pnl))
+            .collect();
+        assert_eq!(gainers, vec![("FAKEUP", 10.0, 10.0)]);
+        assert_eq!(perf.top_losers.len(), 1);
+        assert_eq!(perf.top_losers[0].name, "FAKEDN");
+        assert_eq!(perf.top_losers[0].pnl, -10.0);
+    }
+
+    #[tokio::test]
+    async fn test_report_inputs_default_without_file_or_workspace() {
+        let state = offline_state();
+        assert_eq!(
+            state.report_inputs().await,
+            (String::new(), "portfolio/policy.toml".to_string())
+        );
+        *state.file_path.write().await = Some("p.json".to_string());
+        *state.workspace_dir.write().await = Some("ws".to_string());
+        assert_eq!(
+            state.report_inputs().await,
+            ("p.json".to_string(), "ws/portfolio/policy.toml".to_string())
+        );
+    }
+
+    #[test]
+    fn test_policy_dto_from_reference_matches_owned() {
+        let policy = default_balanced_growth_policy();
+        let by_ref = serde_json::to_value(PolicyDto::from(&policy)).unwrap();
+        let owned = serde_json::to_value(PolicyDto::from(policy)).unwrap();
+        assert_eq!(by_ref, owned);
     }
 }
