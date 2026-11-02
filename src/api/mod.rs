@@ -309,21 +309,34 @@ fn is_loopback_host(host: &str) -> bool {
 
 /// Start the HTTP API server and serve until interrupted.
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    serve_until(config, AnyProvider::configured().clone(), |_| {
-        std::future::pending()
-    })
+    serve_until(
+        config,
+        AnyProvider::configured().clone(),
+        Box::new(serve_forever),
+    )
     .await
 }
 
-/// [`run_server`] with an explicit quote provider, serving until the future
-/// `shutdown` returns (given the bound address) completes.
+/// A future that, once complete, stops the server gracefully.
+type Shutdown = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Builds the [`Shutdown`] future, given the bound address.
+type ShutdownFor = Box<dyn FnOnce(std::net::SocketAddr) -> Shutdown + Send>;
+
+/// [`run_server`]'s shutdown: never, the server runs until interrupted.
+fn serve_forever(_bound: std::net::SocketAddr) -> Shutdown {
+    Box::pin(std::future::pending())
+}
+
+/// [`run_server`] with an explicit quote provider, serving until the
+/// future `shutdown` returns for the bound address completes.
 ///
 /// The Host allowlist uses the bound port, so port 0 (any free port) works.
-async fn serve_until<F, S>(config: ServerConfig, quotes: AnyProvider, shutdown: S) -> Result<()>
-where
-    S: FnOnce(std::net::SocketAddr) -> F,
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
+async fn serve_until(
+    config: ServerConfig,
+    quotes: AnyProvider,
+    shutdown: ShutdownFor,
+) -> Result<()> {
     let addr = format!("{}:{}", config.host, config.port);
 
     if !is_loopback_host(&config.host) {
@@ -496,4 +509,142 @@ async fn delete_position(
         .map_err(map_position_error)?;
     persist(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const CASH_ONLY: &str = r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 1000.0}]"#;
+
+    fn config(host: &str, port: u16, token_file: Option<std::path::PathBuf>) -> ServerConfig {
+        ServerConfig {
+            host: host.to_string(),
+            port,
+            positions_json: CASH_ONLY.to_string(),
+            file_path: None,
+            policy_file: None,
+            currency: "EUR".to_string(),
+            token_file,
+        }
+    }
+
+    /// One HTTP/1.1 request over a fresh connection; the raw response.
+    async fn http(addr: std::net::SocketAddr, host: &str, path: &str, token: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\
+             Connection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn test_serves_on_a_free_port_until_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("token");
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_until(
+            config("127.0.0.1", 0, Some(token_path.clone())),
+            AnyProvider::Offline,
+            Box::new(move |addr| {
+                addr_tx.send(addr).unwrap();
+                Box::pin(async move {
+                    let _ = stop_rx.await;
+                })
+            }),
+        ));
+        let addr = addr_rx.await.unwrap();
+        assert_ne!(addr.port(), 0);
+        let token = std::fs::read_to_string(&token_path).unwrap();
+        let token = token.trim();
+        let host = format!("127.0.0.1:{}", addr.port());
+
+        let health = http(addr, &host, "/health", "").await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.ends_with("ok"), "{health}");
+
+        let summary = http(addr, &host, "/api/portfolio", token).await;
+        assert!(summary.starts_with("HTTP/1.1 200"), "{summary}");
+        assert!(summary.contains("\"totalValue\":1000.0"), "{summary}");
+
+        let no_token = http(addr, &host, "/api/portfolio", "wrong").await;
+        assert!(no_token.starts_with("HTTP/1.1 401"), "{no_token}");
+        // The allowlist uses the bound port, not the configured 0.
+        let wrong_port = http(addr, "127.0.0.1:0", "/health", "").await;
+        assert!(wrong_port.starts_with("HTTP/1.1 421"), "{wrong_port}");
+
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_busy_port_fails_to_bind() {
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = busy.local_addr().unwrap().port();
+        let err = serve_until(
+            config("127.0.0.1", port, None),
+            AnyProvider::Offline,
+            Box::new(serve_forever),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("failed to bind to 127.0.0.1:{port}")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_loopback_host_with_unwritable_token_file_fails_before_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token = tmp.path().join("missing").join("token");
+        // Warns about the non-loopback host, then stops at the token file.
+        let err = serve_until(
+            config("0.0.0.0", 0, Some(token.clone())),
+            AnyProvider::Offline,
+            Box::new(serve_forever),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("failed to write token file"),
+            "{err}"
+        );
+        assert!(!token.exists());
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(["127.0.0.1", "localhost", "::1", "[::1]"]
+            .into_iter()
+            .all(is_loopback_host));
+    }
+
+    #[test]
+    fn test_production_shutdown_never_fires() {
+        let mut shutdown = serve_forever(([127, 0, 0, 1], 3000).into());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..3 {
+            assert!(shutdown.as_mut().poll(&mut cx).is_pending());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_policy_fails_startup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = tmp.path().join("missing.toml");
+        let policy = policy.to_str().unwrap().to_string();
+        let mut cfg = config("127.0.0.1", 0, None);
+        cfg.policy_file = Some(policy.clone());
+        let err = serve_until(cfg, AnyProvider::Offline, Box::new(serve_forever))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("failed to load policy file: {policy}")
+        );
+    }
 }

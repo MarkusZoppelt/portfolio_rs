@@ -503,4 +503,135 @@ mod tests {
         );
         assert_eq!(offline.last_known_entry("FAKE").map(|e| e.0), Some(2.5));
     }
+
+    #[test]
+    fn test_debug_accessors_and_invalid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        write(&path, "{not json");
+        let c = CachedProvider::new(AnyProvider::Offline, Some(path.clone()), -3, false);
+        // An invalid cache is ignored and starts empty.
+        let snap = c.snapshot();
+        assert!(snap.quotes.is_empty() && snap.fx.is_empty() && snap.closes.is_empty());
+        assert!(matches!(c.inner(), AnyProvider::Offline));
+        assert_eq!(c.path(), Some(path.as_path()));
+        let debug = format!("{c:?}");
+        assert!(debug.starts_with("CachedProvider"), "{debug}");
+        assert!(debug.contains("inner: Offline"), "{debug}");
+        assert!(debug.contains("write: false"), "{debug}");
+        // A negative max age is clamped to zero.
+        assert!(debug.contains("max_age: TimeDelta { secs: 0"), "{debug}");
+
+        let no_path = CachedProvider::new(AnyProvider::Offline, None, 7, true);
+        assert_eq!(no_path.path(), None);
+        assert!(no_path.flush().is_ok(), "no path: nothing to write");
+    }
+
+    #[tokio::test]
+    async fn test_flush_only_writes_when_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        let c = CachedProvider::new(
+            fixture(r#"{"latest": {"FAKE": {"price": 2.5, "currency": "EUR"}}}"#),
+            Some(path.clone()),
+            7,
+            true,
+        );
+        c.flush().unwrap();
+        assert!(!path.exists(), "nothing changed yet");
+        c.latest("FAKE").await.unwrap();
+        c.flush().unwrap();
+        assert!(path.exists());
+        std::fs::remove_file(&path).unwrap();
+        c.flush().unwrap();
+        assert!(!path.exists(), "already flushed");
+    }
+
+    #[tokio::test]
+    async fn test_trait_lookups_close_before_name_and_last_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        let date = DateTime::parse_from_rfc3339("2025-01-06T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let live = CachedProvider::new(
+            fixture(
+                r#"{"latest": {"EURUSD=X": {"price": 1.1, "asOf": "2025-01-06T17:00:00Z"}},
+                    "names": {"FAKE": "Fake Co"},
+                    "history": {"FAKE": [{"date": "2025-01-03", "close": 10.0}]}}"#,
+            ),
+            Some(path.clone()),
+            7,
+            true,
+        );
+        assert!(live.is_fixture());
+        assert_eq!(live.name("FAKE").await.as_deref(), Some("Fake Co"));
+        assert_eq!(live.close_before("FAKE", date).await.unwrap(), 10.0);
+        live.latest("EURUSD=X").await.unwrap();
+        // FX entries are looked up in the fx map.
+        assert_eq!(
+            QuoteProvider::last_known_as_of(&live, "EURUSD=X").as_deref(),
+            Some("2025-01-06T17:00:00Z")
+        );
+        assert_eq!(
+            QuoteProvider::last_known(&live, "EURUSD=X"),
+            Some((1.1, None))
+        );
+        assert_eq!(QuoteProvider::last_known_as_of(&live, "OTHER=X"), None);
+        live.flush().unwrap();
+        assert_eq!(live.snapshot().closes["FAKE|before|2025-01-06"], 10.0);
+
+        // Offline, the cached close is served; other dates are unavailable.
+        let offline = CachedProvider::new(AnyProvider::Offline, Some(path), 7, false);
+        assert!(!offline.is_fixture());
+        assert_eq!(offline.name("FAKE").await, None);
+        assert_eq!(offline.close_before("FAKE", date).await.unwrap(), 10.0);
+        assert!(offline
+            .close_before("FAKE", date + Duration::days(1))
+            .await
+            .is_err());
+        // close_on shares the purchase-price key with close_on_or_after.
+        assert!(offline.close_on("FAKE", date).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_last_known_as_of_falls_back_to_fetched_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        write(
+            &path,
+            r#"{"version": 1, "quotes": {"FAKE": {"price": 3.0, "currency": "EUR",
+                "fetchedAt": "2025-01-02T22:00:00Z"}}}"#,
+        );
+        let c = CachedProvider::new(AnyProvider::Offline, Some(path), 7, false);
+        assert_eq!(
+            c.last_known_as_of("FAKE").as_deref(),
+            Some("2025-01-02T22:00:00Z")
+        );
+        assert_eq!(
+            c.last_known_entry("FAKE"),
+            Some((3.0, Some("EUR".to_string())))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cache_stays_usable_after_a_panic_while_locked() {
+        let c = CachedProvider::new(
+            fixture(r#"{"latest": {"FAKE": {"price": 2.5, "currency": "EUR"}}}"#),
+            None,
+            7,
+            false,
+        );
+        c.latest("FAKE").await.unwrap();
+        let poisoned = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _guard = c.lock();
+                panic!("poison the cache lock");
+            })
+            .join()
+        });
+        assert!(poisoned.is_err());
+        assert!(c.state.is_poisoned());
+        assert_eq!(c.last_known_entry("FAKE").map(|e| e.0), Some(2.5));
+    }
 }

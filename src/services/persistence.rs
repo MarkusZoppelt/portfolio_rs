@@ -66,8 +66,9 @@ pub fn store_balance_in_db(portfolio: &Portfolio) -> Result<()> {
     let curr_value = portfolio.get_total_value();
     let curr_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
+    let context = format!("failed to insert balance into database at {curr_time}");
     db.insert(&curr_time, curr_value.to_string().as_bytes())
-        .wrap_err_with(|| format!("failed to insert balance into database at {curr_time}"))?;
+        .wrap_err(context)?;
 
     // block until all operations are stable on disk
     db.flush().wrap_err("failed to flush database to disk")?;
@@ -118,5 +119,51 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&nested), 0o700);
         assert_eq!(mode(&file), 0o600);
+    }
+
+    #[test]
+    fn test_reopening_an_existing_database_keeps_its_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("database");
+        let db = open_private(&dir).unwrap();
+        db.insert("k", "v").unwrap();
+        db.flush().unwrap();
+        drop(db);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = open_private(&dir).unwrap();
+        assert_eq!(db.get("k").unwrap().as_deref(), Some(&b"v"[..]));
+        assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[test]
+    fn test_restrict_permissions_skips_symlinks_and_missing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("database");
+        std::fs::create_dir(&dir).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, b"x").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        restrict_permissions(&dir);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&outside), 0o644, "symlink targets are left alone");
+
+        let missing = tmp.path().join("missing");
+        restrict_permissions(&missing);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn test_database_below_a_file_cannot_be_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let dir = file.join("database");
+        let err = open_private(&dir).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("failed to create {}", dir.display())
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"x");
     }
 }

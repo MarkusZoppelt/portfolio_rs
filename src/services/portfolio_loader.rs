@@ -358,14 +358,14 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
     crate::position::mark_stale(&mut portfolio, crate::position::DEFAULT_STALE_AFTER_DAYS);
 
     if log_errors {
-        for position in portfolio.positions_without_price() {
-            if let Some(ticker) = position.get_ticker() {
-                if position.price_status() == PriceStatus::Unavailable {
-                    eprintln!(
-                        "Warning: no market price for {ticker}; position excluded from totals"
-                    );
-                }
-            }
+        // Only ticker positions lack a market price.
+        let unavailable = portfolio
+            .positions_without_price()
+            .into_iter()
+            .filter(|p| p.price_status() == PriceStatus::Unavailable)
+            .filter_map(|p| p.get_ticker());
+        for ticker in unavailable {
+            eprintln!("Warning: no market price for {ticker}; position excluded from totals");
         }
     }
 
@@ -409,8 +409,6 @@ pub(crate) fn apply_fx(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::read_to_string;
-
     use super::*;
     use crate::services::quotes::{FixtureProvider, OfflineProvider};
 
@@ -439,14 +437,6 @@ mod tests {
             assert!(!err.to_string().contains("4321"), "{err}");
             assert!(err.reason.starts_with("invalid type, expected"), "{err}");
         }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires network access to Yahoo Finance"]
-    async fn test_create_live_portfolio() {
-        let positions_str = read_to_string("example_data.json").unwrap();
-        let (portfolio, _network_status) = create_live_portfolio(positions_str).await;
-        assert!(!portfolio.positions.is_empty());
     }
 
     fn usd_position() -> PortfolioPosition {
@@ -729,5 +719,367 @@ mod tests {
         );
         // FAKEEU 200 + cash 50; FAKEUS excluded, not mixed in.
         assert!((portfolio.get_total_value() - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_load_portfolio_file_reads_plaintext_and_rejects_empty() {
+        assert!(load_portfolio_file("")
+            .unwrap_err()
+            .to_string()
+            .contains("No portfolio file specified"));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("p.json");
+        std::fs::write(&path, "[]").unwrap();
+        assert_eq!(load_portfolio_file(path.to_str().unwrap()).unwrap(), "[]");
+        let missing = tmp.path().join("missing.json");
+        let err = load_portfolio_file(missing.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("failed to read file"), "{err}");
+    }
+
+    /// A stand-in `gpg` that checks its arguments, then runs `body`.
+    #[cfg(unix)]
+    fn fake_gpg(dir: &std::path::Path, name: &str, file: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ \"$1\" = -d ] && [ \"$2\" = '{file}' ] || exit 9\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_gpg_files_are_decrypted_in_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("p.json.gpg");
+        std::fs::write(&file, b"ciphertext").unwrap();
+        let file = file.to_str().unwrap();
+
+        let ok = fake_gpg(tmp.path(), "ok", file, "printf '[]'");
+        assert_eq!(open_with_gpg(file, ok.as_os_str()).unwrap(), "[]");
+        // Only the ciphertext and the fake programs are on disk.
+        assert_eq!(std::fs::read(file).unwrap(), b"ciphertext");
+
+        let fail = fake_gpg(
+            tmp.path(),
+            "fail",
+            file,
+            "echo ' bad passphrase ' >&2; exit 2",
+        );
+        let err = open_with_gpg(file, fail.as_os_str())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(&format!("gpg failed to decrypt {file} (")),
+            "{err}"
+        );
+        assert!(err.ends_with("): bad passphrase"), "{err}");
+
+        let binary = fake_gpg(tmp.path(), "binary", file, "printf '\\377'");
+        let err = open_with_gpg(file, binary.as_os_str()).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+
+        let missing = tmp.path().join("no-such-gpg");
+        let err = open_with_gpg(file, missing.as_os_str()).unwrap_err();
+        assert!(err.to_string().contains("failed to execute gpg"), "{err}");
+    }
+
+    #[test]
+    fn test_check_positions_hides_unparseable_decimals() {
+        let err = check_positions(
+            "p.json",
+            r#"[{"Name": "x", "AssetClass": "Stocks", "Amount": 1, "Purchases": [{"Quantity": "lots"}]}]"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.reason,
+            "invalid value, expected a Decimal type representing a fixed-point number"
+        );
+    }
+
+    use crate::services::quotes::{PriceSource, Quote, QuoteError};
+
+    /// Scripted quotes: fixture prices, prices served "from the cache"
+    /// (without an as-of), last-known entries, and a symbol whose lookup
+    /// panics. One provider type, so one instantiation of
+    /// [`create_live_portfolio_with`] sees every branch.
+    #[derive(Default)]
+    struct Scripted {
+        fixture: FixtureProvider,
+        cached: HashMap<String, f64>,
+        last_known: HashMap<String, (f64, Option<String>)>,
+        as_of: HashMap<String, String>,
+        panic_on: Option<&'static str>,
+    }
+
+    impl QuoteProvider for Scripted {
+        async fn latest(&self, symbol: &str) -> Result<Quote, QuoteError> {
+            assert_ne!(Some(symbol), self.panic_on, "provider bug");
+            match self.cached.get(symbol) {
+                Some(price) => Ok(Quote {
+                    price: *price,
+                    currency: None,
+                    as_of: None,
+                    source: PriceSource::Cache,
+                }),
+                None => self.fixture.latest(symbol).await,
+            }
+        }
+        async fn previous_close(&self, symbol: &str) -> Result<f64, QuoteError> {
+            self.fixture.previous_close(symbol).await
+        }
+        async fn close_on(
+            &self,
+            symbol: &str,
+            date: chrono::DateTime<chrono::Utc>,
+        ) -> Result<f64, QuoteError> {
+            self.fixture.close_on(symbol, date).await
+        }
+        async fn name(&self, symbol: &str) -> Option<String> {
+            self.fixture.name(symbol).await
+        }
+        fn last_known(&self, symbol: &str) -> Option<(f64, Option<String>)> {
+            self.last_known.get(symbol).cloned()
+        }
+        fn last_known_as_of(&self, symbol: &str) -> Option<String> {
+            self.as_of.get(symbol).cloned()
+        }
+    }
+
+    async fn run(provider: Scripted, positions: &str, base: &str) -> (Portfolio, NetworkStatus) {
+        create_live_portfolio_with(Arc::new(provider), positions.to_string(), base, true).await
+    }
+
+    #[tokio::test]
+    async fn test_unparseable_positions_give_an_empty_disconnected_portfolio() {
+        let (portfolio, status) = run(Scripted::default(), "not json", "EUR").await;
+        assert!(portfolio.positions.is_empty());
+        assert_eq!(status, NetworkStatus::Disconnected);
+        // Also without logging.
+        let (portfolio, _) = create_live_portfolio_with(
+            Arc::new(OfflineProvider),
+            "not json".to_string(),
+            "EUR",
+            false,
+        )
+        .await;
+        assert!(portfolio.positions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_panicked_lookup_keeps_the_position_unavailable() {
+        let provider = Scripted {
+            fixture: fake_provider(true),
+            panic_on: Some("BOOM"),
+            ..Default::default()
+        };
+        let positions = r#"[
+            {"Name": "Boom", "Ticker": "BOOM", "AssetClass": "Stocks", "Amount": 3},
+            {"Name": "Fake US", "Ticker": "FAKEUS", "AssetClass": "Stocks", "Amount": 1}
+        ]"#;
+        let (portfolio, status) = run(provider, positions, "USD").await;
+        assert_eq!(portfolio.positions.len(), 2);
+        assert_eq!(status, NetworkStatus::Partial);
+        let boom = by_ticker(&portfolio, "BOOM");
+        assert_eq!(boom.price_status(), PriceStatus::Unavailable);
+        assert_eq!(boom.get_balance(), 0.0);
+        assert_eq!(
+            by_ticker(&portfolio, "FAKEUS").price_status(),
+            PriceStatus::Live
+        );
+    }
+
+    #[tokio::test]
+    async fn test_network_status_counts_only_live_fetches() {
+        let provider = || Scripted {
+            fixture: fake_provider(true),
+            cached: HashMap::from([("CACHED".to_string(), 4.0)]),
+            ..Default::default()
+        };
+        let cash = r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 5}]"#;
+        assert_eq!(
+            run(provider(), cash, "USD").await.1,
+            NetworkStatus::Connected
+        );
+        let live = r#"[{"Ticker": "FAKEUS", "AssetClass": "Stocks", "Amount": 1}]"#;
+        assert_eq!(
+            run(provider(), live, "USD").await.1,
+            NetworkStatus::Connected
+        );
+        // A price served from the cache is not a live fetch.
+        let cached = r#"[{"Ticker": "CACHED", "AssetClass": "Stocks", "Amount": 1}]"#;
+        let quiet = false;
+        let (portfolio, status) =
+            create_live_portfolio_with(Arc::new(provider()), cached.to_string(), "USD", quiet)
+                .await;
+        assert_eq!(status, NetworkStatus::Disconnected);
+        assert_eq!(by_ticker(&portfolio, "CACHED").get_balance(), 4.0);
+    }
+
+    /// Base EUR. Every way an unpriced position can be sized.
+    const EXCLUDED: &str = r#"[
+        {"Name": "Cash", "AssetClass": "Cash", "Amount": 100},
+        {"Ticker": "LIVEEUR", "AssetClass": "Stocks", "Amount": 1,
+         "Purchases": [{"Date": "2025-01-02", "Quantity": 1}]},
+        {"Name": "Live USD", "Ticker": "LIVEUSD", "AssetClass": "Stocks", "Amount": 1},
+        {"Name": "No CHF rate", "Ticker": "FXLESS", "AssetClass": "Stocks", "Amount": 2},
+        {"Name": "No JPY rate", "Ticker": "FXLESS2", "AssetClass": "Stocks", "Amount": 1},
+        {"Name": "Gone GBP", "Ticker": "GONELAST", "AssetClass": "Stocks", "Amount": 2},
+        {"Name": "Gone USD", "Ticker": "GONEASOF", "AssetClass": "Stocks", "Amount": 1},
+        {"Name": "Gone SEK", "Ticker": "GONESEK", "AssetClass": "Stocks", "Amount": 1},
+        {"Name": "Gone base", "Ticker": "GONENONE", "AssetClass": "Stocks", "Amount": 1,
+         "Purchases": [{"Date": "2025-01-02", "Quantity": 1, "Price": 10}]},
+        {"Name": "Gone no cost", "Ticker": "GONEZERO", "AssetClass": "Stocks", "Amount": 1,
+         "Currency": "USD"}
+    ]"#;
+
+    fn excluded_provider() -> Scripted {
+        let fixture = FixtureProvider::from_json(
+            r#"{"latest": {"LIVEEUR": {"price": 10.0, "currency": "EUR"},
+                           "LIVEUSD": {"price": 20.0, "currency": "USD"},
+                           "FXLESS": {"price": 5.0, "currency": "CHF"},
+                           "FXLESS2": {"price": 7.0, "currency": "JPY"},
+                           "EURGBP=X": {"price": 0.8, "currency": "GBP"}},
+                "previous_close": {"LIVEEUR": 9.0},
+                "close_on": {"LIVEEUR": 8.0},
+                "names": {"LIVEEUR": "Live Europe"}}"#,
+        )
+        .unwrap();
+        let known = |p: f64, c: &str| (p, Some(c.to_string()));
+        Scripted {
+            fixture,
+            cached: HashMap::from([("EURUSD=X".to_string(), 1.25)]),
+            last_known: HashMap::from([
+                ("EURCHF=X".to_string(), (0.5, None)),
+                ("GONELAST".to_string(), known(3.0, "GBP")),
+                ("GONEASOF".to_string(), known(2.0, "USD")),
+                ("GONESEK".to_string(), known(4.0, "SEK")),
+            ]),
+            as_of: HashMap::from([
+                ("EURUSD=X".to_string(), "2025-01-02T00:00:00Z".to_string()),
+                ("GONEASOF".to_string(), "2025-01-01T00:00:00Z".to_string()),
+            ]),
+            panic_on: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_excluded_positions_are_sized_from_last_price_or_cost() {
+        let (portfolio, status) = run(excluded_provider(), EXCLUDED, "EUR").await;
+        assert_eq!(status, NetworkStatus::Partial);
+        let estimate = |t: &str| by_ticker(&portfolio, t).excluded_estimate();
+
+        let eur = by_ticker(&portfolio, "LIVEEUR");
+        assert_eq!(eur.get_name(), "Live Europe");
+        assert_eq!(eur.excluded_estimate(), None);
+
+        // FX served from the cache without an as-of: the last-known as-of.
+        let usd = by_ticker(&portfolio, "LIVEUSD");
+        assert_eq!(usd.fx_rate(), Some(0.8));
+        assert_eq!(usd.get_balance(), 16.0);
+        assert!(usd.fx_from_cache);
+        assert_eq!(
+            usd.runtime.fx_as_of.as_deref(),
+            Some("2025-01-02T00:00:00Z")
+        );
+
+        // Native price, no current FX: the last known rate (2 EUR per CHF).
+        let chf = by_ticker(&portfolio, "FXLESS");
+        assert_eq!(chf.price_status(), PriceStatus::FxUnavailable);
+        assert_eq!(
+            chf.excluded_estimate(),
+            Some((dec(20.0), ExcludedBasis::LastPrice))
+        );
+        assert_eq!(chf.runtime.estimate_assumed_as_of, None);
+
+        // Native price, no rate at all, no cost: nothing to estimate.
+        let jpy = by_ticker(&portfolio, "FXLESS2");
+        assert_eq!(jpy.excluded_estimate(), None);
+        assert!(!jpy.runtime.estimate_current_fx);
+
+        // Cached last price; its FX pair is fetched only for this estimate.
+        let gbp = by_ticker(&portfolio, "GONELAST");
+        assert_eq!(gbp.price_status(), PriceStatus::Unavailable);
+        assert_eq!(
+            gbp.excluded_estimate(),
+            Some((dec(7.5), ExcludedBasis::LastPrice))
+        );
+        assert_eq!(
+            gbp.runtime.estimate_assumed_as_of.as_deref(),
+            Some("unknown")
+        );
+
+        let asof = by_ticker(&portfolio, "GONEASOF");
+        assert_eq!(
+            asof.excluded_estimate(),
+            Some((dec(1.6), ExcludedBasis::LastPrice))
+        );
+        assert_eq!(
+            asof.runtime.estimate_assumed_as_of.as_deref(),
+            Some("2025-01-01T00:00:00Z")
+        );
+
+        // Last price in a currency without any rate, and no cost basis.
+        assert_eq!(estimate("GONESEK"), None);
+        assert!(!by_ticker(&portfolio, "GONESEK").runtime.estimate_current_fx);
+
+        assert_eq!(
+            estimate("GONENONE"),
+            Some((dec(10.0), ExcludedBasis::CostBasisAssumedBase))
+        );
+        assert_eq!(estimate("GONEZERO"), None);
+
+        // 100 cash + 10 LIVEEUR + 16 LIVEUSD; the rest is excluded.
+        assert_eq!(portfolio.get_total_value(), 126.0);
+    }
+
+    #[tokio::test]
+    async fn test_excluded_cost_basis_in_minor_units_and_foreign_currency() {
+        // Unpriced and only a recorded currency: pence need no FX request,
+        // USD is converted at the current rate (flagged).
+        let positions = r#"[
+            {"Name": "Pence Co", "Ticker": "PENCE", "AssetClass": "Stocks", "Amount": 2,
+             "Currency": "GBp",
+             "Purchases": [{"Date": "2025-01-02", "Quantity": 2, "Price": 150}]},
+            {"Name": "Dollar Co", "Ticker": "DOLLAR", "AssetClass": "Stocks", "Amount": 1,
+             "Currency": "USD",
+             "Purchases": [{"Date": "2025-01-02", "Quantity": 1, "Price": 10}]}
+        ]"#;
+        let provider = Scripted {
+            fixture: FixtureProvider::from_json(
+                r#"{"latest": {"GBPUSD=X": {"price": 1.25, "currency": "USD"}}}"#,
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let (portfolio, status) = run(provider, positions, "GBP").await;
+        assert_eq!(status, NetworkStatus::Disconnected);
+        let pence = by_ticker(&portfolio, "PENCE");
+        // 2 * 150 GBp = 3 GBP
+        assert_eq!(
+            pence.excluded_estimate(),
+            Some((dec(3.0), ExcludedBasis::CostBasis))
+        );
+        assert!(!pence.runtime.estimate_current_fx);
+        let dollar = by_ticker(&portfolio, "DOLLAR");
+        assert_eq!(
+            dollar.excluded_estimate(),
+            Some((dec(8.0), ExcludedBasis::CostBasis))
+        );
+        assert!(dollar.runtime.estimate_current_fx);
+    }
+
+    #[test]
+    fn test_apply_fx_unrepresentable_rate_is_fx_unavailable() {
+        let mut fx = HashMap::new();
+        // Positive and finite, but too small for a Decimal: no exact rate.
+        fx.insert("EURUSD=X".to_string(), Some(1e-300));
+        let mut position = usd_position();
+        apply_fx(&mut position, "EUR", &fx);
+        assert_eq!(position.fx_rate(), None);
+        assert_eq!(position.price_status(), PriceStatus::FxUnavailable);
     }
 }
