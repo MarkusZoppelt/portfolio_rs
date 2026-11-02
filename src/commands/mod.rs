@@ -14,6 +14,7 @@ pub mod portfolio;
 pub mod report;
 pub mod review;
 pub mod simulate;
+pub mod tui_io;
 pub mod validate;
 pub mod workspace;
 

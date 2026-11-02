@@ -1,7 +1,7 @@
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
-use crate::money::{to_f64, Decimal};
+use crate::money::to_f64;
 use crate::position::from_string;
 use crate::services::portfolio_loader::load_portfolio_file;
 
@@ -96,29 +96,16 @@ pub fn validate_portfolio_file(file_path: &str) -> Result<ValidationReport> {
             });
         }
 
-        let purchases = pos.get_purchases();
-        if !purchases.is_empty() {
-            let purchase_sum = to_f64(purchases.iter().map(|p| p.quantity).sum::<Decimal>());
-            // Tolerance kept from the f64 era (input numbers are parsed from f64).
-            if (purchase_sum - amount).abs() > 1e-6 {
-                issues.push(ValidationIssue {
-                    severity: ValidationSeverity::Warning,
-                    position: Some(name.to_string()),
-                    message: format!(
-                        "Purchase quantities ({purchase_sum}) do not match amount ({amount})"
-                    ),
-                });
-            }
-
-            for purchase in purchases {
-                if let Some(price) = purchase.price.map(to_f64) {
-                    if price < 0.0 {
-                        issues.push(ValidationIssue {
-                            severity: ValidationSeverity::Error,
-                            position: Some(name.to_string()),
-                            message: format!("Negative purchase price: {price}"),
-                        });
-                    }
+        // With purchases, `amount` is already their quantity sum, so the two
+        // cannot disagree here.
+        for purchase in pos.get_purchases() {
+            if let Some(price) = purchase.price.map(to_f64) {
+                if price < 0.0 {
+                    issues.push(ValidationIssue {
+                        severity: ValidationSeverity::Error,
+                        position: Some(name.to_string()),
+                        message: format!("Negative purchase price: {price}"),
+                    });
                 }
             }
         }

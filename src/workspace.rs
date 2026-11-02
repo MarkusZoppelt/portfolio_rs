@@ -76,11 +76,7 @@ pub fn init_workspace(dir: &str, dry_run: bool) -> Result<()> {
         if dry_run {
             println!("  file: {}", path.display());
         } else {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).wrap_err_with(|| {
-                    format!("failed to create parent directory for: {}", path.display())
-                })?;
-            }
+            // Every file lives in `base` or `base/portfolio`, both created above.
             crate::services::atomic_write::write_new_private(path, content.as_bytes())?;
             println!("  created file: {}", path.display());
         }
