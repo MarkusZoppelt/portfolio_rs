@@ -58,3 +58,28 @@ fn issue_line(icon: &str, issue: &ValidationIssue) -> String {
         None => format!("{icon} {}", issue.message),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue(position: Option<&str>) -> ValidationIssue {
+        ValidationIssue {
+            severity: ValidationSeverity::Warning,
+            position: position.map(str::to_string),
+            message: "Position has zero amount".to_string(),
+        }
+    }
+
+    #[test]
+    fn issue_line_names_the_position_when_there_is_one() {
+        assert_eq!(
+            issue_line("❌", &issue(Some("Fake ETF"))),
+            "❌ Fake ETF: Position has zero amount"
+        );
+        assert_eq!(
+            issue_line("⚠️ ", &issue(None)),
+            "⚠️  Position has zero amount"
+        );
+    }
+}

@@ -191,4 +191,61 @@ mod tests {
 
         assert!(!dir.exists());
     }
+
+    #[test]
+    fn test_init_workspace_reports_uncreatable_directories() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("file");
+        fs::write(&file, "").unwrap();
+        let base = file.join("ws");
+        let err = init_workspace(base.to_str().unwrap(), false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("failed to create directory: {}", base.display())
+        );
+
+        // `portfolio` is a file, so its subdirectories cannot be created.
+        fs::write(tmp.path().join("portfolio"), "").unwrap();
+        let err = init_workspace(tmp.path().to_str().unwrap(), false).unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to create directory: "),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_init_workspace_dry_run_on_existing_workspace_creates_nothing_new() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        init_workspace(dir, false).unwrap();
+        fs::remove_file(tmp.path().join("CLAUDE.md")).unwrap();
+        init_workspace(dir, true).unwrap();
+        assert!(!tmp.path().join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn test_init_agent_files() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        init_agent_files(dir, true).unwrap();
+        assert!(!tmp.path().join("AGENTS.md").exists());
+
+        fs::write(tmp.path().join("CLAUDE.md"), "mine").unwrap();
+        init_agent_files(dir, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap(),
+            AGENTS_MD_TEMPLATE
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap(),
+            "mine"
+        );
+
+        let missing = tmp.path().join("missing");
+        let err = init_agent_files(missing.to_str().unwrap(), false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("Directory does not exist: {}", missing.display())
+        );
+    }
 }

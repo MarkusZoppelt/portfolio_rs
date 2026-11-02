@@ -43,5 +43,16 @@ mod tests {
         assert_eq!(ThemeMode::parse("DARK"), Some(ThemeMode::Dark));
         assert_eq!(ThemeMode::parse("light"), Some(ThemeMode::Light));
         assert_eq!(ThemeMode::parse("invalid"), None);
+        assert_eq!(ThemeMode::parse(" d "), Some(ThemeMode::Dark));
+        assert_eq!(ThemeMode::parse("L"), Some(ThemeMode::Light));
+    }
+
+    #[test]
+    fn test_theme_mode_display_roundtrips_through_parse() {
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            assert_eq!(ThemeMode::parse(&mode.to_string()), Some(mode));
+        }
+        assert_eq!(ThemeMode::Dark.to_string(), "dark");
+        assert_eq!(ThemeMode::Light.to_string(), "light");
     }
 }

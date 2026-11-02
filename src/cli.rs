@@ -961,6 +961,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_gain_factor_rejects_malformed_input() {
+        assert_eq!(
+            parse_gain_factor("stocks").unwrap_err(),
+            "expected CLASS=FACTOR, got 'stocks'"
+        );
+        assert_eq!(parse_gain_factor(" =2").unwrap_err(), "empty class");
+        assert_eq!(
+            parse_gain_factor("stocks=lots").unwrap_err(),
+            "factor 'lots' is not a number or 'never'"
+        );
+    }
+
+    #[test]
     fn gain_factor_repeated_class_keeps_the_last_flag() {
         let opts = crate::mcp::analytics::PolicyOptions {
             gain_factors: vec![

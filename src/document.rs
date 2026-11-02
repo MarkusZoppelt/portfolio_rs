@@ -115,4 +115,36 @@ mod tests {
         write_dated_document(&path, "real", false, "document", "hint").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "real");
     }
+
+    #[test]
+    fn test_paths() {
+        let dir = Path::new("/tmp/ws");
+        assert_eq!(
+            weekly_report_path(dir, "2026-01-05"),
+            Path::new("/tmp/ws/portfolio/reports/2026-01-05-weekly.md")
+        );
+        let today = today();
+        assert_eq!(today.len(), 10, "{today}");
+        assert_eq!(
+            decision_path(dir, "Trim Crypto & Gold!"),
+            dir.join(format!("portfolio/decisions/{today}-trim-crypto--gold.md"))
+        );
+    }
+
+    #[test]
+    fn test_write_dated_document_reports_unwritable_paths() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let err =
+            write_dated_document(&file.join("doc.md"), "x", false, "document", "hint").unwrap_err();
+        assert!(
+            err.to_string().starts_with("failed to create directory: "),
+            "{err}"
+        );
+
+        // A path without a parent cannot be written either.
+        let err = write_dated_document(Path::new(""), "x", false, "report", "hint").unwrap_err();
+        assert_eq!(err.to_string(), "failed to write report: ");
+    }
 }
