@@ -289,10 +289,8 @@ fn split_internal(
         if securities == 0.0 || moved == 0.0 || securities.signum() != moved.signum() {
             return;
         }
+        // `deposits` is only `Some` for a cash position in `out`: n_cash ≥ 1.
         let n_cash = out.keys().filter(|id| is_cash(id)).count();
-        if n_cash == 0 {
-            return;
-        }
         let matched = moved.abs().min(securities.abs());
         let sec_share = matched / securities.abs();
         let cash_internal = -securities.signum() * matched;

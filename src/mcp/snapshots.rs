@@ -71,21 +71,29 @@ fn complete_str() -> String {
 /// `<workspace>/portfolio/history` > `$XDG_DATA_HOME/portfolio_rs` >
 /// `~/.local/share/portfolio_rs`. Never the CWD.
 pub fn data_dir(explicit: Option<&Path>, workspace: Option<&Path>) -> Option<PathBuf> {
+    data_dir_with(explicit, workspace, |k| std::env::var_os(k))
+}
+
+/// [`data_dir`] with the environment lookup injected.
+fn data_dir_with(
+    explicit: Option<&Path>,
+    workspace: Option<&Path>,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let var = |k| env(k).filter(|v| !v.is_empty());
     if let Some(d) = explicit {
         return Some(d.to_path_buf());
     }
-    if let Some(d) = std::env::var_os("PORTFOLIO_RS_DATA_DIR").filter(|v| !v.is_empty()) {
+    if let Some(d) = var("PORTFOLIO_RS_DATA_DIR") {
         return Some(PathBuf::from(d));
     }
     if let Some(ws) = workspace {
         return Some(ws.join("portfolio").join("history"));
     }
-    if let Some(d) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+    if let Some(d) = var("XDG_DATA_HOME") {
         return Some(PathBuf::from(d).join("portfolio_rs"));
     }
-    std::env::var_os("HOME")
-        .filter(|v| !v.is_empty())
-        .map(|h| PathBuf::from(h).join(".local/share/portfolio_rs"))
+    var("HOME").map(|h| PathBuf::from(h).join(".local/share/portfolio_rs"))
 }
 
 pub fn snapshots_path(data_dir: &Path, portfolio_id: &str) -> PathBuf {

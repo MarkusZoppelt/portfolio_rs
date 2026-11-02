@@ -263,9 +263,20 @@ impl PortfolioServer {
         })
     }
 
-    /// The CLI context with follow-ups naming MCP tools instead of CLI commands.
-    async fn context(&self) -> eyre::Result<crate::context::PortfolioContext> {
-        let mut ctx = self.served.state.get_context().await?;
+    /// The CLI context with follow-ups naming MCP tools instead of CLI
+    /// commands; `invalid_data` when the positions file does not parse.
+    async fn context(&self) -> Result<crate::context::PortfolioContext, ToolError> {
+        self.check_data().await?;
+        // AppState::get_context without its never-failing Result.
+        let state = &self.served.state;
+        let portfolio = state.portfolio().await;
+        let network_status = format!("{:?}", *state.network_status.read().await);
+        let mut ctx = crate::context::PortfolioContext::from_portfolio_with_policy(
+            &portfolio,
+            &state.currency().await,
+            &network_status,
+            state.policy().await.as_ref(),
+        );
         ctx.set_follow_up_commands(vec![
             "get_positions".to_string(),
             "get_allocation".to_string(),
@@ -872,16 +883,15 @@ impl PortfolioServer {
             if tx.amount.is_some() || tx.amount_base.is_some() {
                 continue;
             }
+            // Every transaction comes from a position; only manual ones count.
             let Some(p) = portfolio
                 .positions
                 .iter()
                 .find(|p| p.id() == Some(tx.position_id.as_str()))
+                .filter(|p| p.get_ticker().is_none() && !p.is_cash())
             else {
                 continue;
             };
-            if p.get_ticker().is_some() || p.is_cash() {
-                continue;
-            }
             let quantity = crate::money::to_f64(p.quantity_dec());
             if quantity > 0.0 {
                 tx.price = Some((p.get_balance() / quantity * 1e6).round() / 1e6);
@@ -1218,20 +1228,12 @@ impl PortfolioServer {
         Parameters(input): Parameters<GetContextInput>,
     ) -> Result<Json<ContextOutput>, ToolError> {
         self.check_id(&input.portfolio_id)?;
-        self.check_data().await?;
         let format = input.format.unwrap_or_default();
-        let context = self
-            .context()
-            .await
-            .map_err(|_| ToolError::new("internal", "could not build the portfolio context"))?;
+        let context = self.context().await?;
         let (markdown, value) = match format {
             ContextFormat::Markdown => (Some(context.to_markdown()), None),
             ContextFormat::Json => {
-                let json = context
-                    .to_json()
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .ok_or_else(|| ToolError::new("internal", "could not serialize the context"))?;
+                let json = serde_json::to_value(&context).expect("the context serializes");
                 (None, Some(json))
             }
         };
@@ -1278,22 +1280,24 @@ fn findings_catalog() -> serde_json::Value {
 /// rmcp reports argument deserialization failures (wrong type, unknown
 /// field) as plain text. Re-shape them like every other tool error.
 fn structured_argument_error(response: CallToolResponse) -> CallToolResponse {
-    const PREFIX: &str = "failed to deserialize parameters:";
-    if let CallToolResponse::Complete(result) = &response {
-        if result.is_error == Some(true) && result.content.len() == 1 {
-            if let Some(text) = result.content[0].as_text() {
-                if let Some(rest) = text.text.strip_prefix(PREFIX) {
-                    let err = ToolError::invalid(format!("invalid arguments: {}", rest.trim()));
-                    if let Ok(r) =
-                        rmcp::handler::server::tool::IntoCallToolResult::into_call_tool_result(err)
-                    {
-                        return r;
-                    }
-                }
-            }
-        }
+    match argument_error(&response) {
+        Some(rest) => ToolError::invalid(format!("invalid arguments: {rest}")).into_response(),
+        None => response,
     }
-    response
+}
+
+/// The detail of rmcp's plain-text argument deserialization error, if
+/// `response` is one.
+fn argument_error(response: &CallToolResponse) -> Option<&str> {
+    const PREFIX: &str = "failed to deserialize parameters:";
+    let CallToolResponse::Complete(result) = response else {
+        return None;
+    };
+    if result.is_error != Some(true) || result.content.len() != 1 {
+        return None;
+    }
+    let text = result.content[0].as_text()?;
+    Some(text.text.strip_prefix(PREFIX)?.trim())
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1440,12 +1444,12 @@ impl ServerHandler for PortfolioServer {
         match uri {
             "portfolio://schema/positions" => {
                 let schema = serde_json::to_string_pretty(&schemars::schema_for!(PositionRow))
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                    .expect("static JSON serializes");
                 return Ok(text(uri, "application/schema+json", schema));
             }
             "portfolio://schema/findings" => {
                 let body = serde_json::to_string_pretty(&findings_catalog())
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                    .expect("static JSON serializes");
                 return Ok(text(uri, "application/json", body));
             }
             _ => {}
@@ -1457,12 +1461,10 @@ impl ServerHandler for PortfolioServer {
         }
         match what {
             "context.md" => {
-                if let Some(message) = self.data_error().await {
-                    return Err(McpError::internal_error(message, None));
-                }
-                let ctx = self.context().await.map_err(|_| {
-                    McpError::internal_error("could not build the portfolio context", None)
-                })?;
+                let ctx = self
+                    .context()
+                    .await
+                    .map_err(|e| McpError::internal_error(e.message, None))?;
                 Ok(text(uri, "text/markdown", ctx.to_markdown()))
             }
             "policy" => {
@@ -1473,8 +1475,7 @@ impl ServerHandler for PortfolioServer {
                     "source": self.served.state.policy_path().await.map_or("file", |_| "workspace"),
                     "policy": policy,
                 });
-                let body = serde_json::to_string_pretty(&body)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let body = serde_json::to_string_pretty(&body).expect("a JSON value serializes");
                 Ok(text(uri, "application/json", body))
             }
             "policy.md" => {

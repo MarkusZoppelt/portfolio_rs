@@ -370,17 +370,18 @@ impl ToolError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::new("invalid_argument", message)
     }
+
+    /// The `isError: true` tool result carrying this error as JSON text.
+    pub fn into_response(self) -> rmcp::model::CallToolResponse {
+        let body = serde_json::json!({ "error": { "code": self.code, "message": self.message } });
+        rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(body.to_string())])
+            .into()
+    }
 }
 
 impl rmcp::handler::server::tool::IntoCallToolResult for ToolError {
     fn into_call_tool_result(self) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
-        let body = serde_json::json!({ "error": { "code": self.code, "message": self.message } });
-        Ok(
-            rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
-                body.to_string(),
-            )])
-            .into(),
-        )
+        Ok(self.into_response())
     }
 }
 
