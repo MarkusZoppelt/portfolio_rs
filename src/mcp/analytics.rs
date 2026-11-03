@@ -1473,4 +1473,417 @@ mod tests {
             .unwrap();
         assert_eq!(classes, &vec![json!("widgets")]);
     }
+
+    fn priced(id: &str, class: &str, value: f64) -> PortfolioPosition {
+        let mut p = PortfolioPosition::for_test(Some(id), class, 1.0, value, PriceStatus::Live);
+        p.id = Some(id.into());
+        p
+    }
+
+    fn unpriced(
+        id: &str,
+        class: &str,
+        estimate: Option<(f64, ExcludedBasis)>,
+    ) -> PortfolioPosition {
+        let mut p =
+            PortfolioPosition::for_test(Some(id), class, 1.0, 0.0, PriceStatus::Unavailable);
+        p.id = Some(id.into());
+        p.excluded_estimate = estimate.map(|(v, b)| (dec(v), b));
+        p
+    }
+
+    fn portfolio(positions: Vec<PortfolioPosition>) -> Portfolio {
+        let mut pf = Portfolio::new();
+        for p in positions {
+            pf.add_position(p);
+        }
+        pf
+    }
+
+    fn policy(body: &str) -> Policy {
+        format!(
+            "version = \"1.0\"\nname = \"t\"\nbase_currency = \"EUR\"\n\
+             time_horizon_years = 10\nrisk_profile = \"moderate\"\n{body}"
+        )
+        .parse()
+        .unwrap()
+    }
+
+    const HALF_HALF: &str = "[[allocations]]\nasset_class = \"Stocks\"\ntarget_percent = 50.0\n\
+        [[allocations]]\nasset_class = \"Bonds\"\ntarget_percent = 50.0\n";
+
+    fn codes(check: &PolicyCheck) -> Vec<&str> {
+        check.findings.iter().map(|f| f.code.as_str()).collect()
+    }
+
+    #[test]
+    fn network_status_is_partial_with_some_quotes() {
+        let pf = portfolio(vec![
+            priced("a", "Stocks", 10.0),
+            unpriced("b", "Stocks", None),
+        ]);
+        assert_eq!(network_status(&pf), "partial");
+        assert_eq!(
+            network_status(&portfolio(vec![unpriced("b", "Stocks", None)])),
+            "offline"
+        );
+        assert_eq!(
+            network_status(&portfolio(vec![priced("a", "Stocks", 1.0)])),
+            "connected"
+        );
+    }
+
+    #[test]
+    fn share_range_bounds_own_and_other_exclusions() {
+        let d = dec;
+        // priced 50 of 100; own excluded up to 50, others up to 100.
+        let (min, max) = share_range(
+            d(50.0),
+            d(100.0),
+            (true, Some(d(50.0))),
+            (true, Some(d(100.0))),
+        );
+        assert_eq!(min, 25.0);
+        assert_eq!(max, 66.67);
+        // Unbounded on both sides.
+        assert_eq!(
+            share_range(d(50.0), d(100.0), (true, None), (true, None)),
+            (0.0, 100.0)
+        );
+        // No exclusions: the plain share.
+        assert_eq!(
+            share_range(d(50.0), d(100.0), (false, None), (false, None)),
+            (50.0, 50.0)
+        );
+    }
+
+    #[test]
+    fn range_status_needs_the_whole_range() {
+        assert_eq!(range_status(60.0, 70.0, 40.0, 50.0), "above_band");
+        assert_eq!(range_status(10.0, 30.0, 40.0, 50.0), "below_band");
+        assert_eq!(range_status(42.0, 48.0, 40.0, 50.0), "within_band");
+        assert_eq!(range_status(30.0, 45.0, 40.0, 50.0), "unknown");
+    }
+
+    /// A fresh last price bounds an excluded position at twice its value;
+    /// `allocation` is `allocation_with` under the default options.
+    #[test]
+    fn allocation_bounds_last_price_exclusions() {
+        let pf = portfolio(vec![
+            priced("a", "Stocks", 900.0),
+            unpriced("x", "Crypto", Some((50.0, ExcludedBasis::LastPrice))),
+        ]);
+        let pol = policy(HALF_HALF);
+        let a = allocation(&pf, Some(&pol), true, true);
+        assert_eq!(a.excluded_max, Some(dec(100.0)));
+        assert_eq!(a.excluded_positions, vec!["x".to_string()]);
+        assert!(!a.complete && !a.immaterial);
+        assert_eq!(a.excluded_value_basis, Some("last_price"));
+        let b = allocation_with(&pf, Some(&pol), true, true, &PolicyOptions::default());
+        assert_eq!(a.total, b.total);
+        assert_eq!(a.missing, b.missing);
+        assert_eq!(a.classes.len(), b.classes.len());
+    }
+
+    /// Partial data: Stocks is above its band whatever the excluded crypto
+    /// is worth; the drift uses the nearest possible share.
+    #[test]
+    fn partial_data_reports_certain_breaches_from_the_nearest_share() {
+        let pf = portfolio(vec![
+            priced("a", "Stocks", 900.0),
+            priced("b", "Bonds", 100.0),
+            unpriced("x", "Crypto", Some((50.0, ExcludedBasis::LastPrice))),
+        ]);
+        let pol = policy(&format!(
+            "[constraints]\nsingle_position_limit_percent = 50.0\n\
+             asset_class_limit_percent = 60.0\n{HALF_HALF}"
+        ));
+        let check = check_policy(&pf, &pol);
+        let band = check
+            .findings
+            .iter()
+            .find(|f| {
+                f.code == "allocation_out_of_band" && f.asset_class.as_deref() == Some("Stocks")
+            })
+            .expect("stocks above band");
+        assert_eq!(band.severity, Severity::Critical);
+        let detail = band.detail.as_ref().unwrap();
+        // min = 900 / (1000 + 2 * 50) = 81.82 %.
+        assert_eq!(detail["actualPercentMin"], json!(81.82));
+        assert_eq!(detail["driftPointsAtLeast"], json!(31.82));
+        // Both limits are certainly exceeded: "at least" the minimum share.
+        for code in ["single_position_limit", "asset_class_limit"] {
+            let f = check.findings.iter().find(|f| f.code == code).expect(code);
+            assert!(f.message.contains("at least 81.82%"), "{}", f.message);
+        }
+        assert!(codes(&check).contains(&"checks_incomplete"));
+    }
+
+    /// Immaterial exclusions: a class below its band that holds an unpriced
+    /// position may be lifted into it, so it is only a possible breach.
+    #[test]
+    fn immaterial_exclusion_in_a_class_below_band_is_possible() {
+        let pf = portfolio(vec![
+            priced("a", "Stocks", 100.0),
+            priced("b", "Bonds", 9_900.0),
+            unpriced("x", "Stocks", Some((1.0, ExcludedBasis::LastPrice))),
+        ]);
+        let check = check_policy(&pf, &policy(HALF_HALF));
+        let f = check
+            .findings
+            .iter()
+            .find(|f| f.code == "possible_breach")
+            .expect("possible_breach");
+        assert_eq!(f.asset_class.as_deref(), Some("Stocks"));
+        let detail = f.detail.as_ref().unwrap();
+        assert_eq!(detail["code"], "allocation_out_of_band");
+        assert_eq!(detail["basis"], "priced_part");
+        // Bonds holds no unpriced position: a plain breach.
+        assert!(check.findings.iter().any(
+            |f| f.code == "allocation_out_of_band" && f.asset_class.as_deref() == Some("Bonds")
+        ));
+    }
+
+    /// An invalid policy and too little cash are both reported; without
+    /// position or class limits no limit rows are produced.
+    #[test]
+    fn invalid_policy_and_low_cash_are_findings() {
+        let pf = portfolio(vec![
+            PortfolioPosition::for_test(None, "Cash", 10.0, 1.0, PriceStatus::Live),
+            priced("a", "Stocks", 100.0),
+        ]);
+        let mut pol = policy(
+            "[constraints]\nminimum_cash_amount = 1000.0\n\
+             [[allocations]]\nasset_class = \"Stocks\"\ntarget_percent = 100.0\n",
+        );
+        // Parsing validates; a policy edited in memory may no longer be valid.
+        pol.allocations[0].target_percent = 60.0;
+        let check = check_policy(&pf, &pol);
+        let c = codes(&check);
+        assert!(c.contains(&"invalid_policy"), "{c:?}");
+        let invalid = check
+            .findings
+            .iter()
+            .find(|f| f.code == "invalid_policy")
+            .unwrap();
+        assert_eq!(invalid.severity, Severity::Critical);
+        assert!(
+            invalid.message.contains("sum to 100%"),
+            "{}",
+            invalid.message
+        );
+        assert!(c.contains(&"cash_below_minimum_amount"), "{c:?}");
+        assert_eq!(check.checks.len(), 1);
+        assert_eq!(check.checks[0].code, "cash_below_minimum_amount");
+        assert!(!check.checks[0].passed);
+    }
+
+    /// Several possible position-limit breaches in one class merge into one
+    /// finding that lists every position.
+    #[test]
+    fn possible_breaches_per_class_are_merged() {
+        let pf = portfolio(vec![
+            priced("a", "Stocks", 400.0),
+            priced("b", "Stocks", 400.0),
+            priced("c", "Bonds", 200.0),
+            unpriced("x", "Crypto", None),
+        ]);
+        let pol = policy(&format!(
+            "[constraints]\nsingle_position_limit_percent = 30.0\n{HALF_HALF}"
+        ));
+        let check = check_policy(&pf, &pol);
+        let limit: Vec<_> = check
+            .findings
+            .iter()
+            .filter(|f| {
+                f.code == "possible_breach"
+                    && f.detail.as_ref().unwrap()["code"] == "single_position_limit"
+            })
+            .collect();
+        assert_eq!(limit.len(), 1, "{:?}", check.findings);
+        assert_eq!(limit[0].position_id.as_deref(), Some("a"));
+        assert_eq!(
+            limit[0].detail.as_ref().unwrap()["positionIds"],
+            json!(["a", "b"])
+        );
+    }
+
+    /// Complete data: a moderate drift is a warning, classes in band and an
+    /// empty targeted class are no band findings, a targeted class with no
+    /// holding is `missing_target_class`, and limits show exact shares.
+    #[test]
+    fn complete_data_judges_bands_and_limits_exactly() {
+        let pf = portfolio(vec![
+            priced("s1", "Stocks", 400.0),
+            priced("s2", "Stocks", 200.0),
+            priced("b", "Bonds", 300.0),
+            priced("g", "Gold", 100.0),
+        ]);
+        let pol = policy(
+            "[constraints]\nminimum_cash_months = 6\nsingle_position_limit_percent = 35.0\n\
+             asset_class_limit_percent = 55.0\n\
+             [[allocations]]\nasset_class = \"Stocks\"\ntarget_percent = 50.0\n\
+             [[allocations]]\nasset_class = \"Bonds\"\ntarget_percent = 30.0\n\
+             [[allocations]]\nasset_class = \"Gold\"\ntarget_percent = 10.0\n\
+             [[allocations]]\nasset_class = \"RealEstate\"\ntarget_percent = 10.0\n",
+        );
+        let check = check_policy(&pf, &pol);
+        let find = |code: &'static str| check.findings.iter().filter(move |f| f.code == code);
+        let band: Vec<_> = find("allocation_out_of_band").collect();
+        assert_eq!(band.len(), 1, "{:?}", check.findings);
+        assert_eq!(band[0].asset_class.as_deref(), Some("Stocks"));
+        // Drift +10 is not more than twice the tolerance of 5.
+        assert_eq!(band[0].severity, Severity::Warning);
+        let missing: Vec<_> = find("missing_target_class").collect();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].asset_class.as_deref(), Some("RealEstate"));
+        assert_eq!(find("cash_months_unavailable").count(), 1);
+        let pos: Vec<_> = find("single_position_limit").collect();
+        assert_eq!(pos.len(), 1);
+        assert_eq!(
+            pos[0].message,
+            "s1 is 40.00% of the portfolio (limit 35.00%)."
+        );
+        let class: Vec<_> = find("asset_class_limit").collect();
+        assert_eq!(class.len(), 1);
+        assert_eq!(
+            class[0].message,
+            "Stocks is 60.00% of the portfolio (limit 55.00%)."
+        );
+        assert!(find("checks_incomplete").next().is_none());
+        // Exact shares on the rows; the empty RealEstate class has no class row.
+        let s1 = check
+            .checks
+            .iter()
+            .find(|c| c.position_id.as_deref() == Some("s1"))
+            .unwrap();
+        assert_eq!(
+            (s1.actual_percent, s1.actual_percent_min),
+            (Some(40.0), None)
+        );
+        assert!(!s1.passed);
+        let class_rows: Vec<_> = check
+            .checks
+            .iter()
+            .filter(|c| c.code == "asset_class_limit")
+            .filter_map(|c| c.asset_class.as_deref())
+            .collect();
+        assert_eq!(class_rows, vec!["Stocks", "Bonds", "Gold"]);
+    }
+
+    /// Partial data: a certain breach close to its band is a warning, and a
+    /// class share range straddling the class limit is a possible breach.
+    #[test]
+    fn partial_data_warns_on_near_breaches_and_straddled_limits() {
+        let pf = portfolio(vec![
+            priced("s", "Stocks", 600.0),
+            priced("b", "Bonds", 400.0),
+            unpriced("x", "Crypto", Some((50.0, ExcludedBasis::LastPrice))),
+        ]);
+        let pol = policy(
+            "[constraints]\nasset_class_limit_percent = 57.0\n\
+             [[allocations]]\nasset_class = \"Stocks\"\ntarget_percent = 50.0\ntolerance_percent = 3.0\n\
+             [[allocations]]\nasset_class = \"Bonds\"\ntarget_percent = 50.0\ntolerance_percent = 3.0\n",
+        );
+        let check = check_policy(&pf, &pol);
+        let band = |class: &str| {
+            check
+                .findings
+                .iter()
+                .find(|f| {
+                    f.code == "allocation_out_of_band" && f.asset_class.as_deref() == Some(class)
+                })
+                .unwrap()
+        };
+        // Stocks: 54.55–60 % vs 47–53 %: at least 4.55 points above.
+        assert_eq!(band("Stocks").severity, Severity::Warning);
+        // Bonds: at most 40 % vs target 50 ±3: more than twice the tolerance.
+        assert_eq!(band("Bonds").severity, Severity::Critical);
+        let possible: Vec<_> = check
+            .findings
+            .iter()
+            .filter(|f| f.code == "possible_breach")
+            .collect();
+        assert_eq!(possible.len(), 1, "{:?}", check.findings);
+        assert_eq!(possible[0].asset_class.as_deref(), Some("Stocks"));
+        let d = possible[0].detail.as_ref().unwrap();
+        assert_eq!(d["code"], "asset_class_limit");
+        assert_eq!(
+            (d["actualPercentMin"].clone(), d["actualPercentMax"].clone()),
+            (json!(54.55), json!(60.0))
+        );
+        assert!(d.get("positionIds").is_none());
+        // The straddled limit gets no check row.
+        assert!(check
+            .checks
+            .iter()
+            .all(|c| c.asset_class.as_deref() != Some("Stocks")));
+    }
+
+    /// Immaterial cost-basis exclusions name the plausible-gain factor used.
+    #[test]
+    fn immaterial_note_names_the_gain_factor() {
+        let pf = portfolio(vec![
+            priced("s", "Stocks", 5_000.0),
+            priced("b", "Bonds", 5_000.0),
+            unpriced("x", "Bonds", Some((1.0, ExcludedBasis::CostBasis))),
+        ]);
+        let check = check_policy(&pf, &policy(HALF_HALF));
+        let note = check
+            .findings
+            .iter()
+            .find(|f| f.code == "checks_incomplete")
+            .unwrap();
+        assert!(
+            note.message
+                .contains("; 0.03% with plausible-gain factor 3x Bonds"),
+            "{}",
+            note.message
+        );
+        assert_eq!(
+            note.detail.as_ref().unwrap()["gainFactors"],
+            json!({"Bonds": 3.0})
+        );
+    }
+
+    #[test]
+    fn fixture_quotes_and_no_unknown_gain_classes() {
+        let mut pf = portfolio(vec![unpriced("b", "Stocks", None)]);
+        pf.quotes_fixture = true;
+        assert_eq!(network_status(&pf), "fixture");
+        let opts = PolicyOptions {
+            gain_factors: vec![("STOCKS".to_lowercase(), Some(2.0))],
+            ..PolicyOptions::default()
+        };
+        assert!(unknown_gain_factor_findings(&pf, &opts).is_empty());
+    }
+
+    /// A cash withdrawal (negative entry) is a `withdrawal`, a deposit a `deposit`.
+    #[test]
+    fn cash_entries_become_deposits_and_withdrawals() {
+        use crate::position::Purchase;
+        let mut cash = PortfolioPosition::for_test(None, "Cash", 70.0, 1.0, PriceStatus::Live);
+        cash.id = Some("cash".into());
+        cash.purchases = vec![
+            Purchase {
+                date: Some("2026-01-01".into()),
+                quantity: dec(100.0),
+                ..Default::default()
+            },
+            Purchase {
+                date: Some("2026-01-02".into()),
+                quantity: dec(-30.0),
+                ..Default::default()
+            },
+        ];
+        let txs = transactions(&portfolio(vec![cash]), "EUR", None);
+        let kinds: Vec<_> = txs.iter().map(|t| (t.tx_type, t.amount_base)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (TxType::Deposit, Some(100.0)),
+                (TxType::Withdrawal, Some(30.0))
+            ]
+        );
+    }
 }

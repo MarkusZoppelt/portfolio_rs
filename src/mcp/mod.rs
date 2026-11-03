@@ -287,3 +287,115 @@ async fn record_snapshot_on(
     let outcome = snapshots::upsert(&path, &snap)?;
     Ok((path, outcome, snap.complete))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::quotes::FixtureProvider;
+
+    fn example_data() -> String {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/example_data.json").to_string()
+    }
+
+    fn fixture() -> AnyProvider {
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/quotes_example.json"
+        ))
+        .unwrap();
+        AnyProvider::Fixture(Box::new(FixtureProvider::from_json(&json).unwrap()))
+    }
+
+    #[test]
+    fn offline_overrides_everything_but_a_fixture() {
+        let fx = fixture();
+        for offline in [false, true] {
+            assert_eq!(quote_provider(&fx, offline).source_name(), "fixture");
+            assert_eq!(
+                quote_provider(&AnyProvider::Offline, offline).source_name(),
+                "offline"
+            );
+        }
+        assert_eq!(
+            quote_provider(&AnyProvider::Yahoo, false).source_name(),
+            "yahoo"
+        );
+        assert_eq!(
+            quote_provider(&AnyProvider::Yahoo, true).source_name(),
+            "offline"
+        );
+    }
+
+    /// A workspace whose policy.toml does not load still serves the
+    /// portfolio and reports why the policy is missing.
+    #[tokio::test]
+    async fn workspace_with_a_broken_policy_reports_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("my-ws");
+        std::fs::create_dir_all(ws.join("portfolio")).unwrap();
+        std::fs::copy(example_data(), ws.join("positions.json")).unwrap();
+        std::fs::write(ws.join("portfolio/policy.toml"), "this is = not [valid").unwrap();
+        let served = load(&McpOptions {
+            workspace: Some(ws.to_string_lossy().into_owned()),
+            currency: "EUR".into(),
+            quotes: Some(fixture()),
+            data_dir: Some(tmp.path().join("data")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(served.mode, "workspace");
+        assert_eq!(served.label, "my-ws");
+        assert!(served.policy_error.is_some());
+        assert!(served.state.policy().await.is_none());
+        assert!(!served.state.portfolio().await.positions.is_empty());
+    }
+
+    /// Without a snapshot dir nothing is written and the error says how to
+    /// configure one; with one, the snapshot lands under the given date.
+    #[tokio::test]
+    async fn record_snapshot_needs_a_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = McpOptions {
+            file: Some(example_data()),
+            currency: "EUR".into(),
+            quotes: Some(fixture()),
+            data_dir: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let mut served = load(&opts).await.unwrap();
+        served.snapshots_path = None;
+        let err = record_snapshot_on(served, "2026-01-02").await.unwrap_err();
+        assert!(err.to_string().contains("no snapshot dir"), "{err}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+
+        let served = load(&opts).await.unwrap();
+        let (path, outcome, _) = record_snapshot_on(served, "2026-01-02").await.unwrap();
+        assert_eq!(path, tmp.path().join("main/snapshots.jsonl"));
+        assert_eq!(outcome, snapshots::Upsert::Written);
+        let (all, _) = snapshots::read(&path);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].date, "2026-01-02");
+    }
+
+    /// A positions file that does not parse never replaces a snapshot.
+    #[tokio::test]
+    async fn record_snapshot_refuses_a_broken_positions_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("positions.json");
+        std::fs::write(&file, "[{\"Name\": ").unwrap();
+        let data = tmp.path().join("data");
+        let served = load(&McpOptions {
+            file: Some(file.to_string_lossy().into_owned()),
+            currency: "EUR".into(),
+            quotes: Some(fixture()),
+            data_dir: Some(data.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let err = record_snapshot_on(served, "2026-01-02").await.unwrap_err();
+        assert!(err.to_string().contains("positions.json"), "{err}");
+        assert!(!data.exists());
+    }
+}

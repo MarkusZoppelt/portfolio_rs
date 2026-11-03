@@ -546,17 +546,127 @@ mod tests {
     }
 
     #[test]
-    fn data_dir_prefers_explicit_then_workspace() {
-        let ws = Path::new("/ws");
+    fn data_dir_prefers_explicit_then_env_then_workspace_then_xdg_then_home() {
+        use std::ffi::OsString;
+        let ws = Some(Path::new("/ws"));
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        };
+        let all: &[_] = &[
+            ("PORTFOLIO_RS_DATA_DIR", "/env"),
+            ("XDG_DATA_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+        ];
+        let p = |s: &str| Some(PathBuf::from(s));
+        assert_eq!(data_dir_with(Some(Path::new("/x")), ws, env(all)), p("/x"));
+        assert_eq!(data_dir_with(None, ws, env(all)), p("/env"));
+        let no_env: &[_] = &[("PORTFOLIO_RS_DATA_DIR", ""), ("XDG_DATA_HOME", "/xdg")];
         assert_eq!(
-            data_dir(Some(Path::new("/x")), Some(ws)).unwrap(),
-            PathBuf::from("/x")
+            data_dir_with(None, ws, env(no_env)),
+            p("/ws/portfolio/history")
         );
-        if std::env::var_os("PORTFOLIO_RS_DATA_DIR").is_none() {
-            assert_eq!(
-                data_dir(None, Some(ws)).unwrap(),
-                PathBuf::from("/ws/portfolio/history")
-            );
-        }
+        assert_eq!(
+            data_dir_with(None, None, env(no_env)),
+            p("/xdg/portfolio_rs")
+        );
+        let home: &[_] = &[("XDG_DATA_HOME", ""), ("HOME", "/home/u")];
+        assert_eq!(
+            data_dir_with(None, None, env(home)),
+            p("/home/u/.local/share/portfolio_rs")
+        );
+        // Empty values count as unset; nothing set means no data dir at all.
+        assert_eq!(data_dir_with(None, None, env(&[("HOME", "")])), None);
+        assert_eq!(data_dir_with(None, None, env(&[])), None);
+        // The real environment is consulted first-hand for an explicit dir.
+        assert_eq!(data_dir(Some(Path::new("/x")), None), p("/x"));
+    }
+
+    /// Blank lines are ignored; a line missing a field is `bad_date` when
+    /// its date is not strict and `incomplete_line` otherwise; optional
+    /// fields default (an old line is complete); the last line for a day wins.
+    #[test]
+    fn read_classifies_lines_and_defaults_old_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = snapshots_path(dir.path(), "main");
+        let mut old = serde_json::to_value(snap("2026-01-01", 1.0)).unwrap();
+        let o = old.as_object_mut().unwrap();
+        o.remove("complete");
+        o.remove("dataStatus");
+        o.remove("netFlowsBase");
+        let replaced = serde_json::to_value(snap("2026-01-01", 5.0)).unwrap();
+        let text = format!(
+            "{old}\n\n   \n{}\n{}\n{}\n{replaced}\n",
+            r#"{"date":"2026-1-2","baseCurrency":"EUR"}"#,
+            r#"{"baseCurrency":"EUR"}"#,
+            r#"{"date":"2026-01-03","baseCurrency":"EUR"}"#,
+        );
+        let text = format!("{text}{}\n", r#"{"date":"2026-01-04","totalBase":null}"#);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let (all, bad) = read(&path);
+        assert_eq!(
+            bad,
+            vec![
+                SkippedLine {
+                    line: 4,
+                    reason: "bad_date",
+                    date: Some("2026-1-2".into())
+                },
+                SkippedLine {
+                    line: 5,
+                    reason: "bad_date",
+                    date: None
+                },
+                SkippedLine {
+                    line: 6,
+                    reason: "incomplete_line",
+                    date: Some("2026-01-03".into())
+                },
+                SkippedLine {
+                    line: 8,
+                    reason: "total_base_null",
+                    date: Some("2026-01-04".into())
+                },
+            ]
+        );
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].total_base, 5.0);
+
+        // Without the replacement, the old line loads with its defaults.
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+        let (all, bad) = read(&path);
+        assert!(bad.is_empty());
+        assert!(all[0].complete);
+        assert_eq!(all[0].data_status, "complete");
+        assert_eq!(all[0].net_flows_base, 0.0);
+    }
+
+    #[test]
+    fn upsert_rejects_a_path_without_a_directory() {
+        let err = upsert(Path::new(""), &snap("2026-01-01", 1.0)).unwrap_err();
+        assert_eq!(err.to_string(), "bad snapshot path");
+    }
+
+    /// A failed rename reports the error and leaves no temp file behind.
+    #[test]
+    fn upsert_cleans_up_when_the_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = snapshots_path(dir.path(), "main");
+        // A non-empty directory where the file should go cannot be replaced.
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        let err = upsert(&path, &snap("2026-01-01", 1.0)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot replace the snapshot file"),
+            "{err:#}"
+        );
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("snapshots.jsonl")]);
     }
 }

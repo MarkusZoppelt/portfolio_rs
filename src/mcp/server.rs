@@ -1491,6 +1491,120 @@ impl ServerHandler for PortfolioServer {
 }
 
 #[cfg(test)]
+mod handler_tests {
+    use super::*;
+
+    fn approx(reason: &str) -> Finding {
+        Finding::new(
+            "performance_approximate",
+            Severity::Info,
+            Category::DataQuality,
+            reason.to_string(),
+        )
+        .detail(json!({ "reason": reason }))
+    }
+
+    #[test]
+    fn push_approximate_keeps_one_note_per_reason() {
+        let mut w = Vec::new();
+        push_approximate(&mut w, approx("modified_dietz"));
+        push_approximate(&mut w, approx("modified_dietz"));
+        push_approximate(&mut w, approx("manual_estimate"));
+        // Without a reason there is nothing to deduplicate on.
+        let plain = || {
+            Finding::new(
+                "performance_approximate",
+                Severity::Info,
+                Category::DataQuality,
+                "x".into(),
+            )
+        };
+        push_approximate(&mut w, plain());
+        push_approximate(&mut w, plain());
+        let reasons: Vec<_> = w
+            .iter()
+            .map(|f| f.detail.as_ref().map(|d| d["reason"].clone()))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                Some(json!("modified_dietz")),
+                Some(json!("manual_estimate")),
+                None,
+                None
+            ]
+        );
+    }
+
+    /// Only rmcp's single-text deserialization error is reshaped.
+    #[test]
+    fn only_plain_argument_errors_are_reshaped() {
+        let plain = |text: &str| -> CallToolResponse {
+            CallToolResult::error(vec![ContentBlock::text(text)]).into()
+        };
+        let r =
+            structured_argument_error(plain("failed to deserialize parameters: unknown field `x`"));
+        let expected = ToolError::invalid("invalid arguments: unknown field `x`").into_response();
+        assert_eq!(format!("{r:?}"), format!("{expected:?}"));
+        assert!(matches!(&expected, CallToolResponse::Complete(r) if r.is_error == Some(true)));
+        assert!(
+            format!("{r:?}").contains(r#"\"code\":\"invalid_argument\""#),
+            "{r:?}"
+        );
+
+        let unchanged = |resp: CallToolResponse| {
+            let before = format!("{resp:?}");
+            let after = format!("{:?}", structured_argument_error(resp));
+            assert_eq!(before, after);
+        };
+        unchanged(plain("some other failure"));
+        unchanged(
+            CallToolResult::success(vec![ContentBlock::text(
+                "failed to deserialize parameters: x",
+            )])
+            .into(),
+        );
+        unchanged(
+            CallToolResult::error(vec![
+                ContentBlock::text("failed to deserialize parameters: a"),
+                ContentBlock::text("b"),
+            ])
+            .into(),
+        );
+        unchanged(CallToolResult::error(vec![ContentBlock::image("AAAA", "image/png")]).into());
+        unchanged(CallToolResponse::InputRequired(
+            InputRequiredResult::from_request_state("state"),
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_tool_looks_up_the_router() {
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/quotes_example.json"
+        ))
+        .unwrap();
+        let quotes = crate::services::quotes::AnyProvider::Fixture(Box::new(
+            crate::services::quotes::FixtureProvider::from_json(&json).unwrap(),
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let served = crate::mcp::load(&crate::mcp::McpOptions {
+            file: Some(concat!(env!("CARGO_MANIFEST_DIR"), "/example_data.json").into()),
+            currency: "EUR".into(),
+            quotes: Some(quotes),
+            data_dir: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let server = PortfolioServer::new(served);
+        let tool = server.get_tool("get_performance").expect("known tool");
+        assert_eq!(tool.name, "get_performance");
+        assert!(server.get_tool("place_order").is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::period_window;
     use crate::mcp::dto::Period;
