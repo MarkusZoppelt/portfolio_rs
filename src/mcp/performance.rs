@@ -842,4 +842,159 @@ mod tests {
         tx.amount_base = None;
         assert!(position_effects(&s, &e, &[tx]).is_none());
     }
+
+    /// A manual position bought in the interval but absent at the start has
+    /// no start quantity to reconcile with: its unpriced buy is unknown.
+    #[test]
+    fn manual_position_appearing_with_an_unpriced_buy_is_unknown() {
+        let mut s = manual_snap("2026-01-01", 0.0, 0.0);
+        s.positions.clear();
+        s.total_base = 0.0;
+        let e = manual_snap("2026-01-02", 2.0, 300.0);
+        let tx = manual_buy("2026-01-02", 2.0, Some(100.0), "manual_unit_value");
+        let eff = &position_effects(&s, &e, &[tx]).unwrap()["apt"].1;
+        assert_eq!(eff.net_contributions, 300.0);
+        assert_eq!(eff.external_unknown, 300.0);
+        assert_eq!(eff.external_flows, 0.0);
+        assert_eq!(eff.manual_revaluation, 0.0);
+    }
+
+    /// Consistent quantities but no unit value (start quantity 0) and a
+    /// price that is not a manual unit value: the buy cannot be estimated.
+    #[test]
+    fn manual_addon_without_any_unit_value_is_unknown() {
+        let s = manual_snap("2026-01-01", 0.0, 0.0);
+        let e = manual_snap("2026-01-02", 2.0, 250.0);
+        let tx = manual_buy("2026-01-02", 2.0, Some(100.0), "recorded");
+        let eff = &position_effects(&s, &e, &[tx]).unwrap()["apt"].1;
+        assert_eq!(eff.net_contributions, 250.0);
+        assert_eq!(eff.external_unknown, 250.0);
+        assert_eq!(eff.manual_revaluation, 0.0);
+    }
+
+    /// A manual buy with a recorded amount is a known flow, also next to
+    /// an unpriced one: the priced part stays external, the rest unknown.
+    #[test]
+    fn manual_buys_with_amounts_are_known_flows() {
+        let s = manual_snap("2026-01-01", 1.0, 200.0);
+        let e = manual_snap("2026-01-02", 2.0, 450.0);
+        let mut priced = manual_buy("2026-01-02", 1.0, Some(220.0), "recorded");
+        priced.amount = Some(220.0);
+        priced.amount_base = Some(220.0);
+        let eff = &position_effects(&s, &e, std::slice::from_ref(&priced)).unwrap()["apt"].1;
+        assert_eq!(eff.net_contributions, 220.0);
+        assert_eq!(eff.external_flows, 220.0);
+        assert_eq!(eff.manual_revaluation, 30.0);
+
+        // Quantities disagree (1 → 2 with 2 bought): the unpriced buy is unknown.
+        let mut other = manual_buy("2026-01-02", 1.0, None, "missing");
+        other.id = "tx_apt_2".into();
+        let eff = &position_effects(&s, &e, &[priced, other]).unwrap()["apt"].1;
+        assert_eq!(eff.net_contributions, 250.0);
+        assert_eq!(eff.external_flows, 220.0);
+        assert_eq!(eff.external_unknown, 30.0);
+        assert_eq!(eff.manual_revaluation, 0.0);
+    }
+
+    /// One step (two points) keeps the overall split as it is.
+    #[test]
+    fn stepwise_split_needs_more_than_one_step() {
+        let pts = [
+            snap("2026-01-01", 100.0, 0.0),
+            snap("2026-01-02", 3_940.0, 6_160.0),
+        ];
+        let txs = vec![buy("2026-01-02", 3_840.0)];
+        let mut fx = position_effects(&pts[0], &pts[1], &txs).unwrap();
+        let before = fx.clone();
+        split_stepwise(&mut fx, &pts, &txs);
+        assert_eq!(fx, before);
+    }
+
+    /// A dated deposit with no security flow moves nothing between positions.
+    #[test]
+    fn deposit_without_security_flows_stays_external() {
+        let s = snap("2026-01-01", 100.0, 0.0);
+        let e = snap("2026-01-02", 110.0, 500.0);
+        let fx = position_effects(&s, &e, &[deposit("2026-01-02", 500.0)]).unwrap();
+        let c = group_by_class(&fx);
+        assert_eq!(c["Cash"].external_flows, 500.0);
+        assert_eq!(c["Cash"].internal_transfers, 0.0);
+        assert_eq!(c["Stocks"].internal_transfers, 0.0);
+        assert_eq!(c["Stocks"].market_effect, 10.0);
+    }
+
+    /// Deposit and buy of the same amount leave the cash balance unchanged;
+    /// the cash side of the transfer is split evenly over the cash positions.
+    #[test]
+    fn deposit_spent_on_a_buy_with_unchanged_cash_is_matched() {
+        let mut s = snap("2026-01-01", 100.0, 50.0);
+        let mut e = snap("2026-01-02", 200.0, 50.0);
+        for p in [&mut s, &mut e] {
+            p.positions.push(pos("c2", "cash", "Cash", 50.0));
+        }
+        let txs = vec![buy("2026-01-02", 100.0), deposit("2026-01-02", 100.0)];
+        let fx = position_effects(&s, &e, &txs).unwrap();
+        assert_eq!(fx["a"].1.internal_transfers, 100.0);
+        assert_eq!(fx["a"].1.external_flows, 0.0);
+        for id in ["c", "c2"] {
+            assert_eq!(fx[id].1.internal_transfers, -50.0, "{id}");
+            assert_eq!(fx[id].1.external_flows, 50.0, "{id}");
+        }
+        assert_eq!(total(&fx).internal_transfers, 0.0);
+    }
+
+    /// A step without a value keeps the overall split.
+    #[test]
+    fn stepwise_split_keeps_the_overall_split_when_a_step_is_unknown() {
+        let mut mid = snap("2026-01-02", 100.0, 10_000.0);
+        mid.positions[0].value_base = None;
+        let pts = [
+            snap("2026-01-01", 100.0, 0.0),
+            mid,
+            snap("2026-01-03", 3_940.0, 6_160.0),
+        ];
+        let txs = vec![buy("2026-01-03", 3_840.0)];
+        let mut fx = position_effects(&pts[0], &pts[2], &txs).unwrap();
+        let before = fx.clone();
+        split_stepwise(&mut fx, &pts, &txs);
+        assert_eq!(fx, before);
+    }
+
+    #[test]
+    fn twr_is_unknown_without_a_usable_span_or_denominator() {
+        let p = |d, a, c| snap(d, a, c);
+        // Fewer than two points.
+        assert_eq!(
+            twr(&[p("2026-01-01", 1.0, 0.0)], &[]),
+            (None, "modified_dietz")
+        );
+        assert_eq!(twr(&[], &[]), (None, "modified_dietz"));
+        // An unknown value, daily and not.
+        let mut unknown = p("2026-01-02", 1.0, 0.0);
+        unknown.positions[0].value_base = None;
+        assert_eq!(
+            twr(&[p("2026-01-01", 1.0, 0.0), unknown.clone()], &[]),
+            (None, "daily_twr")
+        );
+        unknown.date = "2026-01-05".into();
+        assert_eq!(
+            twr(&[p("2026-01-01", 1.0, 0.0), unknown], &[]),
+            (None, "modified_dietz")
+        );
+        // Daily, starting from nothing.
+        assert_eq!(
+            twr(&[p("2026-01-01", 0.0, 0.0), p("2026-01-02", 5.0, 0.0)], &[]),
+            (None, "daily_twr")
+        );
+        // Two points on the same day: no span.
+        assert_eq!(
+            twr(&[p("2026-01-01", 1.0, 0.0), p("2026-01-01", 2.0, 0.0)], &[]),
+            (None, "modified_dietz")
+        );
+        // Modified Dietz from nothing, without flows: zero denominator.
+        assert_eq!(
+            twr(&[p("2026-01-01", 0.0, 0.0), p("2026-01-11", 5.0, 0.0)], &[]),
+            (None, "modified_dietz")
+        );
+    }
 }
