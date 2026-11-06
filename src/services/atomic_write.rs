@@ -469,6 +469,7 @@ mod tests {
         assert_eq!(fs::read(&doc).unwrap(), b"x");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_failure_is_reported() {
         let tmp = TempDir::new().unwrap();
