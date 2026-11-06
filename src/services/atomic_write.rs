@@ -331,7 +331,7 @@ mod tests {
         // So the tempdir can clean up after itself.
         #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
-        fs::set_permissions(&path, &permissions).unwrap();
+        fs::set_permissions(&path, permissions.clone()).unwrap();
         let backup = backup_path(&path);
         if backup.exists() {
             fs::set_permissions(&backup, permissions).unwrap();
