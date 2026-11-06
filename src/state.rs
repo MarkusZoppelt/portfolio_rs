@@ -1817,6 +1817,7 @@ mod tests {
         assert_eq!(health.dir, dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_path_to_string_rejects_non_utf8() {
         use std::os::unix::ffi::OsStrExt;
