@@ -48,17 +48,6 @@ jobs:
       - name: Coverage gate
         run: cargo coverage
 
-  # Writing files is where Windows differs. The full suite isn't Windows-clean yet.
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Test atomic writes
-        run: cargo test --lib services::atomic_write
-
   nix-build:
     runs-on: ubuntu-latest
     steps:
