@@ -206,14 +206,31 @@ fn copy_backup(path: &Path) -> Result<()> {
     let bak = backup_path(path);
     std::fs::copy(path, &bak)
         .wrap_err_with(|| format!("failed to back up {} to {}", path.display(), bak.display()))?;
-    // Re-open read-only: `fs::copy` preserves mode, so a read-only source
-    // would make a write-only reopen fail. `fsync` works on a read fd.
     let context = format!("failed to open backup for flush: {}", bak.display());
-    let bak_file = std::fs::File::open(&bak).wrap_err(context)?;
+    let bak_file = open_for_flush(&bak).wrap_err(context)?;
     bak_file
         .sync_all()
         .wrap_err(format!("failed to flush backup to disk: {}", bak.display()))?;
     Ok(())
+}
+
+/// Open a file so that `sync_all` can flush it.
+///
+/// `fsync` works on a read fd, which also covers a read-only backup: `fs::copy`
+/// preserves mode, so a read-only source would make a write-only reopen fail.
+#[cfg(unix)]
+fn open_for_flush(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Open a file so that `sync_all` can flush it.
+///
+/// `FlushFileBuffers` needs a handle with write access, and fails on a read-only
+/// one with "Access is denied". A read-only target can't be replaced on Windows
+/// anyway, so saving over one fails here, with the target unchanged.
+#[cfg(not(unix))]
+fn open_for_flush(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new().write(true).open(path)
 }
 
 /// Best-effort: a failure here must not fail the write. The file rename has
@@ -296,6 +313,29 @@ mod tests {
         assert_eq!(names, vec!["positions.json".to_string()]);
         assert_no_temp_files(&names);
         assert!(!tmp.path().join("positions.json.bak").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_read_only_target_is_refused_and_left_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("positions.json");
+        fs::write(&path, b"original").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions.clone()).unwrap();
+
+        assert!(write_atomic_with_backup(&path, b"new").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+
+        // So the tempdir can clean up after itself.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, &permissions).unwrap();
+        let backup = backup_path(&path);
+        if backup.exists() {
+            fs::set_permissions(&backup, permissions).unwrap();
+        }
     }
 
     #[test]
