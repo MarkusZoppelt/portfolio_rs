@@ -37,8 +37,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Stay on 1.99.1. Rust 1.100 (LLVM 23.1.5, HIR-aware coverage spans)
+      # attributes counters for untaken branches to source lines, including
+      # closing braces and lines that are covered in a different generic
+      # instantiation. The same tests are 100% lines on 1.99.1 and 99.86%
+      # (26 missed lines) on 1.100. Do not move this job back to stable
+      # until `cargo coverage` is 100% lines on that compiler. The gate
+      # itself stays at 100%.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
