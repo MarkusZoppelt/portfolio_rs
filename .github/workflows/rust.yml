@@ -45,7 +45,7 @@ jobs:
       # until `cargo coverage` is 100% lines on that compiler. The gate
       # itself stays at 100%.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99.1
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
