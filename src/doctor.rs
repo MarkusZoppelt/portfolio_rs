@@ -290,10 +290,9 @@ mod tests {
     fn test_tracked_private_artifacts_warn() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path();
-        // git may be missing (e.g. sandboxed build); the check is then a no-op.
-        if git(dir, &["init", "-q"]) {
-            assert_tracked_artifacts_warn(dir);
-        }
+        // The Nix test check puts git on PATH (flake.nix), so this never skips.
+        assert!(git(dir, &["init", "-q"]), "git is required for this test");
+        assert_tracked_artifacts_warn(dir);
     }
 
     fn assert_tracked_artifacts_warn(dir: &Path) {
