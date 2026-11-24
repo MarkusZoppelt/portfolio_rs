@@ -13,6 +13,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     crane.url = "github:ipetkov/crane";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -20,12 +24,28 @@
     self,
     nixpkgs,
     crane,
+    rust-overlay,
     flake-utils,
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
-        pkgs = nixpkgs.legacyPackages.${system};
-        craneLib = crane.mkLib pkgs;
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [(import rust-overlay)];
+        };
+        # The latest stable Rust as of flake.lock, so the weekly lock update
+        # moves the compiler. The package and the checks get a minimal
+        # toolchain; the dev shell adds rust-analyzer, rust-src and llvm-tools
+        # (for `cargo coverage`, which CI runs in the dev shell) on the same
+        # version.
+        craneLib = (crane.mkLib pkgs).overrideToolchain (p:
+          p.rust-bin.stable.latest.minimal.override {
+            extensions = ["clippy" "rustfmt"];
+          });
+        devCraneLib = craneLib.overrideToolchain (p:
+          p.rust-bin.stable.latest.default.override {
+            extensions = ["llvm-tools-preview" "rust-analyzer" "rust-src"];
+          });
 
         commonArgs = {
           src = pkgs.lib.cleanSourceWith {
@@ -81,13 +101,11 @@
         };
 
         # Development shell
-        devShells.default = craneLib.devShell {
+        devShells.default = devCraneLib.devShell {
           packages = with pkgs;
             [
-              # Rust tooling
-              rust-analyzer
-              rustfmt
-              clippy
+              # Rust tooling (cargo, rustc, clippy, rustfmt and
+              # rust-analyzer come from the toolchain above)
               cargo-watch
               cargo-audit
               cargo-llvm-cov
@@ -102,11 +120,6 @@
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               libiconv
             ];
-
-          # `cargo coverage` (see .cargo/config.toml) needs llvm-cov and
-          # llvm-profdata from the same LLVM that rustc was built with.
-          LLVM_COV = "${pkgs.rustc.llvm}/bin/llvm-cov";
-          LLVM_PROFDATA = "${pkgs.rustc.llvm}/bin/llvm-profdata";
         };
 
         # Checks for `nix flake check`
