@@ -126,6 +126,8 @@
           portfolio_rs-test = craneLib.cargoTest (commonArgs
             // {
               inherit cargoArtifacts;
+              # The doctor tests build a real git repository.
+              nativeBuildInputs = commonArgs.nativeBuildInputs ++ [pkgs.git];
               # assert_cmd::cargo_bin resolves the binary via this env var,
               # which `cargo test` sets but crane's cargoTest does not.
               # Point it at the Nix-built binary so e2e_offline tests pass.
