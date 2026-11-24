@@ -406,8 +406,8 @@ impl PortfolioServer {
         };
         // Finance A6: policy status, counts, breaches and `findings` come
         // from the policy findings only. Data-quality warnings are added to
-        // the top-level `warnings` (deduplicated) but never change
-        // `policyStatus` or `counts`; `dataStatus` reports them.
+        // the top-level `warnings` but never change `policyStatus` or
+        // `counts`; `dataStatus` reports them.
         let same = |a: &Finding, b: &Finding| {
             a.code == b.code
                 && a.category == b.category
@@ -442,16 +442,16 @@ impl PortfolioServer {
             .filter(|f| f.severity == Severity::Warning)
             .cloned()
             .collect();
+        // Data-quality findings are their own category, so none repeats a
+        // policy warning; each one (e.g. one duplicate_ticker per ticker) is
+        // kept.
         if min <= Severity::Warning {
-            for q in check_quality
-                .into_iter()
-                .chain(analytics::data_quality(&portfolio))
-                .filter(|q| q.severity == Severity::Warning)
-            {
-                if !warnings.iter().any(|u| same(u, &q)) {
-                    warnings.push(q);
-                }
-            }
+            warnings.extend(
+                check_quality
+                    .into_iter()
+                    .chain(analytics::data_quality(&portfolio))
+                    .filter(|q| q.severity == Severity::Warning),
+            );
         }
         let findings = policy_findings;
         let (status, policy_status) = if counts.critical > 0 {

@@ -4299,3 +4299,47 @@ async fn get_performance_legacy_stale_start_has_no_positions() {
     assert_eq!(w["detail"]["positions"], json!([]), "{w}");
     assert!(w["message"].as_str().unwrap().contains("predates"), "{w}");
 }
+
+/// Every duplicated ticker gets its own `duplicate_ticker` warning in
+/// check_policy, as in get_positions.
+#[tokio::test]
+async fn check_policy_warns_about_every_duplicate_ticker() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("positions.json");
+    let lot = |ticker: &str, class: &str| {
+        json!({"Amount": 1, "AssetClass": class, "Name": ticker, "Ticker": ticker,
+               "Purchases": [{"Date": "2025/05/10", "Quantity": 1}]})
+    };
+    let positions = json!([
+        lot("SPY", "Stocks"),
+        lot("SPY", "Stocks"),
+        lot("TLT", "Bonds"),
+        lot("TLT", "Bonds"),
+    ]);
+    std::fs::write(&file, positions.to_string()).unwrap();
+    let client = connect(McpOptions {
+        file: Some(file.to_string_lossy().into_owned()),
+        ..opts()
+    })
+    .await;
+    let dup_tickers = |warnings: &Value| -> Vec<Value> {
+        warnings
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] == "duplicate_ticker")
+            .map(|w| w["detail"]["ticker"].clone())
+            .collect()
+    };
+    let positions = ok(&client, "get_positions", json!({})).await;
+    assert_eq!(
+        dup_tickers(&positions["warnings"]),
+        [json!("SPY"), json!("TLT")]
+    );
+    let check = ok(&client, "check_policy", json!({})).await;
+    assert_eq!(
+        dup_tickers(&check["warnings"]),
+        [json!("SPY"), json!("TLT")]
+    );
+    client.cancel().await.unwrap();
+}
