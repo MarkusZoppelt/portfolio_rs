@@ -28,6 +28,13 @@ cargo-llvm-cov and the matching LLVM tools. Outside it, install `cargo-llvm-cov`
 the `llvm-tools-preview` rustup component. When it fails, it lists the missing lines
 per file.
 
+- An `if`/`if let` without `else` counts its closing brace as a line: the arm where
+  the condition is false needs a test too.
+- A function compiled into both the unit-test and an integration-test binary counts
+  only the binary that covers more of it. Missed lines that are not listed come from
+  this (or from generic instantiations). Cover the whole function from one binary,
+  and keep non-generic logic out of generic functions.
+
 - New or changed code ships with tests in the same change. Don't lower the threshold,
   and don't add exclusions to get green.
 - Tests must assert behavior: outputs, errors, state, exit codes. A test that only

@@ -355,9 +355,7 @@ pub fn upsert(path: &Path, snap: &Snapshot) -> Result<Upsert> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).wrap_err("cannot replace the snapshot file");
     }
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
+    crate::services::atomic_write::sync_parent_dir(path);
     Ok(Upsert::Written)
 }
 

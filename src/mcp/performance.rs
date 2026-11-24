@@ -997,4 +997,38 @@ mod tests {
             (None, "modified_dietz")
         );
     }
+
+    /// A cash deposit without a base amount still counts as a dated deposit;
+    /// only the known amounts are summed.
+    #[test]
+    fn dated_cash_deposit_without_base_amount_counts_but_adds_nothing() {
+        let cash = |date: &str, tx_type, amount_base| Transaction {
+            id: format!("tx_c_{date}"),
+            tx_type,
+            position_id: "c".into(),
+            ticker: None,
+            asset_class: "Cash".into(),
+            amount_base,
+            ..buy(date, 0.0)
+        };
+        let ids = ["c".to_string()];
+        let unknown = [cash("2026-01-02", TxType::Deposit, None)];
+        assert_eq!(
+            dated_cash_deposits(&unknown, &ids, "2026-01-01", "2026-01-10"),
+            Some(0.0)
+        );
+        let mixed = [
+            cash("2026-01-02", TxType::Deposit, None),
+            cash("2026-01-03", TxType::Deposit, Some(40.0)),
+            cash("2026-01-04", TxType::Withdrawal, Some(10.0)),
+        ];
+        assert_eq!(
+            dated_cash_deposits(&mixed, &ids, "2026-01-01", "2026-01-10"),
+            Some(30.0)
+        );
+        assert_eq!(
+            dated_cash_deposits(&mixed, &ids, "2026-01-10", "2026-01-20"),
+            None
+        );
+    }
 }
