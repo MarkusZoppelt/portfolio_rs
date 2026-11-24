@@ -1791,6 +1791,28 @@ mod tests {
         assert_eq!(quantities, vec![1.0, 2.0]);
         assert_eq!(updated.position_id.as_deref(), Some(id.as_str()));
 
+        // Fields left out of the request keep their values.
+        let renamed = state
+            .update_position_by_key(
+                &PositionKey::Id(id.clone()),
+                UpdatePositionRequest {
+                    name: Some("Renamed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.name.as_deref(), Some("Renamed"));
+        assert_eq!(
+            (
+                renamed.ticker.as_deref(),
+                renamed.asset_class.as_str(),
+                renamed.amount
+            ),
+            (Some("FAKE2"), "Bonds", 3.0)
+        );
+        assert_eq!(renamed.purchases.len(), 2);
+
         let err = state
             .update_position_by_key(
                 &PositionKey::Id("pos_missing".to_string()),

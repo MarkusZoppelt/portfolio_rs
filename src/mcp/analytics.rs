@@ -1886,4 +1886,94 @@ mod tests {
             ]
         );
     }
+
+    /// Two unpriced lots of one ticker are one missing price, two positions
+    /// missing one FX rate are one pair, and classes that differ only in
+    /// case are one affected class.
+    #[test]
+    fn data_quality_lists_each_ticker_pair_and_class_once() {
+        let mut second = unpriced("x", "crypto", None);
+        second.id = Some("x2".into());
+        let no_fx = |id: &str| {
+            let mut p = PortfolioPosition::for_test(
+                Some(id),
+                "Stocks",
+                1.0,
+                0.0,
+                PriceStatus::FxUnavailable,
+            );
+            p.id = Some(id.into());
+            p.price_currency = Some("usd".into());
+            p
+        };
+        let pf = portfolio(vec![
+            unpriced("x", "Crypto", None),
+            second,
+            no_fx("f1"),
+            no_fx("f2"),
+        ]);
+        let dq = data_quality_summary(&pf, "eur");
+        assert_eq!(dq.missing_prices, vec!["x"]);
+        assert_eq!(dq.missing_fx, vec!["USD/EUR"]);
+        assert_eq!(dq.affected_positions, vec!["x", "x2", "f1", "f2"]);
+        assert_eq!(dq.affected_classes, vec!["Crypto", "Stocks"]);
+    }
+
+    /// Without a policy every held class is untargeted and none is missing;
+    /// an estimate in an assumed currency names that basis.
+    #[test]
+    fn allocation_without_policy_and_an_assumed_currency_estimate() {
+        let pf = portfolio(vec![
+            priced("a", "Stocks", 100.0),
+            unpriced("x", "Crypto", Some((10.0, ExcludedBasis::CostBasis))),
+            unpriced(
+                "y",
+                "Crypto",
+                Some((5.0, ExcludedBasis::CostBasisAssumedBase)),
+            ),
+        ]);
+        let a = allocation(&pf, None, true, true);
+        assert_eq!(a.untargeted, vec!["Stocks", "Crypto"]);
+        assert!(a.missing.is_empty());
+        assert_eq!(a.excluded_value_basis, Some("cost_basis_assumed_base"));
+        assert_eq!(a.excluded_positions, vec!["x", "y"]);
+    }
+
+    /// Partial data with every targeted class certainly inside its band, a
+    /// 0% target with no holding, and enough cash: no band, missing-class or
+    /// cash finding, and the cash check passes.
+    #[test]
+    fn partial_data_within_bands_and_enough_cash_pass() {
+        let pf = portfolio(vec![
+            priced("s", "Stocks", 450.0),
+            priced("b", "Bonds", 450.0),
+            PortfolioPosition::for_test(None, "Cash", 100.0, 1.0, PriceStatus::Live),
+            unpriced("x", "Crypto", Some((50.0, ExcludedBasis::LastPrice))),
+        ]);
+        let pol = policy(
+            "[constraints]\nminimum_cash_amount = 50.0\n\
+             [[allocations]]\nasset_class = \"Stocks\"\ntarget_percent = 45.0\n\
+             [[allocations]]\nasset_class = \"Bonds\"\ntarget_percent = 45.0\n\
+             [[allocations]]\nasset_class = \"Cash\"\ntarget_percent = 10.0\n\
+             [[allocations]]\nasset_class = \"Gold\"\ntarget_percent = 0.0\n",
+        );
+        let check = check_policy(&pf, &pol);
+        let c = codes(&check);
+        // Stocks is 40.91–45 % against 40–50 %: inside whatever crypto is worth.
+        for code in [
+            "allocation_out_of_band",
+            "possible_breach",
+            "missing_target_class",
+            "cash_below_minimum_amount",
+        ] {
+            assert!(!c.contains(&code), "{code} in {c:?}");
+        }
+        assert!(c.contains(&"checks_incomplete"), "{c:?}");
+        let cash = check
+            .checks
+            .iter()
+            .find(|r| r.code == "cash_below_minimum_amount")
+            .unwrap();
+        assert!(cash.passed);
+    }
 }

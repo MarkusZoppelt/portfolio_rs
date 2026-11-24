@@ -236,7 +236,7 @@ fn open_for_flush(path: &Path) -> std::io::Result<std::fs::File> {
 /// Best-effort: a failure here must not fail the write. The file rename has
 /// already committed the new contents.
 #[cfg(unix)]
-fn sync_parent_dir(path: &Path) {
+pub(crate) fn sync_parent_dir(path: &Path) {
     if let Ok(dir_file) = std::fs::File::open(parent_dir(path)) {
         let _ = dir_file.sync_all();
     }
@@ -252,7 +252,7 @@ fn parent_dir(path: &Path) -> &Path {
 }
 
 #[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) {}
+pub(crate) fn sync_parent_dir(_path: &Path) {}
 
 /// Removes the temp file unless [`TempFileGuard::disarm`] was called after a
 /// successful rename.
@@ -570,5 +570,26 @@ mod tests {
             parent_dir(Path::new("/var/tmp/positions.json")),
             Path::new("/var/tmp")
         );
+    }
+
+    /// A directory that can be written but not read (0300) cannot be opened
+    /// to fsync it. That is best-effort, so the write still succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_directory_still_gets_the_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("drop");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).unwrap();
+        let path = dir.join("positions.json");
+        let opened = fs::File::open(&dir).is_ok();
+        let result = write_atomic_with_backup(&path, b"[]");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        // Root (CAP_DAC_READ_SEARCH) reads a 0300 directory anyway, so the
+        // failed open this test is about cannot happen there.
+        assert!(!opened, "run the tests as a regular user, not as root");
+        result.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"[]");
     }
 }

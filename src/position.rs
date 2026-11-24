@@ -1013,6 +1013,27 @@ pub fn mark_stale_at(portfolio: &mut crate::portfolio::Portfolio, days: i64, now
 mod tests {
     use super::*;
 
+    /// A cache whose lock was poisoned by a panic is skipped: remembering
+    /// does not panic, and recalling falls back to the caller's error.
+    #[test]
+    fn a_poisoned_fallback_cache_is_skipped() {
+        let cache: Mutex<HashMap<String, u32>> = Mutex::default();
+        remember(&cache, "a".to_string(), 1);
+        assert_eq!(recall(&cache, "a", "miss"), Ok(1));
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _guard = cache.lock().unwrap();
+                    panic!("poison the cache");
+                })
+                .join();
+        });
+        assert!(cache.is_poisoned());
+        remember(&cache, "b".to_string(), 2);
+        assert_eq!(recall(&cache, "a", "miss"), Err("miss"));
+        assert_eq!(recall(&cache, "b", "miss"), Err("miss"));
+    }
+
     #[test]
     fn test_position_id_is_optional_and_not_invented_on_read() {
         let legacy = r#"[{"Name": "Cash", "AssetClass": "Cash", "Amount": 1}]"#;

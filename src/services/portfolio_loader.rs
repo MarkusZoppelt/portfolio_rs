@@ -151,6 +151,21 @@ pub async fn create_live_portfolio_in(
     .await
 }
 
+/// The positions in `positions_str`, or `None` when they do not parse (the
+/// error is printed when `log_errors`). Not generic, so it is compiled once
+/// rather than per quote provider.
+fn parse_positions(positions_str: &str, log_errors: bool) -> Option<Vec<PortfolioPosition>> {
+    match from_string(positions_str) {
+        Ok(positions) => Some(positions),
+        Err(e) => {
+            if log_errors {
+                eprintln!("Error parsing positions: {e:#}");
+            }
+            None
+        }
+    }
+}
+
 /// [`create_live_portfolio_in`] with an explicit [`QuoteProvider`] for quotes and FX.
 pub async fn create_live_portfolio_with<P: QuoteProvider>(
     provider: Arc<P>,
@@ -158,14 +173,8 @@ pub async fn create_live_portfolio_with<P: QuoteProvider>(
     base_currency: &str,
     log_errors: bool,
 ) -> (Portfolio, NetworkStatus) {
-    let positions = match from_string(&positions_str) {
-        Ok(p) => p,
-        Err(e) => {
-            if log_errors {
-                eprintln!("Error parsing positions: {e:#}");
-            }
-            return (Portfolio::new(), NetworkStatus::Disconnected);
-        }
+    let Some(positions) = parse_positions(&positions_str, log_errors) else {
+        return (Portfolio::new(), NetworkStatus::Disconnected);
     };
     let mut portfolio = Portfolio::new();
     portfolio.quotes_fixture = provider.is_fixture();
@@ -569,6 +578,23 @@ mod tests {
         assert!((eu.get_balance() - 250.0).abs() < 1e-9);
 
         assert!((portfolio.get_total_value() - 1370.0).abs() < 1e-9);
+    }
+
+    /// Positions that do not parse give an empty, disconnected portfolio,
+    /// whether or not the error is logged.
+    #[tokio::test]
+    async fn unparseable_positions_give_an_empty_portfolio() {
+        for log_errors in [false, true] {
+            let (portfolio, status) = create_live_portfolio_with(
+                Arc::new(fake_provider(true)),
+                "not json".to_string(),
+                "USD",
+                log_errors,
+            )
+            .await;
+            assert!(portfolio.positions.is_empty(), "log_errors {log_errors}");
+            assert_eq!(status, NetworkStatus::Disconnected);
+        }
     }
 
     #[tokio::test]

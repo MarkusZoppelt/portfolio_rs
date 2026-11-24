@@ -23,8 +23,10 @@ pub(super) fn get_historic_portfolio_data(
         .filter_map(|purchase| {
             let date = parse_purchase_date(purchase.date.as_deref()?)?;
             let price = purchase.effective_price()?;
-            (price > Decimal::ZERO && purchase.quantity > Decimal::ZERO)
-                .then(|| (date, to_f64(purchase.quantity * price)))
+            let invested = (price > Decimal::ZERO && purchase.quantity > Decimal::ZERO)
+                .then(|| to_f64(purchase.quantity * price))?;
+            // A product that underflows to zero adds nothing to the curve.
+            (invested > 0.0).then_some((date, invested))
         })
         .collect();
     purchase_events.sort_by_key(|event| event.0);
@@ -45,9 +47,8 @@ pub(super) fn get_historic_portfolio_data(
             cumulative_invested += invested;
         }
 
-        if cumulative_invested > 0.0 {
-            weekly_data.push((week_index as f64, cumulative_invested));
-        }
+        // Every event is positive and the first week holds the earliest one.
+        weekly_data.push((week_index as f64, cumulative_invested));
 
         current_date += chrono::Duration::days(7);
         week_index += 1;
@@ -211,6 +212,17 @@ mod tests {
                  "Purchases": [{"Quantity": 1, "Price": 10}, {"Date": "2025-01-01", "Quantity": 1}]}]"#,
         );
         assert!(get_historic_portfolio_data(&undated, now()).is_empty());
+
+        // An unreadable date, a sale, and a product that underflows Decimal
+        // to zero (1e-15 × 1e-15) invest nothing.
+        let nothing = unvalued(
+            r#"[{"Ticker": "SPY", "AssetClass": "Stocks", "Amount": 1,
+                 "Purchases": [{"Date": "someday", "Quantity": 1, "Price": 10},
+                               {"Date": "2025-01-01", "Quantity": -1, "Price": 10},
+                               {"Date": "2025-01-01", "Quantity": 0.000000000000001,
+                                "Price": 0.000000000000001}]}]"#,
+        );
+        assert!(get_historic_portfolio_data(&nothing, now()).is_empty());
     }
 
     #[test]

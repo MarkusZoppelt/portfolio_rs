@@ -821,12 +821,20 @@ mod tests {
         app.enter_edit_purchase_mode();
         assert_eq!(app.mode, AppMode::AddPurchase);
 
-        // Without a readable file the price is not prefilled.
-        app.positions_str = "not json".into();
+        // Without a readable file, without the position in it, or without a
+        // purchase list for it, the price is not prefilled.
         app.selected_purchase = 1;
-        app.enter_edit_purchase_mode();
-        assert_eq!(app.purchase_quantity_input, "2");
-        assert_eq!(app.purchase_price_input, "");
+        for file in [
+            "not json",
+            r#"[{"Name": "Other", "AssetClass": "Cash"}]"#,
+            r#"[{"Name": "Fake", "Ticker": "FAKE", "AssetClass": "Stocks", "Purchases": 3}]"#,
+        ] {
+            app.positions_str = file.into();
+            app.purchase_price_input = "stale".into();
+            app.enter_edit_purchase_mode();
+            assert_eq!(app.purchase_quantity_input, "2", "{file}");
+            assert_eq!(app.purchase_price_input, "", "{file}");
+        }
 
         app.edit_input = "1".into();
         app.exit_edit_mode();

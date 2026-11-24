@@ -141,6 +141,13 @@ fn test_token_file_new_and_unreplaceable() {
         "{err}"
     );
     assert!(dir.is_dir());
+
+    // Nothing to remove, but the directory for the new file is missing.
+    let err = write_token_file(&tmp.path().join("missing/token")).unwrap_err();
+    assert!(
+        err.to_string().contains("failed to write token file"),
+        "{err}"
+    );
 }
 
 /// `portfolio_rs api` loads the file and fails cleanly when the port is taken.

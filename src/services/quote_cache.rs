@@ -426,6 +426,26 @@ mod tests {
         assert!(expired.latest("FAKE").await.is_err());
     }
 
+    /// A previous close fetched before any price for the symbol is returned
+    /// but not cached: a cached previous close only pairs with a cached price.
+    #[tokio::test]
+    async fn previous_close_without_a_cached_price_is_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".p.json.quotes-cache.json");
+        let live = CachedProvider::new(
+            fixture(
+                r#"{"latest": {"FAKE": {"price": 2.5, "currency": "EUR"}},
+                    "previous_close": {"FAKE": 2.0}}"#,
+            ),
+            Some(path.clone()),
+            7,
+            true,
+        );
+        assert_eq!(live.previous_close("FAKE").await.unwrap(), 2.0);
+        live.flush().unwrap();
+        assert!(!path.exists(), "nothing to write");
+    }
+
     fn write(path: &Path, json: &str) {
         std::fs::write(path, json).unwrap();
     }

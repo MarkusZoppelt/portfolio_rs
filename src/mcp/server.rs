@@ -103,6 +103,54 @@ fn push_approximate(warnings: &mut Vec<Finding>, finding: Finding) {
     warnings.push(finding);
 }
 
+/// The file name of `path`, or `path` itself when it has none (`/`, `..`).
+fn file_label(path: &str) -> String {
+    std::path::Path::new(path).file_name().map_or_else(
+        || path.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Values each manual-position transaction that has no price at the
+/// holding's Amount/Quantity, so position_effects can estimate it, and
+/// returns the ids of those dated in `(start, end]`. A holding with nothing
+/// left keeps them unpriced. Market and cash transactions are left alone.
+fn price_manual_transactions(
+    txs: &mut [Transaction],
+    portfolio: &Portfolio,
+    start: &snapshots::Snapshot,
+    end: &snapshots::Snapshot,
+) -> Vec<String> {
+    let mut in_period = Vec::new();
+    for tx in txs {
+        if tx.amount.is_some() || tx.amount_base.is_some() {
+            continue;
+        }
+        // Every transaction comes from a position; only manual ones count.
+        let Some(p) = portfolio
+            .positions
+            .iter()
+            .find(|p| p.id() == Some(tx.position_id.as_str()))
+            .filter(|p| p.get_ticker().is_none() && !p.is_cash())
+        else {
+            continue;
+        };
+        let quantity = crate::money::to_f64(p.quantity_dec());
+        if quantity > 0.0 {
+            tx.price = Some((p.get_balance() / quantity * 1e6).round() / 1e6);
+            tx.price_source = "manual_unit_value".to_string();
+        }
+        if tx
+            .date
+            .as_deref()
+            .is_some_and(|d| d > start.date.as_str() && d <= end.date.as_str())
+        {
+            in_period.push(tx.id.clone());
+        }
+    }
+    in_period
+}
+
 /// `start_point_stale` / `end_point_stale` for a stored snapshot whose
 /// dataStatus is stale, naming its stale positions and adding them to
 /// `stale_positions`. A line written before snapshots recorded per-position
@@ -242,9 +290,7 @@ impl PortfolioServer {
 
     async fn data_error(&self) -> Option<String> {
         let mut e = self.served.state.positions_error().await?;
-        if let Some(name) = std::path::Path::new(&e.file).file_name() {
-            e.file = name.to_string_lossy().into_owned();
-        }
+        e.file = file_label(&e.file);
         Some(e.to_string())
     }
 
@@ -874,37 +920,9 @@ impl PortfolioServer {
         if !end_is_live {
             note_stale_point(&mut warnings, &mut meta.stale_positions, "end", &end);
         }
+        // Local copy only: get_transactions is unchanged.
         let mut txs = analytics::transactions(&portfolio, &base, None);
-        // Local copy only: a manual add-on with no price is valued at
-        // Amount/Quantity so position_effects can estimate it. get_transactions
-        // is unchanged.
-        let mut manual_unpriced = Vec::new();
-        for tx in &mut txs {
-            if tx.amount.is_some() || tx.amount_base.is_some() {
-                continue;
-            }
-            // Every transaction comes from a position; only manual ones count.
-            let Some(p) = portfolio
-                .positions
-                .iter()
-                .find(|p| p.id() == Some(tx.position_id.as_str()))
-                .filter(|p| p.get_ticker().is_none() && !p.is_cash())
-            else {
-                continue;
-            };
-            let quantity = crate::money::to_f64(p.quantity_dec());
-            if quantity > 0.0 {
-                tx.price = Some((p.get_balance() / quantity * 1e6).round() / 1e6);
-                tx.price_source = "manual_unit_value".to_string();
-            }
-            if tx
-                .date
-                .as_deref()
-                .is_some_and(|d| d > start.date.as_str() && d <= end.date.as_str())
-            {
-                manual_unpriced.push(tx.id.clone());
-            }
-        }
+        let manual_unpriced = price_manual_transactions(&mut txs, &portfolio, &start, &end);
         let gap = start_gap(&start);
         if gap > 0 {
             warnings.push(
@@ -1338,10 +1356,8 @@ impl ServerHandler for PortfolioServer {
         let mut tools = self.tool_router.list_all();
         if !self.served.network {
             // No tool reaches the network without a live quote provider.
-            for tool in &mut tools {
-                if let Some(a) = tool.annotations.as_mut() {
-                    a.open_world_hint = Some(false);
-                }
+            for a in tools.iter_mut().filter_map(|t| t.annotations.as_mut()) {
+                a.open_world_hint = Some(false);
             }
         }
         Ok(ListToolsResult::with_all_items(tools))
@@ -1575,6 +1591,158 @@ mod handler_tests {
         unchanged(CallToolResponse::InputRequired(
             InputRequiredResult::from_request_state("state"),
         ));
+    }
+
+    fn snap(date: &str, data_status: &str, stale: &[&str]) -> snapshots::Snapshot {
+        snapshots::Snapshot {
+            date: date.into(),
+            base_currency: "EUR".into(),
+            positions: stale
+                .iter()
+                .map(|id| snapshots::SnapshotPosition {
+                    ledger_base: None,
+                    position_id: (*id).into(),
+                    kind: "market".into(),
+                    asset_class: "Stocks".into(),
+                    quantity: 1.0,
+                    price: None,
+                    price_currency: None,
+                    fx_rate: None,
+                    value_base: Some(1.0),
+                    stale: Some(true),
+                })
+                .collect(),
+            cash_base: 0.0,
+            total_base: stale.len() as f64,
+            net_flows_base: 0.0,
+            complete: true,
+            data_status: data_status.into(),
+        }
+    }
+
+    /// A position stale at both ends is listed once, with a warning per point.
+    #[test]
+    fn a_position_stale_at_both_points_is_listed_once() {
+        let (mut warnings, mut ids) = (Vec::new(), Vec::new());
+        note_stale_point(
+            &mut warnings,
+            &mut ids,
+            "start",
+            &snap("2026-01-01", "stale", &["a"]),
+        );
+        note_stale_point(
+            &mut warnings,
+            &mut ids,
+            "end",
+            &snap("2026-01-02", "stale", &["a", "b"]),
+        );
+        assert_eq!(ids, vec!["a", "b"]);
+        let codes: Vec<_> = warnings.iter().map(|w| w.code.as_str()).collect();
+        assert_eq!(codes, vec!["start_point_stale", "end_point_stale"]);
+
+        // A fresh point adds nothing.
+        note_stale_point(
+            &mut warnings,
+            &mut ids,
+            "end",
+            &snap("2026-01-03", "complete", &["c"]),
+        );
+        assert_eq!((warnings.len(), ids.len()), (2, 2));
+        // A stale line without per-position markers names no positions.
+        let mut legacy = snap("2026-01-04", "stale", &["c"]);
+        legacy.positions[0].stale = None;
+        note_stale_point(&mut warnings, &mut ids, "start", &legacy);
+        assert_eq!(ids, vec!["a", "b"]);
+        assert!(
+            warnings[2].message.contains("predates"),
+            "{}",
+            warnings[2].message
+        );
+    }
+
+    #[test]
+    fn file_label_drops_the_directory() {
+        assert_eq!(file_label("/home/me/ws/positions.json"), "positions.json");
+        assert_eq!(file_label("positions.json"), "positions.json");
+        // Nothing to shorten: the path is kept as is.
+        assert_eq!(file_label("/"), "/");
+        assert_eq!(file_label("ws/.."), "ws/..");
+    }
+
+    /// Unpriced manual transactions get the holding's unit value; only those
+    /// dated in `(start, end]` are reported. A holding with nothing left,
+    /// priced transactions, market positions and unknown ids are untouched.
+    #[test]
+    fn manual_transactions_are_priced_and_reported_in_the_period() {
+        use crate::position::{PortfolioPosition, PriceStatus, Purchase};
+        let mut house =
+            PortfolioPosition::for_test(None, "RealEstate", 250.0, 0.0, PriceStatus::Live);
+        house.id = Some("house".into());
+        let mut sold = PortfolioPosition::for_test(None, "Art", 0.0, 0.0, PriceStatus::Live);
+        sold.id = Some("sold".into());
+        let lot = |q: f64| Purchase {
+            quantity: crate::money::dec(q),
+            ..Default::default()
+        };
+        sold.purchases = vec![lot(1.0), lot(-1.0)];
+        let mut spy =
+            PortfolioPosition::for_test(Some("SPY"), "Stocks", 1.0, 1.0, PriceStatus::Live);
+        spy.id = Some("spy".into());
+        let mut portfolio = Portfolio::new();
+        for p in [house, sold, spy] {
+            portfolio.add_position(p);
+        }
+        let tx = |id: &str, position: &str, date: Option<&str>| Transaction {
+            id: id.into(),
+            date: date.map(String::from),
+            synthesized: false,
+            date_source: None,
+            tx_type: TxType::Buy,
+            position_id: position.into(),
+            ticker: None,
+            asset_class: "RealEstate".into(),
+            quantity: 1.0,
+            price: None,
+            price_source: "none".into(),
+            fees: None,
+            amount: None,
+            currency: None,
+            amount_base: None,
+        };
+        let mut recorded = tx("recorded", "house", Some("2026-01-05"));
+        recorded.amount = Some(5.0);
+        let mut txs = vec![
+            tx("in", "house", Some("2026-01-05")),
+            tx("before", "house", Some("2026-01-01")),
+            tx("undated", "house", None),
+            tx("sold_out", "sold", Some("2026-01-05")),
+            recorded,
+            tx("market", "spy", Some("2026-01-05")),
+            tx("unknown", "gone", Some("2026-01-05")),
+        ];
+        let (start, end) = (
+            snap("2026-01-01", "complete", &[]),
+            snap("2026-01-10", "complete", &[]),
+        );
+        let ids = price_manual_transactions(&mut txs, &portfolio, &start, &end);
+        assert_eq!(ids, vec!["in", "sold_out"]);
+        let priced: Vec<_> = txs
+            .iter()
+            .map(|t| (t.id.as_str(), t.price, t.price_source.as_str()))
+            .collect();
+        let unit = (Some(250.0), "manual_unit_value");
+        assert_eq!(
+            priced,
+            vec![
+                ("in", unit.0, unit.1),
+                ("before", unit.0, unit.1),
+                ("undated", unit.0, unit.1),
+                ("sold_out", None, "none"),
+                ("recorded", None, "none"),
+                ("market", None, "none"),
+                ("unknown", None, "none"),
+            ]
+        );
     }
 
     #[tokio::test]

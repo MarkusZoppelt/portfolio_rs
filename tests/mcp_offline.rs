@@ -3913,45 +3913,36 @@ fn approx_reason<'a>(v: &'a Value, reason: &str) -> Vec<&'a Value> {
         .collect()
 }
 
-/// A same-step deposit and buy with no dated cash deposit books
-/// externalUnknown and must be flagged once, including with groupBy none.
-/// A window with no such flows must not carry the note. `complete` is not
-/// changed by the note.
-#[tokio::test]
-async fn external_unknown_flows_are_flagged_once() {
-    let tmp = TempDir::new().unwrap();
-    let buy_day = chrono::Local::now().date_naive() - chrono::Duration::days(1);
-    let data = tmp.path().join("positions.json");
-    let positions = json!([
-        {
-            "Name": "Index",
-            "AssetClass": "Stocks",
-            "Amount": 3940.0,
-            "Purchases": [
-                {"Date": "2020/01/02", "Quantity": 1, "Price": 100.0},
-                {"Date": buy_day.format("%Y/%m/%d").to_string(), "Quantity": 1, "Price": 3840.0}
-            ]
-        },
-        {"Name": "Cash", "AssetClass": "Cash", "Amount": 6160.0}
-    ]);
+/// A manual Stocks holding bought at 100 in 2020 and again at `price`
+/// yesterday.
+fn buy_yesterday(name: &str, price: f64) -> Value {
+    json!({
+        "Name": name,
+        "AssetClass": "Stocks",
+        "Amount": 100.0 + price,
+        "Purchases": [
+            {"Date": "2020/01/02", "Quantity": 1, "Price": 100.0},
+            {"Date": day(-1).replace('-', "/"), "Quantity": 1, "Price": price}
+        ]
+    })
+}
+
+/// Serves `positions` with a start snapshot a week ago in which cash is
+/// empty and every Stocks position is worth 100: yesterday's buys have no
+/// dated cash deposit, so they are flows of unknown origin.
+async fn unknown_flow_client(dir: &Path, positions: Value) -> Client {
+    let data = dir.join("positions.json");
     std::fs::write(&data, positions.to_string()).unwrap();
     let data = data.to_string_lossy().into_owned();
     let (path, _, _) = portfolio_rs::mcp::record_snapshot(&McpOptions {
         file: Some(data.clone()),
-        data_dir: Some(tmp.path().to_path_buf()),
+        data_dir: Some(dir.to_path_buf()),
         ..opts()
     })
     .await
     .unwrap();
-    let today: Value = serde_json::from_str(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .last()
-            .unwrap(),
-    )
-    .unwrap();
-    let mut start = today;
+    let mut start: Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim_end()).unwrap();
     start["date"] = json!(day(-7));
     let mut total = 0.0;
     for p in start["positions"].as_array_mut().unwrap() {
@@ -3967,11 +3958,28 @@ async fn external_unknown_flows_are_flagged_once() {
     start["cashBase"] = json!(0.0);
     start["totalBase"] = json!(total);
     std::fs::write(&path, format!("{start}\n")).unwrap();
-    let client = connect(McpOptions {
+    connect(McpOptions {
         file: Some(data),
-        data_dir: Some(tmp.path().to_path_buf()),
+        data_dir: Some(dir.to_path_buf()),
         ..opts()
     })
+    .await
+}
+
+/// A same-step deposit and buy with no dated cash deposit books
+/// externalUnknown and must be flagged once, including with groupBy none.
+/// A window with no such flows must not carry the note. `complete` is not
+/// changed by the note.
+#[tokio::test]
+async fn external_unknown_flows_are_flagged_once() {
+    let tmp = TempDir::new().unwrap();
+    let client = unknown_flow_client(
+        tmp.path(),
+        json!([
+            buy_yesterday("Index", 3840.0),
+            {"Name": "Cash", "AssetClass": "Cash", "Amount": 6160.0}
+        ]),
+    )
     .await;
     for group in ["assetClass", "none", "position"] {
         let v = ok(
@@ -4340,6 +4348,85 @@ async fn check_policy_warns_about_every_duplicate_ticker() {
     assert_eq!(
         dup_tickers(&check["warnings"]),
         [json!("SPY"), json!("TLT")]
+    );
+    client.cancel().await.unwrap();
+}
+
+/// Two positions of one class with flows of unknown origin: both are
+/// listed, the class once.
+#[tokio::test]
+async fn external_unknown_flows_name_each_class_once() {
+    let tmp = TempDir::new().unwrap();
+    let client = unknown_flow_client(
+        tmp.path(),
+        json!([
+            buy_yesterday("Index", 3840.0),
+            buy_yesterday("Fund", 1000.0),
+            {"Name": "Cash", "AssetClass": "Cash", "Amount": 6160.0}
+        ]),
+    )
+    .await;
+    let v = ok(&client, "get_performance", json!({"period": "week"})).await;
+    let notes = approx_reason(&v, "external_unknown_flows");
+    assert_eq!(notes.len(), 1, "{v}");
+    let detail = &notes[0]["detail"];
+    assert_eq!(
+        detail["positionIds"].as_array().unwrap().len(),
+        2,
+        "{detail}"
+    );
+    assert_eq!(detail["classes"], json!(["Stocks"]), "{detail}");
+    client.cancel().await.unwrap();
+}
+
+/// A position in the start snapshot that is no longer in the positions file
+/// still gets a breakdown row, without a name or ticker.
+#[tokio::test]
+async fn performance_breakdown_keeps_a_removed_position() {
+    let tmp = TempDir::new().unwrap();
+    let (path, today) = seed_today(tmp.path()).await;
+    let mut start = today;
+    start["date"] = json!(day(-1));
+    let mut gone = start["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "market")
+        .unwrap()
+        .clone();
+    gone["positionId"] = json!("pos_sold");
+    gone["valueBase"] = json!(100.0);
+    start["positions"].as_array_mut().unwrap().push(gone);
+    start["totalBase"] = json!(start["totalBase"].as_f64().unwrap() + 100.0);
+    std::fs::write(&path, format!("{start}\n")).unwrap();
+    let client = connect(McpOptions {
+        data_dir: Some(tmp.path().to_path_buf()),
+        ..opts()
+    })
+    .await;
+    let v = ok(
+        &client,
+        "get_performance",
+        json!({"period": "day", "groupBy": "position"}),
+    )
+    .await;
+    let rows = v["breakdown"].as_array().unwrap();
+    let sold = rows
+        .iter()
+        .find(|r| r["key"] == "pos_sold")
+        .unwrap_or_else(|| panic!("no row for the removed position: {v}"));
+    assert!(sold.get("name").is_none_or(Value::is_null), "{sold}");
+    assert!(sold.get("ticker").is_none_or(Value::is_null), "{sold}");
+    assert_eq!(
+        (sold["startValue"].clone(), sold["endValue"].clone()),
+        (json!(100.0), json!(0.0)),
+        "{sold}"
+    );
+    assert!(
+        rows.iter()
+            .filter(|r| r["key"] != "pos_sold")
+            .all(|r| r["name"].is_string()),
+        "{v}"
     );
     client.cancel().await.unwrap();
 }
