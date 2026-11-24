@@ -37,23 +37,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Stay on 1.99.1. Rust 1.100 (LLVM 23.1.5, HIR-aware coverage spans)
-      # attributes counters for untaken branches to source lines, including
-      # closing braces and lines that are covered in a different generic
-      # instantiation. The same tests are 100% lines on 1.99.1 and 99.86%
-      # (26 missed lines) on 1.100. Do not move this job back to stable
-      # until `cargo coverage` is 100% lines on that compiler. The gate
-      # itself stays at 100%.
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99.1
+      - uses: cachix/install-nix-action@v32
         with:
-          components: llvm-tools-preview
+          extra_nix_config: |
+            accept-flake-config = true
+      # The compiler comes from flake.lock, not the runner's rustup, so key
+      # the cache on the lock.
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      # The gate lives in .cargo/config.toml so CI, humans and agents run
-      # the same command: 100% line coverage, `*_io.rs` excluded.
+        with:
+          prefix-key: nix-${{ hashFiles('flake.lock') }}
+      # Coverage numbers depend on the compiler, so the gate runs in the dev
+      # shell: the toolchain and cargo-llvm-cov come from flake.lock, the same
+      # ones humans and agents use locally. A new Rust arrives with the weekly
+      # flake.lock update, which update-flake.yml measures before it opens the
+      # pull request. The gate itself lives in .cargo/config.toml: 100% lines,
+      # `*_io.rs` excluded.
       - name: Coverage gate
-        run: cargo coverage
+        run: nix develop -c cargo coverage
 
   nix-build:
     runs-on: ubuntu-latest

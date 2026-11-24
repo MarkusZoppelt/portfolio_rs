@@ -21,11 +21,23 @@ jobs:
         uses: cachix/install-nix-action@v32
         with:
           nix_path: nixpkgs=channel:nixos-25.11
+          extra_nix_config: |
+            accept-flake-config = true
 
       - name: Update flake.lock
         id: update
         run: |
           nix flake update
+
+      # A pull request opened with GITHUB_TOKEN does not trigger CI, and the
+      # new lock can bring a new Rust that moves clippy or coverage. Check the
+      # new lock here and report the outcome in the pull request.
+      - name: Check the new lock
+        id: check
+        continue-on-error: true
+        run: |
+          nix flake check
+          nix develop -c cargo coverage
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v8
@@ -36,7 +48,10 @@ jobs:
           body: |
             Automated update of flake.lock to the latest versions of inputs.
 
-            Please review the changes and merge if all checks pass.
+            `nix flake check` and `nix develop -c cargo coverage` on the new
+            lock: **${{ steps.check.outcome }}** (see the Update Flake run).
+            CI does not run on this pull request by itself; push to it or
+            close and reopen it to run CI.
           branch: automated/update-flake
           delete-branch: true
           labels: |

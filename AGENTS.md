@@ -23,10 +23,10 @@ not just the tests you touched.
 ## Coverage: 100% lines, enforced
 
 Every line under `src/` runs under `cargo test`. CI fails below 100%. The gate is
-the `coverage` alias in `.cargo/config.toml` (cargo-llvm-cov). The dev shell provides
-cargo-llvm-cov and the matching LLVM tools. Outside it, install `cargo-llvm-cov` and
-the `llvm-tools-preview` rustup component. When it fails, it lists the missing lines
-per file.
+the `coverage` alias in `.cargo/config.toml` (cargo-llvm-cov). Line counts depend on
+the compiler, so CI runs `nix develop -c cargo coverage`: the dev shell's toolchain
+(latest stable as of `flake.lock`) and cargo-llvm-cov. Run it the same way; another
+toolchain can disagree with CI. When it fails, it lists the missing lines per file.
 
 - An `if`/`if let` without `else` counts its closing brace as a line: the arm where
   the condition is false needs a test too.
